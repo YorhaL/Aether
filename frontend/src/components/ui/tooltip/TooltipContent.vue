@@ -13,6 +13,7 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  class: undefined,
   side: 'top',
   sideOffset: 4,
   align: 'center',

@@ -370,7 +370,7 @@ const props = defineProps<Props>()
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
-  'toggle-capability': [modelName: string, capName: string]
+  'toggleCapability': [modelName: string, capName: string]
 }>()
 
 const { success: showSuccess, error: showError } = useToast()
@@ -381,12 +381,6 @@ interface Props {
   capabilities?: CapabilityDefinition[]
   userConfigurableCapabilities?: CapabilityDefinition[]
   modelCapabilitySettings?: Record<string, Record<string, boolean>>
-}
-
-// 根据能力名称获取显示名称
-function getCapabilityDisplayName(capName: string): string {
-  const cap = props.capabilities?.find(c => c.name === capName)
-  return cap?.display_name || capName
 }
 
 // 获取模型支持的用户可配置能力
@@ -406,7 +400,7 @@ function isCapabilityEnabled(capName: string): boolean {
 // 切换能力
 function handleToggleCapability(capName: string) {
   if (!props.model) return
-  emit('toggle-capability', props.model.name, capName)
+  emit('toggleCapability', props.model.name, capName)
 }
 
 function handleClose() {
