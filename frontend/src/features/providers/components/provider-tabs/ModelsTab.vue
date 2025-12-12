@@ -221,9 +221,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  'edit-model': [model: Model]
-  'delete-model': [model: Model]
-  'batch-assign': []
+  'editModel': [model: Model]
+  'deleteModel': [model: Model]
+  'batchAssign': []
 }>()
 
 const { error: showError, success: showSuccess } = useToast()
@@ -350,17 +350,17 @@ function getStatusTitle(model: Model): string {
 
 // 编辑模型
 function editModel(model: Model) {
-  emit('edit-model', model)
+  emit('editModel', model)
 }
 
 // 删除模型
 function deleteModel(model: Model) {
-  emit('delete-model', model)
+  emit('deleteModel', model)
 }
 
 // 打开批量关联对话框
 function openBatchAssignDialog() {
-  emit('batch-assign')
+  emit('batchAssign')
 }
 
 // 切换模型启用状态
