@@ -31,6 +31,7 @@ import {
   getFrequencyLabel,
   getFrequencyClass
 } from '@/composables/useTTLAnalysis'
+import { log } from '@/utils/logger'
 
 // ==================== 缓存统计与亲和性列表 ====================
 
@@ -84,7 +85,7 @@ async function fetchCacheStats() {
     stats.value = await cacheApi.getStats()
   } catch (error) {
     showError('获取缓存统计失败')
-    console.error(error)
+    log.error('获取缓存统计失败', error)
   } finally {
     loading.value = false
   }
@@ -94,7 +95,7 @@ async function fetchCacheConfig() {
   try {
     config.value = await cacheApi.getConfig()
   } catch (error) {
-    console.error(error)
+    log.error('获取缓存配置失败', error)
   }
 }
 
@@ -110,7 +111,7 @@ async function fetchAffinityList(keyword?: string) {
     }
   } catch (error) {
     showError('获取缓存列表失败')
-    console.error(error)
+    log.error('获取缓存列表失败', error)
   } finally {
     listLoading.value = false
   }
@@ -159,7 +160,7 @@ async function clearUserCache(identifier: string, displayName?: string) {
     await fetchAffinityList(tableKeyword.value.trim() || undefined)
   } catch (error) {
     showError('清除失败')
-    console.error(error)
+    log.error('清除用户缓存失败', error)
   } finally {
     clearingRowAffinityKey.value = null
   }
@@ -189,7 +190,7 @@ async function clearAllCache() {
     await fetchAffinityList(tableKeyword.value.trim() || undefined)
   } catch (error) {
     showError('清除失败')
-    console.error(error)
+    log.error('清除所有缓存失败', error)
   }
 }
 

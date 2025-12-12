@@ -392,6 +392,7 @@ import SelectItem from '@/components/ui/select-item.vue'
 import { PageHeader, PageContainer, CardSection } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
 import { adminApi } from '@/api/admin'
+import { log } from '@/utils/logger'
 
 const { success, error } = useToast()
 
@@ -508,13 +509,13 @@ async function loadSystemConfig() {
         if (response.value !== null && response.value !== undefined) {
           (systemConfig.value as any)[key] = response.value
         }
-      } catch (err) {
+      } catch {
         // 配置不存在时使用默认值，无需处理
       }
     }
   } catch (err) {
     error('加载系统配置失败')
-    console.error('加载系统配置失败:', err)
+    log.error('加载系统配置失败:', err)
   }
 }
 
@@ -617,7 +618,7 @@ async function saveSystemConfig() {
     success('系统配置已保存')
   } catch (err) {
     error('保存配置失败')
-    console.error('保存配置失败:', err)
+    log.error('保存配置失败:', err)
   } finally {
     loading.value = false
   }

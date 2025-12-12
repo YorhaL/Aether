@@ -678,6 +678,7 @@ import {
 
 // 功能组件
 import UserFormDialog, { type UserFormData } from '@/features/users/components/UserFormDialog.vue'
+import { log } from '@/utils/logger'
 
 const { success, error } = useToast()
 const { confirmDanger, confirmWarning } = useConfirm()
@@ -775,7 +776,7 @@ async function loadUserStats() {
       return acc
     }, {})
   } catch (err) {
-    console.error('加载用户统计失败:', err)
+    log.error('加载用户统计失败:', err)
   } finally {
     loadingStats.value = false
   }
@@ -900,7 +901,7 @@ async function loadUserApiKeys(userId: string) {
   try {
     userApiKeys.value = await usersStore.getUserApiKeys(userId)
   } catch (err) {
-    console.error('加载API Keys失败:', err)
+    log.error('加载API Keys失败:', err)
     userApiKeys.value = []
   }
 }
@@ -932,7 +933,7 @@ async function copyApiKey() {
   try {
     await navigator.clipboard.writeText(newApiKey.value)
     success('API Key已复制到剪贴板')
-  } catch (err) {
+  } catch {
     error('复制失败，请手动复制')
   }
 }
@@ -966,7 +967,7 @@ async function copyFullKey(apiKey: any) {
     await navigator.clipboard.writeText(response.key)
     success('完整密钥已复制到剪贴板')
   } catch (err: any) {
-    console.error('复制密钥失败:', err)
+    log.error('复制密钥失败:', err)
     error(err.response?.data?.detail || '未知错误', '复制密钥失败')
   }
 }
@@ -1001,25 +1002,5 @@ async function deleteUser(user: any) {
   } catch (err: any) {
     error(err.response?.data?.detail || '未知错误', '删除用户失败')
   }
-}
-
-function getRelativeTime(dateString: string): string {
-  const date = new Date(dateString)
-  const now = new Date()
-  const diff = now.getTime() - date.getTime()
-
-  const seconds = Math.floor(diff / 1000)
-  const minutes = Math.floor(seconds / 60)
-  const hours = Math.floor(minutes / 60)
-  const days = Math.floor(hours / 24)
-  const months = Math.floor(days / 30)
-  const years = Math.floor(days / 365)
-
-  if (years > 0) return `${years}年前`
-  if (months > 0) return `${months}月前`
-  if (days > 0) return `${days}天前`
-  if (hours > 0) return `${hours}小时前`
-  if (minutes > 0) return `${minutes}分钟前`
-  return '刚刚'
 }
 </script>

@@ -689,6 +689,7 @@ import {
 
 import { StandaloneKeyFormDialog, type StandaloneKeyFormData } from '@/features/api-keys'
 import { parseNumberInput } from '@/utils/form'
+import { log } from '@/utils/logger'
 
 const { success, error } = useToast()
 const { confirmDanger } = useConfirm()
@@ -803,7 +804,7 @@ async function loadApiKeys() {
     apiKeys.value = response.api_keys
     total.value = response.total
   } catch (err: any) {
-    console.error('加载独立Keys失败:', err)
+    log.error('加载独立Keys失败:', err)
     error(err.response?.data?.detail || '加载独立 Keys 失败')
   } finally {
     loading.value = false
@@ -824,7 +825,7 @@ async function toggleApiKey(apiKey: AdminApiKey) {
     }
     success(response.message)
   } catch (err: any) {
-    console.error('切换密钥状态失败:', err)
+    log.error('切换密钥状态失败:', err)
     error(err.response?.data?.detail || '操作失败')
   }
 }
@@ -843,7 +844,7 @@ async function deleteApiKey(apiKey: AdminApiKey) {
     total.value = total.value - 1
     success(response.message)
   } catch (err: any) {
-    console.error('删除密钥失败:', err)
+    log.error('删除密钥失败:', err)
     error(err.response?.data?.detail || '删除失败')
   }
 }
@@ -916,7 +917,7 @@ async function handleAddBalance() {
     const amount = Math.abs(addBalanceAmount.value).toFixed(2)
     success(response.message || `余额${action}成功，${action} $${amount}`)
   } catch (err: any) {
-    console.error('余额调整失败:', err)
+    log.error('余额调整失败:', err)
     error(err.response?.data?.detail || '调整失败')
   } finally {
     addingBalance.value = false
@@ -931,7 +932,7 @@ async function copyKey() {
   try {
     await navigator.clipboard.writeText(newKeyValue.value)
     success('API Key 已复制到剪贴板')
-  } catch (err) {
+  } catch {
     error('复制失败，请手动复制')
   }
 }
@@ -943,7 +944,7 @@ async function copyKeyPrefix(apiKey: AdminApiKey) {
     await navigator.clipboard.writeText(response.key)
     success('完整密钥已复制到剪贴板')
   } catch (err) {
-    console.error('复制密钥失败:', err)
+    log.error('复制密钥失败:', err)
     error('复制失败，请重试')
   }
 }
@@ -1077,7 +1078,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
     closeKeyFormDialog()
     await loadApiKeys()
   } catch (err: any) {
-    console.error('保存独立Key失败:', err)
+    log.error('保存独立Key失败:', err)
     error(err.response?.data?.detail || '保存失败')
   } finally {
     keyFormDialogRef.value?.setSaving(false)

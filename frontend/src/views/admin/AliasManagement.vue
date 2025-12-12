@@ -252,6 +252,7 @@ import {
 } from '@/api/endpoints/aliases'
 import { listGlobalModels, type GlobalModelResponse } from '@/api/global-models'
 import { getProvidersSummary } from '@/api/endpoints/providers'
+import { log } from '@/utils/logger'
 
 const { success, error: showError } = useToast()
 const { confirmDanger } = useConfirm()
@@ -332,7 +333,7 @@ async function loadGlobalModelsList() {
     const response = await listGlobalModels()
     globalModels.value = response.models || []
   } catch (err: any) {
-    console.error('加载模型失败:', err)
+    log.error('加载模型失败:', err)
   }
 }
 

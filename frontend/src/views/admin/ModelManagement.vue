@@ -664,6 +664,7 @@ import {
   batchAssignToProviders,
   type GlobalModelResponse,
 } from '@/api/global-models'
+import { log } from '@/utils/logger'
 import {
   getAliases,
   createAlias,
@@ -997,7 +998,7 @@ async function loadGlobalModels() {
     // API 返回 { models: [...], total: number }
     globalModels.value = response.models || []
   } catch (err: any) {
-    console.error('加载模型失败:', err)
+    log.error('加载模型失败:', err)
     showError(err.response?.data?.detail || err.message, '加载模型失败')
   } finally {
     loading.value = false
@@ -1075,7 +1076,7 @@ async function loadModelProviders(_globalModelId: string) {
       selectedModelProviders.value = []
     }
   } catch (err: any) {
-    console.error('加载关联提供商失败:', err)
+    log.error('加载关联提供商失败:', err)
     showError(parseApiError(err, '加载关联提供商失败'), '错误')
     selectedModelProviders.value = []
   } finally {
@@ -1090,7 +1091,7 @@ async function loadModelAliases(globalModelId: string) {
     const aliases = await getAliases({ limit: 1000 })
     selectedModelAliases.value = aliases.filter(a => a.global_model_id === globalModelId)
   } catch (err: any) {
-    console.error('加载别名失败:', err)
+    log.error('加载别名失败:', err)
     selectedModelAliases.value = []
   } finally {
     loadingModelAliases.value = false
@@ -1295,12 +1296,6 @@ async function loadAliases() {
   }
 }
 
-function openCreateAliasDialog() {
-  editingAliasId.value = null
-  isTargetModelFixed.value = false  // 目标模型需要选择
-  createAliasDialogOpen.value = true
-}
-
 function openEditAliasDialog(alias: ModelAlias) {
   editingAliasId.value = alias.id
   isTargetModelFixed.value = false
@@ -1409,7 +1404,7 @@ async function loadCapabilities() {
   try {
     capabilities.value = await getAllCapabilities()
   } catch (err) {
-    console.error('Failed to load capabilities:', err)
+    log.error('Failed to load capabilities:', err)
   }
 }
 

@@ -460,7 +460,7 @@ async function loadLogs() {
     logs.value = data.items || []
     totalRecords.value = data.meta?.total ?? logs.value.length
   } catch (error) {
-    console.error('获取审计日志失败:', error)
+    log.error('获取审计日志失败:', error)
     logs.value = []
     totalRecords.value = 0
   } finally {
@@ -469,19 +469,6 @@ async function loadLogs() {
 }
 
 function refreshLogs() {
-  loadLogs()
-}
-
-function clearFilters() {
-  filters.value = {
-    userId: '',
-    eventType: '__all__',
-    days: 7,
-    limit: 50
-  }
-  filtersDaysString.value = '7'
-  filtersLimitString.value = '50'
-  currentPage.value = 1
   loadLogs()
 }
 
@@ -517,12 +504,6 @@ function handleDaysChange(value: string) {
   filtersDaysString.value = value
   filters.value.days = parseInt(value)
   resetAndLoad()
-}
-
-function handleLimitChange(value: string) {
-  filtersLimitString.value = value
-  filters.value.limit = parseInt(value)
-  loadLogs()
 }
 
 function resetAndLoad() {
@@ -578,12 +559,13 @@ async function exportLogs() {
     link.download = `audit-logs-${new Date().toISOString().split('T')[0]}.csv`
     link.click()
   } catch (error) {
-    console.error('导出失败:', error)
+    log.error('导出失败:', error)
   }
 }
 
 // 使用复用的行点击逻辑
 import { useRowClick } from '@/composables/useRowClick'
+import { log } from '@/utils/logger'
 const { handleMouseDown, shouldTriggerRowClick } = useRowClick()
 
 function handleRowClick(event: MouseEvent, log: AuditLog) {
