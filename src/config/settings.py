@@ -120,6 +120,23 @@ class Config:
         self.db_pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "3600"))
         self.db_pool_warn_threshold = int(os.getenv("DB_POOL_WARN_THRESHOLD", "70"))
 
+        # 并发控制配置
+        # CONCURRENCY_SLOT_TTL: 并发槽位 TTL（秒），防止死锁
+        # CACHE_RESERVATION_RATIO: 缓存用户预留比例（默认 30%）
+        self.concurrency_slot_ttl = int(os.getenv("CONCURRENCY_SLOT_TTL", "600"))
+        self.cache_reservation_ratio = float(os.getenv("CACHE_RESERVATION_RATIO", "0.3"))
+
+        # HTTP 请求超时配置（秒）
+        self.http_connect_timeout = float(os.getenv("HTTP_CONNECT_TIMEOUT", "10.0"))
+        self.http_write_timeout = float(os.getenv("HTTP_WRITE_TIMEOUT", "60.0"))
+        self.http_pool_timeout = float(os.getenv("HTTP_POOL_TIMEOUT", "10.0"))
+
+        # 流式处理配置
+        # STREAM_PREFETCH_LINES: 预读行数，用于检测嵌套错误
+        # STREAM_STATS_DELAY: 统计记录延迟（秒），等待流完全关闭
+        self.stream_prefetch_lines = int(os.getenv("STREAM_PREFETCH_LINES", "5"))
+        self.stream_stats_delay = float(os.getenv("STREAM_STATS_DELAY", "0.1"))
+
         # 验证连接池配置
         self._validate_pool_config()
 

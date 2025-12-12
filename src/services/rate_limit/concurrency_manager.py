@@ -13,7 +13,7 @@ import asyncio
 import math
 import os
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import timedelta  # noqa: F401 - kept for potential future use
 from typing import Optional, Tuple
 
 import redis.asyncio as aioredis
@@ -185,8 +185,8 @@ class ConcurrencyManager:
         key_id: str,
         key_max_concurrent: Optional[int],
         is_cached_user: bool = False,  # 新增：是否是缓存用户
-        cache_reservation_ratio: float = 0.3,  # 新增：缓存预留比例
-        ttl_seconds: int = 600,  # 10分钟 TTL，防止死锁
+        cache_reservation_ratio: Optional[float] = None,  # 缓存预留比例，None 时从配置读取
+        ttl_seconds: Optional[int] = None,  # TTL 秒数，None 时从配置读取
     ) -> bool:
         """
         尝试获取并发槽位（支持缓存用户优先级）
@@ -197,8 +197,8 @@ class ConcurrencyManager:
             key_id: ProviderAPIKey ID
             key_max_concurrent: Key 最大并发数（None 表示不限制）
             is_cached_user: 是否是缓存用户（缓存用户可使用全部槽位）
-            cache_reservation_ratio: 缓存预留比例（默认30%，只对新用户生效）
-            ttl_seconds: TTL 秒数，防止异常情况下的死锁
+            cache_reservation_ratio: 缓存预留比例，None 时从配置读取
+            ttl_seconds: TTL 秒数，None 时从配置读取
 
         Returns:
             是否成功获取（True/False）
@@ -209,6 +209,14 @@ class ConcurrencyManager:
         - 缓存用户最多使用: 10个槽位（全部）
         - 预留的3个槽位专门给缓存用户，保证他们的请求优先
         """
+        # 从配置读取默认值
+        from src.config.settings import config
+
+        if cache_reservation_ratio is None:
+            cache_reservation_ratio = config.cache_reservation_ratio
+        if ttl_seconds is None:
+            ttl_seconds = config.concurrency_slot_ttl
+
         if self._redis is None:
             async with self._memory_lock:
                 endpoint_count = self._memory_endpoint_counts.get(endpoint_id, 0)
@@ -426,7 +434,7 @@ class ConcurrencyManager:
         key_id: str,
         key_max_concurrent: Optional[int],
         is_cached_user: bool = False,  # 新增：是否是缓存用户
-        cache_reservation_ratio: float = 0.3,  # 新增：缓存预留比例
+        cache_reservation_ratio: Optional[float] = None,  # 缓存预留比例，None 时从配置读取
     ):
         """
         并发控制上下文管理器（支持缓存用户优先级）
@@ -441,6 +449,12 @@ class ConcurrencyManager:
 
         如果获取失败，会抛出 ConcurrencyLimitError 异常
         """
+        # 从配置读取默认值
+        from src.config.settings import config
+
+        if cache_reservation_ratio is None:
+            cache_reservation_ratio = config.cache_reservation_ratio
+
         # 尝试获取槽位（传递缓存用户参数）
         acquired = await self.acquire_slot(
             endpoint_id,
