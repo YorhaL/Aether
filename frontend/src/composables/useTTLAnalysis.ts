@@ -11,6 +11,7 @@ import {
   type IntervalTimelineResponse
 } from '@/api/cache'
 import type { ChartData } from 'chart.js'
+import { log } from '@/utils/logger'
 
 // 时间范围选项
 export const ANALYSIS_HOURS_OPTIONS = [
@@ -104,7 +105,7 @@ export function useTTLAnalysis() {
       }
     } catch (error) {
       showError('获取 TTL 分析失败')
-      console.error(error)
+      log.error('获取 TTL 分析失败', error)
     } finally {
       ttlAnalysisLoading.value = false
     }
@@ -119,7 +120,7 @@ export function useTTLAnalysis() {
       })
     } catch (error) {
       showError('获取缓存命中分析失败')
-      console.error(error)
+      log.error('获取缓存命中分析失败', error)
     } finally {
       hitAnalysisLoading.value = false
     }
@@ -136,7 +137,7 @@ export function useTTLAnalysis() {
       })
     } catch (error) {
       showError('获取用户时间线数据失败')
-      console.error(error)
+      log.error('获取用户时间线数据失败', error)
     } finally {
       userTimelineLoading.value = false
     }

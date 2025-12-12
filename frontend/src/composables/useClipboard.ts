@@ -1,4 +1,5 @@
 import { useToast } from './useToast'
+import { log } from '@/utils/logger'
 
 export function useClipboard() {
   const { success, error: showError } = useToast()
@@ -33,7 +34,7 @@ export function useClipboard() {
         document.body.removeChild(textArea)
       }
     } catch (err) {
-      console.error('复制失败:', err)
+      log.error('复制失败:', err)
       showError('复制失败，请手动选择文本进行复制')
       return false
     }
