@@ -158,6 +158,9 @@ const props = withDefaults(defineProps<{
   subtitle?: string
   showHeader?: boolean
 }>(), {
+  data: undefined,
+  title: undefined,
+  subtitle: undefined,
   showHeader: true
 })
 
