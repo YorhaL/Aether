@@ -271,3 +271,71 @@ export const cacheAnalysisApi = {
     return response.data
   }
 }
+
+// ==================== 模型映射缓存管理 API ====================
+
+// 映射条目
+export interface ModelMappingItem {
+  mapping_name: string
+  global_model_name: string | null
+  global_model_display_name: string | null
+  providers: string[]
+  ttl: number | null
+}
+
+// 未映射的条目（NOT_FOUND、invalid、error）
+export interface UnmappedEntry {
+  mapping_name: string
+  status: 'not_found' | 'invalid' | 'error'
+  ttl: number | null
+}
+
+export interface ModelMappingCacheStats {
+  available: boolean
+  message?: string
+  ttl_seconds?: number
+  total_keys?: number
+  breakdown?: {
+    model_by_id: number
+    model_by_provider_global: number
+    global_model_by_id: number
+    global_model_by_name: number
+    global_model_resolve: number
+  }
+  mappings?: ModelMappingItem[]
+  unmapped?: UnmappedEntry[] | null
+}
+
+export interface ClearModelMappingCacheResponse {
+  status: string
+  message: string
+  deleted_count?: number
+  model_name?: string
+  deleted_keys?: string[]
+}
+
+export const modelMappingCacheApi = {
+  /**
+   * 获取模型映射缓存统计
+   */
+  async getStats(): Promise<ModelMappingCacheStats> {
+    const response = await api.get('/api/admin/monitoring/cache/model-mapping/stats')
+    return response.data.data
+  },
+
+  /**
+   * 清除所有模型映射缓存
+   */
+  async clearAll(): Promise<ClearModelMappingCacheResponse> {
+    const response = await api.delete('/api/admin/monitoring/cache/model-mapping')
+    return response.data
+  },
+
+  /**
+   * 清除指定模型名称的映射缓存
+   */
+  async clearByName(modelName: string): Promise<ClearModelMappingCacheResponse> {
+    const response = await api.delete(`/api/admin/monitoring/cache/model-mapping/${encodeURIComponent(modelName)}`)
+    return response.data
+  }
+}
