@@ -123,7 +123,7 @@ class AdminListGlobalModelsAdapter(AdminApiAdapter):
     async def handle(self, context):  # type: ignore[override]
         from sqlalchemy import func
 
-        from src.models.database import Model, ModelMapping
+        from src.models.database import Model
 
         models = GlobalModelService.list_global_models(
             db=context.db,
@@ -144,17 +144,8 @@ class AdminListGlobalModelsAdapter(AdminApiAdapter):
                 or 0
             )
 
-            # 统计别名数量
-            alias_count = (
-                context.db.query(func.count(ModelMapping.id))
-                .filter(ModelMapping.target_global_model_id == gm.id)
-                .scalar()
-                or 0
-            )
-
             response = GlobalModelResponse.model_validate(gm)
             response.provider_count = provider_count
-            response.alias_count = alias_count
             # usage_count 直接从 GlobalModel 表读取，已在 model_validate 中自动映射
             model_responses.append(response)
 

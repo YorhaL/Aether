@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.base.admin_adapter import AdminApiAdapter
@@ -26,7 +25,6 @@ from src.models.pydantic_models import (
 from src.models.database import (
     GlobalModel,
     Model,
-    ModelMapping,
     Provider,
 )
 from src.models.pydantic_models import (
@@ -136,8 +134,7 @@ async def get_provider_available_source_models(
     获取该 Provider 支持的所有统一模型名（source_model）
 
     包括：
-    1. 通过 ModelMapping 映射的模型
-    2. 直连模型（Model.provider_model_name 直接作为统一模型名）
+    1. 直连模型（Model.provider_model_name 直接作为统一模型名）
     """
     adapter = AdminGetProviderAvailableSourceModelsAdapter(provider_id=provider_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -294,10 +291,9 @@ class AdminGetProviderAvailableSourceModelsAdapter(AdminApiAdapter):
         """
         返回 Provider 支持的所有 GlobalModel
 
-        方案 A 逻辑：
+        逻辑：
         1. 查询该 Provider 的所有 Model
         2. 通过 Model.global_model_id 获取 GlobalModel
-        3. 查询所有指向该 GlobalModel 的别名（ModelMapping.alias）
         """
         db = context.db
         provider = db.query(Provider).filter(Provider.id == self.provider_id).first()
@@ -324,27 +320,10 @@ class AdminGetProviderAvailableSourceModelsAdapter(AdminApiAdapter):
 
             # 如果该 GlobalModel 还未处理，初始化
             if global_model_name not in global_models_dict:
-                # 查询指向该 GlobalModel 的所有别名/映射
-                alias_rows = (
-                    db.query(ModelMapping.source_model)
-                    .filter(
-                        ModelMapping.target_global_model_id == global_model.id,
-                        ModelMapping.is_active == True,
-                        or_(
-                            ModelMapping.provider_id == self.provider_id,
-                            ModelMapping.provider_id.is_(None),
-                        ),
-                    )
-                    .all()
-                )
-                alias_list = [alias[0] for alias in alias_rows]
-
                 global_models_dict[global_model_name] = {
                     "global_model_name": global_model_name,
                     "display_name": global_model.display_name,
                     "provider_model_name": model.provider_model_name,
-                    "has_alias": len(alias_list) > 0,
-                    "aliases": alias_list,
                     "model_id": model.id,
                     "price": {
                         "input_price_per_1m": model.get_effective_input_price(),

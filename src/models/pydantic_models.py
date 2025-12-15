@@ -7,8 +7,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from .api import ModelCreate
-
 
 # ========== 阶梯计费相关模型 ==========
 
@@ -131,24 +129,14 @@ class ModelCatalogProviderDetail(BaseModel):
     supports_function_calling: Optional[bool] = None
     supports_streaming: Optional[bool] = None
     is_active: bool
-    mapping_id: Optional[str]
-
-
-class OrphanedModel(BaseModel):
-    """孤立的统一模型（Mapping 存在但 GlobalModel 缺失）"""
-
-    alias: str  # 别名
-    global_model_name: Optional[str]  # 关联的 GlobalModel 名称（如果有）
-    mapping_count: int
 
 
 class ModelCatalogItem(BaseModel):
-    """统一模型目录条目（方案 A：基于 GlobalModel）"""
+    """统一模型目录条目（基于 GlobalModel）"""
 
     global_model_name: str  # GlobalModel.name
     display_name: str  # GlobalModel.display_name
     description: Optional[str]  # GlobalModel.description
-    aliases: List[str]  # 所有指向该 GlobalModel 的别名列表
     providers: List[ModelCatalogProviderDetail]  # 支持该模型的 Provider 列表
     price_range: ModelPriceRange  # 价格区间（从所有 Provider 的 Model 中聚合）
     total_providers: int
@@ -160,7 +148,6 @@ class ModelCatalogResponse(BaseModel):
 
     models: List[ModelCatalogItem]
     total: int
-    orphaned_models: List[OrphanedModel]
 
 
 class ProviderModelPriceInfo(BaseModel):
@@ -174,13 +161,11 @@ class ProviderModelPriceInfo(BaseModel):
 
 
 class ProviderAvailableSourceModel(BaseModel):
-    """Provider 支持的统一模型条目（方案 A）"""
+    """Provider 支持的统一模型条目"""
 
     global_model_name: str  # GlobalModel.name
     display_name: str  # GlobalModel.display_name
     provider_model_name: str  # Model.provider_model_name (Provider 侧的模型名)
-    has_alias: bool  # 是否有别名指向该 GlobalModel
-    aliases: List[str]  # 别名列表
     model_id: Optional[str]  # Model.id
     price: ProviderModelPriceInfo
     capabilities: ModelCapabilities
@@ -194,50 +179,7 @@ class ProviderAvailableSourceModelsResponse(BaseModel):
     total: int
 
 
-class BatchAssignProviderConfig(BaseModel):
-    """批量添加映射的 Provider 配置"""
-
-    provider_id: str
-    create_model: bool = Field(False, description="是否需要创建新的 Model")
-    model_data: Optional[ModelCreate] = Field(
-        None, description="create_model=true 时需要提供的模型配置", alias="model_config"
-    )
-    model_id: Optional[str] = Field(None, description="create_model=false 时需要提供的现有模型 ID")
-
-
-class BatchAssignModelMappingRequest(BaseModel):
-    """批量添加模型映射请求（方案 A：暂不支持，需要重构）"""
-
-    global_model_id: str  # 要分配的 GlobalModel ID
-    providers: List[BatchAssignProviderConfig]
-
-
-class BatchAssignProviderResult(BaseModel):
-    """批量映射结果条目"""
-
-    provider_id: str
-    mapping_id: Optional[str]
-    created_model: bool
-    model_id: Optional[str]
-    updated: bool = False
-
-
-class BatchAssignError(BaseModel):
-    """批量映射错误信息"""
-
-    provider_id: str
-    error: str
-
-
-class BatchAssignModelMappingResponse(BaseModel):
-    """批量映射响应"""
-
-    success: bool
-    created_mappings: List[BatchAssignProviderResult]
-    errors: List[BatchAssignError]
-
-
-# ========== 阶段二：GlobalModel 相关模型 ==========
+# ========== GlobalModel 相关模型 ==========
 
 
 class GlobalModelCreate(BaseModel):
@@ -328,7 +270,6 @@ class GlobalModelResponse(BaseModel):
     )
     # 统计数据（可选）
     provider_count: Optional[int] = Field(default=0, description="支持的 Provider 数量")
-    alias_count: Optional[int] = Field(default=0, description="别名数量")
     usage_count: Optional[int] = Field(default=0, description="调用次数")
     created_at: datetime
     updated_at: Optional[datetime]
@@ -355,7 +296,7 @@ class GlobalModelListResponse(BaseModel):
 class BatchAssignToProvidersRequest(BaseModel):
     """批量为 Provider 添加 GlobalModel 实现"""
 
-    provider_ids: List[str] = Field(..., min_items=1, description="Provider ID 列表")
+    provider_ids: List[str] = Field(..., min_length=1, description="Provider ID 列表")
     create_models: bool = Field(default=False, description="是否自动创建 Model 记录")
 
 
@@ -379,43 +320,11 @@ class BatchAssignModelsToProviderResponse(BaseModel):
     errors: List[dict]
 
 
-class UpdateModelMappingRequest(BaseModel):
-    """更新模型映射请求"""
-
-    source_model: Optional[str] = Field(
-        None, min_length=1, max_length=200, description="源模型名或别名"
-    )
-    target_global_model_id: Optional[str] = Field(None, description="目标 GlobalModel ID")
-    provider_id: Optional[str] = Field(None, description="Provider ID（为空时为全局别名）")
-    is_active: Optional[bool] = Field(None, description="是否启用")
-
-
-class UpdateModelMappingResponse(BaseModel):
-    """更新模型映射响应"""
-
-    success: bool
-    mapping_id: str
-    message: Optional[str] = None
-
-
-class DeleteModelMappingResponse(BaseModel):
-    """删除模型映射响应"""
-
-    success: bool
-    message: Optional[str] = None
-
-
 __all__ = [
-    "BatchAssignError",
-    "BatchAssignModelMappingRequest",
-    "BatchAssignModelMappingResponse",
     "BatchAssignModelsToProviderRequest",
     "BatchAssignModelsToProviderResponse",
-    "BatchAssignProviderConfig",
-    "BatchAssignProviderResult",
     "BatchAssignToProvidersRequest",
     "BatchAssignToProvidersResponse",
-    "DeleteModelMappingResponse",
     "GlobalModelCreate",
     "GlobalModelListResponse",
     "GlobalModelResponse",
@@ -426,10 +335,7 @@ __all__ = [
     "ModelCatalogProviderDetail",
     "ModelCatalogResponse",
     "ModelPriceRange",
-    "OrphanedModel",
     "ProviderAvailableSourceModel",
     "ProviderAvailableSourceModelsResponse",
     "ProviderModelPriceInfo",
-    "UpdateModelMappingRequest",
-    "UpdateModelMappingResponse",
 ]
