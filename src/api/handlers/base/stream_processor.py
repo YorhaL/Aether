@@ -631,25 +631,20 @@ class StreamProcessor:
 
     def _split_content(self, content: str) -> list[str]:
         """
-        根据文本长度智能拆分
+        按块拆分文本
 
-        短文本：逐字符拆分（打字效果更真实）
-        长文本：按 CHUNK_SIZE 拆分（避免过多延迟）
+        统一使用 CHUNK_SIZE 拆分，通过动态延迟控制打字感。
         """
         text_length = len(content)
 
         if text_length <= self.CHUNK_SIZE:
             return [content]
 
-        # 长文本按块拆分
-        if text_length >= self.LONG_TEXT_THRESHOLD:
-            chunks = []
-            for i in range(0, text_length, self.CHUNK_SIZE):
-                chunks.append(content[i : i + self.CHUNK_SIZE])
-            return chunks
-
-        # 短/中文本逐字符拆分
-        return list(content)
+        # 统一按块拆分
+        chunks = []
+        for i in range(0, text_length, self.CHUNK_SIZE):
+            chunks.append(content[i : i + self.CHUNK_SIZE])
+        return chunks
 
     async def _cleanup(
         self,
@@ -734,9 +729,7 @@ class _LightweightSmoother:
         text_length = len(content)
         if text_length <= self.CHUNK_SIZE:
             return [content]
-        if text_length >= self.LONG_TEXT_THRESHOLD:
-            return [content[i : i + self.CHUNK_SIZE] for i in range(0, text_length, self.CHUNK_SIZE)]
-        return list(content)
+        return [content[i : i + self.CHUNK_SIZE] for i in range(0, text_length, self.CHUNK_SIZE)]
 
     async def smooth(
         self, stream_generator: AsyncGenerator[bytes, None]
