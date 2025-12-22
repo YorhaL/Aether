@@ -947,7 +947,7 @@ class AdminClearProviderCacheAdapter(AdminApiAdapter):
 class AdminCacheConfigAdapter(AdminApiAdapter):
     async def handle(self, context: ApiRequestContext) -> Dict[str, Any]:  # type: ignore[override]
         from src.services.cache.affinity_manager import CacheAffinityManager
-        from src.services.cache.aware_scheduler import CacheAwareScheduler
+        from src.config.constants import ConcurrencyDefaults
         from src.services.rate_limit.adaptive_reservation import get_adaptive_reservation_manager
 
         # 获取动态预留管理器的配置
@@ -958,7 +958,7 @@ class AdminCacheConfigAdapter(AdminApiAdapter):
             "status": "ok",
             "data": {
                 "cache_ttl_seconds": CacheAffinityManager.DEFAULT_CACHE_TTL,
-                "cache_reservation_ratio": CacheAwareScheduler.CACHE_RESERVATION_RATIO,
+                "cache_reservation_ratio": ConcurrencyDefaults.CACHE_RESERVATION_RATIO,
                 "dynamic_reservation": {
                     "enabled": True,
                     "config": reservation_stats["config"],
@@ -981,7 +981,7 @@ class AdminCacheConfigAdapter(AdminApiAdapter):
         context.add_audit_metadata(
             action="cache_config",
             cache_ttl_seconds=CacheAffinityManager.DEFAULT_CACHE_TTL,
-            cache_reservation_ratio=CacheAwareScheduler.CACHE_RESERVATION_RATIO,
+            cache_reservation_ratio=ConcurrencyDefaults.CACHE_RESERVATION_RATIO,
             dynamic_reservation_enabled=True,
         )
         return response
