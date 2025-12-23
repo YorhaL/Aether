@@ -106,7 +106,7 @@ RUN printf '%s\n' \
 'stderr_logfile=/var/log/nginx/error.log' \
 '' \
 '[program:app]' \
-'command=gunicorn src.main:app -w %(ENV_GUNICORN_WORKERS)s -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:%(ENV_PORT)s --timeout 120 --access-logfile - --error-logfile - --log-level info' \
+'command=gunicorn src.main:app --preload -w %(ENV_GUNICORN_WORKERS)s -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:%(ENV_PORT)s --timeout 120 --access-logfile - --error-logfile - --log-level info' \
 'directory=/app' \
 'autostart=true' \
 'autorestart=true' \
