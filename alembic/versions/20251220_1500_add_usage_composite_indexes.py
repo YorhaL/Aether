@@ -18,49 +18,35 @@ depends_on = None
 def upgrade() -> None:
     """为 usage 表添加复合索引以优化常见查询
 
-    使用 CONCURRENTLY 创建索引以避免锁表，
-    但需要在 AUTOCOMMIT 模式下执行（不能在事务内）
-
-    注意：如果是从全新数据库执行（baseline 刚创建表），
-    由于 AUTOCOMMIT 连接看不到事务中未提交的表，会跳过索引创建。
-    这种情况下索引会在下次迁移或手动创建。
+    注意：这些索引已经在 baseline 迁移中创建。
+    此迁移仅用于从旧版本升级的场景，新安装会跳过。
     """
     conn = op.get_bind()
-    engine = conn.engine
 
-    # 使用新连接并设置 AUTOCOMMIT 模式以支持 CREATE INDEX CONCURRENTLY
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as autocommit_conn:
-        # 检查 usage 表是否存在（在 AUTOCOMMIT 连接中可见）
-        # 如果表不存在（例如 baseline 迁移还在事务中），跳过索引创建
-        result = autocommit_conn.execute(text(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'usage')"
+    # 检查 usage 表是否存在
+    result = conn.execute(text(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'usage')"
+    ))
+    if not result.scalar():
+        # 表不存在，跳过
+        return
+
+    # 定义需要创建的索引
+    indexes = [
+        ("idx_usage_user_created", "ON usage (user_id, created_at)"),
+        ("idx_usage_apikey_created", "ON usage (api_key_id, created_at)"),
+        ("idx_usage_provider_model_created", "ON usage (provider, model, created_at)"),
+    ]
+
+    # 分别检查并创建每个索引
+    for index_name, index_def in indexes:
+        result = conn.execute(text(
+            f"SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = '{index_name}')"
         ))
-        table_exists = result.scalar()
+        if result.scalar():
+            continue  # 索引已存在，跳过
 
-        if not table_exists:
-            # 表在当前连接不可见（可能 baseline 还在事务中），跳过
-            # 索引将通过后续迁移或手动创建
-            return
-
-        # 使用 IF NOT EXISTS 避免重复创建，无需单独检查索引是否存在
-
-        # 1. user_id + created_at 复合索引 (用户用量查询)
-        autocommit_conn.execute(text(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_user_created "
-            "ON usage (user_id, created_at)"
-        ))
-
-        # 2. api_key_id + created_at 复合索引 (API Key 用量查询)
-        autocommit_conn.execute(text(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_apikey_created "
-            "ON usage (api_key_id, created_at)"
-        ))
-
-        # 3. provider + model + created_at 复合索引 (模型统计查询)
-        autocommit_conn.execute(text(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_provider_model_created "
-            "ON usage (provider, model, created_at)"
-        ))
+        conn.execute(text(f"CREATE INDEX {index_name} {index_def}"))
 
 
 def downgrade() -> None:

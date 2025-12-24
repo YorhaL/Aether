@@ -208,86 +208,120 @@ class CleanupScheduler:
                         return
 
                     # 非首次运行，检查最近是否有缺失的日期需要回填
-                    latest_stat = db.query(StatsDaily).order_by(StatsDaily.date.desc()).first()
+                    from src.models.database import StatsDailyModel
 
-                    if latest_stat:
-                        latest_date_utc = latest_stat.date
-                        if latest_date_utc.tzinfo is None:
-                            latest_date_utc = latest_date_utc.replace(tzinfo=timezone.utc)
-                        else:
-                            latest_date_utc = latest_date_utc.astimezone(timezone.utc)
+                    yesterday_business_date = today_local.date() - timedelta(days=1)
+                    max_backfill_days: int = SystemConfigService.get_config(
+                        db, "max_stats_backfill_days", 30
+                    ) or 30
 
-                        # 使用业务日期计算缺失区间（避免用 UTC 年月日导致日期偏移，且对 DST 更安全）
-                        latest_business_date = latest_date_utc.astimezone(app_tz).date()
-                        yesterday_business_date = today_local.date() - timedelta(days=1)
-                        missing_start_date = latest_business_date + timedelta(days=1)
+                    # 计算回填检查的起始日期
+                    check_start_date = yesterday_business_date - timedelta(
+                        days=max_backfill_days - 1
+                    )
 
-                        if missing_start_date <= yesterday_business_date:
-                            missing_days = (
-                                yesterday_business_date - missing_start_date
-                            ).days + 1
+                    # 获取 StatsDaily 和 StatsDailyModel 中已有数据的日期集合
+                    existing_daily_dates = set()
+                    existing_model_dates = set()
 
-                            # 限制最大回填天数，防止停机很久后一次性回填太多
-                            max_backfill_days: int = SystemConfigService.get_config(
-                                db, "max_stats_backfill_days", 30
-                            ) or 30
-                            if missing_days > max_backfill_days:
-                                logger.warning(
-                                    f"缺失 {missing_days} 天数据超过最大回填限制 "
-                                    f"{max_backfill_days} 天，只回填最近 {max_backfill_days} 天"
+                    daily_stats = (
+                        db.query(StatsDaily.date)
+                        .filter(StatsDaily.date >= check_start_date.isoformat())
+                        .all()
+                    )
+                    for (stat_date,) in daily_stats:
+                        if stat_date.tzinfo is None:
+                            stat_date = stat_date.replace(tzinfo=timezone.utc)
+                        existing_daily_dates.add(stat_date.astimezone(app_tz).date())
+
+                    model_stats = (
+                        db.query(StatsDailyModel.date)
+                        .filter(StatsDailyModel.date >= check_start_date.isoformat())
+                        .distinct()
+                        .all()
+                    )
+                    for (stat_date,) in model_stats:
+                        if stat_date.tzinfo is None:
+                            stat_date = stat_date.replace(tzinfo=timezone.utc)
+                        existing_model_dates.add(stat_date.astimezone(app_tz).date())
+
+                    # 找出需要回填的日期
+                    all_dates = set()
+                    current = check_start_date
+                    while current <= yesterday_business_date:
+                        all_dates.add(current)
+                        current += timedelta(days=1)
+
+                    # 需要回填 StatsDaily 的日期
+                    missing_daily_dates = all_dates - existing_daily_dates
+                    # 需要回填 StatsDailyModel 的日期
+                    missing_model_dates = all_dates - existing_model_dates
+                    # 合并所有需要处理的日期
+                    dates_to_process = missing_daily_dates | missing_model_dates
+
+                    if dates_to_process:
+                        sorted_dates = sorted(dates_to_process)
+                        logger.info(
+                            f"检测到 {len(dates_to_process)} 天的统计数据需要回填 "
+                            f"(StatsDaily 缺失 {len(missing_daily_dates)} 天, "
+                            f"StatsDailyModel 缺失 {len(missing_model_dates)} 天)"
+                        )
+
+                        users = (
+                            db.query(DBUser.id).filter(DBUser.is_active.is_(True)).all()
+                        )
+
+                        failed_dates = 0
+                        failed_users = 0
+
+                        for current_date in sorted_dates:
+                            try:
+                                current_date_local = datetime.combine(
+                                    current_date, datetime.min.time(), tzinfo=app_tz
                                 )
-                                missing_start_date = yesterday_business_date - timedelta(
-                                    days=max_backfill_days - 1
-                                )
-                                missing_days = max_backfill_days
-
-                            logger.info(
-                                f"检测到缺失 {missing_days} 天的统计数据 "
-                                f"({missing_start_date} ~ {yesterday_business_date})，开始回填..."
-                            )
-
-                            current_date = missing_start_date
-                            users = (
-                                db.query(DBUser.id).filter(DBUser.is_active.is_(True)).all()
-                            )
-
-                            while current_date <= yesterday_business_date:
-                                try:
-                                    current_date_local = datetime.combine(
-                                        current_date, datetime.min.time(), tzinfo=app_tz
-                                    )
+                                # 只在缺失时才聚合对应的表
+                                if current_date in missing_daily_dates:
                                     StatsAggregatorService.aggregate_daily_stats(
                                         db, current_date_local
                                     )
+                                if current_date in missing_model_dates:
                                     StatsAggregatorService.aggregate_daily_model_stats(
                                         db, current_date_local
                                     )
-                                    for (user_id,) in users:
-                                        try:
-                                            StatsAggregatorService.aggregate_user_daily_stats(
-                                                db, user_id, current_date_local
-                                            )
-                                        except Exception as e:
-                                            logger.warning(
-                                                f"回填用户 {user_id} 日期 {current_date} 失败: {e}"
-                                            )
-                                            try:
-                                                db.rollback()
-                                            except Exception:
-                                                pass
-                                except Exception as e:
-                                    logger.warning(f"回填日期 {current_date} 失败: {e}")
+                                # 用户统计在任一缺失时都回填
+                                for (user_id,) in users:
                                     try:
-                                        db.rollback()
-                                    except Exception:
-                                        pass
+                                        StatsAggregatorService.aggregate_user_daily_stats(
+                                            db, user_id, current_date_local
+                                        )
+                                    except Exception as e:
+                                        failed_users += 1
+                                        logger.warning(
+                                            f"回填用户 {user_id} 日期 {current_date} 失败: {e}"
+                                        )
+                                        try:
+                                            db.rollback()
+                                        except Exception as rollback_err:
+                                            logger.error(f"回滚失败: {rollback_err}")
+                            except Exception as e:
+                                failed_dates += 1
+                                logger.warning(f"回填日期 {current_date} 失败: {e}")
+                                try:
+                                    db.rollback()
+                                except Exception as rollback_err:
+                                    logger.error(f"回滚失败: {rollback_err}")
 
-                                current_date += timedelta(days=1)
+                        StatsAggregatorService.update_summary(db)
 
-                            StatsAggregatorService.update_summary(db)
-                            logger.info(f"缺失数据回填完成，共 {missing_days} 天")
+                        if failed_dates > 0 or failed_users > 0:
+                            logger.warning(
+                                f"回填完成，共处理 {len(dates_to_process)} 天，"
+                                f"失败: {failed_dates} 天, {failed_users} 个用户记录"
+                            )
                         else:
-                            logger.info("统计数据已是最新，无需回填")
+                            logger.info(f"缺失数据回填完成，共处理 {len(dates_to_process)} 天")
+                    else:
+                        logger.info("统计数据已是最新，无需回填")
                     return
 
                 # 定时任务：聚合昨天的数据
