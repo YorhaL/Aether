@@ -317,6 +317,7 @@ class UpdateUserRequest(BaseModel):
 
     username: Optional[str] = Field(None, min_length=1, max_length=50)
     email: Optional[str] = Field(None, max_length=100)
+    password: Optional[str] = Field(None, min_length=6, max_length=128, description="新密码（留空保持不变）")
     quota_usd: Optional[float] = Field(None, ge=0)
     is_active: Optional[bool] = None
     role: Optional[str] = None

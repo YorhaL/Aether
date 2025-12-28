@@ -86,6 +86,34 @@
             </p>
           </div>
 
+          <div
+            v-if="isEditMode && form.password.length > 0"
+            class="space-y-2"
+          >
+            <Label class="text-sm font-medium">
+              确认新密码 <span class="text-muted-foreground">*</span>
+            </Label>
+            <Input
+              :id="`pwd-confirm-${formNonce}`"
+              v-model="form.confirmPassword"
+              type="password"
+              autocomplete="new-password"
+              data-form-type="other"
+              data-lpignore="true"
+              :name="`confirm-${formNonce}`"
+              required
+              minlength="6"
+              placeholder="再次输入新密码"
+              class="h-10"
+            />
+            <p
+              v-if="form.confirmPassword.length > 0 && form.password !== form.confirmPassword"
+              class="text-xs text-destructive"
+            >
+              两次输入的密码不一致
+            </p>
+          </div>
+
           <div class="space-y-2">
             <Label
               for="form-email"
@@ -423,6 +451,7 @@ const apiFormats = ref<Array<{ value: string; label: string }>>([])
 const form = ref({
   username: '',
   password: '',
+  confirmPassword: '',
   email: '',
   quota: 10,
   role: 'user' as 'admin' | 'user',
@@ -443,6 +472,7 @@ function resetForm() {
   form.value = {
     username: '',
     password: '',
+    confirmPassword: '',
     email: '',
     quota: 10,
     role: 'user',
@@ -461,6 +491,7 @@ function loadUserData() {
   form.value = {
     username: props.user.username,
     password: '',
+    confirmPassword: '',
     email: props.user.email || '',
     quota: props.user.quota_usd == null ? 10 : props.user.quota_usd,
     role: props.user.role,
@@ -486,7 +517,9 @@ const isFormValid = computed(() => {
   const hasUsername = form.value.username.trim().length > 0
   const hasEmail = form.value.email.trim().length > 0
   const hasPassword = isEditMode.value || form.value.password.length >= 6
-  return hasUsername && hasEmail && hasPassword
+  // 编辑模式下如果填写了密码，必须确认密码一致
+  const passwordConfirmed = !isEditMode.value || form.value.password.length === 0 || form.value.password === form.value.confirmPassword
+  return hasUsername && hasEmail && hasPassword && passwordConfirmed
 })
 
 // 加载访问控制选项
