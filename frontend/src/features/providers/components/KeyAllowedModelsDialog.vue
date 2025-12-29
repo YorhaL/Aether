@@ -116,6 +116,19 @@
                 {{ model.global_model_name }}
               </div>
             </div>
+
+            <!-- 测试按钮 -->
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-7 w-7 shrink-0"
+              title="测试模型连接"
+              :disabled="testingModelName === model.global_model_name"
+              @click.stop="testModelConnection(model)"
+            >
+              <Loader2 v-if="testingModelName === model.global_model_name" class="w-3.5 h-3.5 animate-spin" />
+              <Play v-else class="w-3.5 h-3.5" />
+            </Button>
           </div>
         </div>
       </div>
@@ -148,16 +161,17 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { Box, Loader2, Settings2 } from 'lucide-vue-next'
+import { Box, Loader2, Settings2, Play } from 'lucide-vue-next'
 import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import Checkbox from '@/components/ui/checkbox.vue'
 import { useToast } from '@/composables/useToast'
-import { parseApiError } from '@/utils/errorParser'
+import { parseApiError, parseTestModelError } from '@/utils/errorParser'
 import {
   updateEndpointKey,
   getProviderAvailableSourceModels,
+  testModel,
   type EndpointAPIKey,
   type ProviderAvailableSourceModel
 } from '@/api/endpoints'
@@ -181,6 +195,7 @@ const loadingModels = ref(false)
 const availableModels = ref<ProviderAvailableSourceModel[]>([])
 const selectedModels = ref<string[]>([])
 const initialModels = ref<string[]>([])
+const testingModelName = ref<string | null>(null)
 
 // 监听对话框打开
 watch(() => props.open, (open) => {
@@ -266,6 +281,32 @@ function toggleModel(modelName: string, checked: boolean) {
 
 function clearModels() {
   selectedModels.value = []
+}
+
+// 测试模型连接
+async function testModelConnection(model: ProviderAvailableSourceModel) {
+  if (!props.providerId || !props.apiKey || testingModelName.value) return
+
+  testingModelName.value = model.global_model_name
+  try {
+    const result = await testModel({
+      provider_id: props.providerId,
+      model_name: model.provider_model_name,
+      api_key_id: props.apiKey.id,
+      message: "hello"
+    })
+
+    if (result.success) {
+      success(`模型 "${model.display_name}" 测试成功`)
+    } else {
+      showError(`模型测试失败: ${parseTestModelError(result)}`)
+    }
+  } catch (err: any) {
+    const errorMsg = err.response?.data?.detail || err.message || '测试请求失败'
+    showError(`模型测试失败: ${errorMsg}`)
+  } finally {
+    testingModelName.value = null
+  }
 }
 
 function areArraysEqual(a: string[], b: string[]): boolean {
