@@ -117,7 +117,7 @@
               </label>
             </div>
             <p class="text-xs text-muted-foreground">
-              {{ form.expires_at ? '到期后' + (form.auto_delete_on_expiry ? '自动删除' : '仅禁用') + '（当天 UTC 23:59 失效）' : '留空表示永不过期' }}
+              {{ form.expires_at ? '到期后' + (form.auto_delete_on_expiry ? '自动删除' : '仅禁用') + '（当天 23:59 失效）' : '留空表示永不过期' }}
             </p>
           </div>
 

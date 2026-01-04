@@ -3,8 +3,10 @@
 独立余额Key：不关联用户配额，有独立余额限制，用于给非注册用户使用。
 """
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
@@ -19,14 +21,18 @@ from src.models.database import ApiKey
 from src.services.user.apikey import ApiKeyService
 
 
+# 应用时区配置，默认为 Asia/Shanghai
+APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Shanghai"))
+
+
 def parse_expiry_date(date_str: Optional[str]) -> Optional[datetime]:
-    """解析过期日期字符串为 datetime 对象（UTC 时区）。
+    """解析过期日期字符串为 datetime 对象。
 
     Args:
         date_str: 日期字符串，支持 "YYYY-MM-DD" 或 ISO 格式
 
     Returns:
-        datetime 对象（当天 23:59:59.999999 UTC），或 None 如果输入为空
+        datetime 对象（当天 23:59:59.999999，应用时区），或 None 如果输入为空
 
     Raises:
         BadRequestException: 日期格式无效
@@ -39,9 +45,9 @@ def parse_expiry_date(date_str: Optional[str]) -> Optional[datetime]:
     # 尝试 YYYY-MM-DD 格式
     try:
         parsed_date = datetime.strptime(date_str, "%Y-%m-%d")
-        # 设置为当天结束时间 (23:59:59.999999 UTC)
+        # 设置为当天结束时间 (23:59:59.999999，应用时区)
         return parsed_date.replace(
-            hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc
+            hour=23, minute=59, second=59, microsecond=999999, tzinfo=APP_TIMEZONE
         )
     except ValueError:
         pass
