@@ -25,8 +25,17 @@ from src.api.handlers.base.content_extractors import (
 from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.response_parser import ResponseParser
 from src.api.handlers.base.stream_context import StreamContext
+from src.api.handlers.base.utils import (
+    check_html_response,
+    check_prefetched_response_error,
+)
+from src.config.constants import StreamDefaults
 from src.config.settings import config
-from src.core.exceptions import EmbeddedErrorException, ProviderTimeoutException
+from src.core.exceptions import (
+    EmbeddedErrorException,
+    ProviderNotAvailableException,
+    ProviderTimeoutException,
+)
 from src.core.logger import logger
 from src.models.database import Provider, ProviderEndpoint
 from src.utils.sse_parser import SSEEventParser
@@ -165,6 +174,7 @@ class StreamProcessor:
         endpoint: ProviderEndpoint,
         ctx: StreamContext,
         max_prefetch_lines: int = 5,
+        max_prefetch_bytes: int = StreamDefaults.MAX_PREFETCH_BYTES,
     ) -> list:
         """
         预读流的前几行，检测嵌套错误
@@ -180,12 +190,14 @@ class StreamProcessor:
             endpoint: Endpoint 对象
             ctx: 流式上下文
             max_prefetch_lines: 最多预读行数
+            max_prefetch_bytes: 最多预读字节数（避免无换行响应导致 buffer 增长）
 
         Returns:
             预读的字节块列表
 
         Raises:
             EmbeddedErrorException: 如果检测到嵌套错误
+            ProviderNotAvailableException: 如果检测到 HTML 响应（配置错误）
             ProviderTimeoutException: 如果首字节超时（TTFB timeout）
         """
         prefetched_chunks: list = []
@@ -193,6 +205,7 @@ class StreamProcessor:
         buffer = b""
         line_count = 0
         should_stop = False
+        total_prefetched_bytes = 0
         # 使用增量解码器处理跨 chunk 的 UTF-8 字符
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
@@ -206,11 +219,13 @@ class StreamProcessor:
                 provider_name=str(provider.name),
             )
             prefetched_chunks.append(first_chunk)
+            total_prefetched_bytes += len(first_chunk)
             buffer += first_chunk
 
             # 继续读取剩余的预读数据
             async for chunk in aiter:
                 prefetched_chunks.append(chunk)
+                total_prefetched_bytes += len(chunk)
                 buffer += chunk
 
                 # 尝试按行解析缓冲区
@@ -228,10 +243,21 @@ class StreamProcessor:
 
                     line_count += 1
 
+                    # 检测 HTML 响应（base_url 配置错误的常见症状）
+                    if check_html_response(line):
+                        logger.error(
+                            f"  [{self.request_id}] 检测到 HTML 响应，可能是 base_url 配置错误: "
+                            f"Provider={provider.name}, Endpoint={endpoint.id[:8]}..., "
+                            f"base_url={endpoint.base_url}"
+                        )
+                        raise ProviderNotAvailableException(
+                            f"提供商 '{provider.name}' 返回了 HTML 页面而非 API 响应，"
+                            f"请检查 endpoint 的 base_url 配置是否正确"
+                        )
+
                     # 跳过空行和注释行
                     if not line or line.startswith(":"):
                         if line_count >= max_prefetch_lines:
-                            should_stop = True
                             break
                         continue
 
@@ -248,7 +274,6 @@ class StreamProcessor:
                         data = json.loads(data_str)
                     except json.JSONDecodeError:
                         if line_count >= max_prefetch_lines:
-                            should_stop = True
                             break
                         continue
 
@@ -276,14 +301,34 @@ class StreamProcessor:
                     should_stop = True
                     break
 
+                # 达到预读字节上限，停止继续预读（避免无换行响应导致内存增长）
+                if not should_stop and total_prefetched_bytes >= max_prefetch_bytes:
+                    logger.debug(
+                        f"  [{self.request_id}] 预读达到字节上限，停止继续预读: "
+                        f"Provider={provider.name}, bytes={total_prefetched_bytes}, "
+                        f"max_bytes={max_prefetch_bytes}"
+                    )
+                    break
+
                 if should_stop or line_count >= max_prefetch_lines:
                     break
 
-        except (EmbeddedErrorException, ProviderTimeoutException):
+            # 预读结束后，检查是否为非 SSE 格式的 HTML/JSON 响应
+            if not should_stop and prefetched_chunks:
+                check_prefetched_response_error(
+                    prefetched_chunks=prefetched_chunks,
+                    parser=parser,
+                    request_id=self.request_id,
+                    provider_name=str(provider.name),
+                    endpoint_id=endpoint.id,
+                    base_url=endpoint.base_url,
+                )
+
+        except (EmbeddedErrorException, ProviderNotAvailableException, ProviderTimeoutException):
             # 重新抛出可重试的 Provider 异常，触发故障转移
             raise
         except (OSError, IOError) as e:
-            # 网络 I/O ���常：记录警告，可能需要重试
+            # 网络 I/O 异常：记录警告，可能需要重试
             logger.warning(
                 f"  [{self.request_id}] 预读流时发生网络异常: {type(e).__name__}: {e}"
             )

@@ -34,7 +34,11 @@ from src.api.handlers.base.base_handler import (
 from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.request_builder import PassthroughRequestBuilder
 from src.api.handlers.base.stream_context import StreamContext
-from src.api.handlers.base.utils import build_sse_headers
+from src.api.handlers.base.utils import (
+    build_sse_headers,
+    check_html_response,
+    check_prefetched_response_error,
+)
 from src.core.error_utils import extract_error_message
 
 # 直接从具体模块导入，避免循环依赖
@@ -58,6 +62,7 @@ from src.models.database import (
     ProviderEndpoint,
     User,
 )
+from src.config.constants import StreamDefaults
 from src.config.settings import config
 from src.services.provider.transport import build_provider_url
 from src.utils.sse_parser import SSEEventParser
@@ -703,7 +708,9 @@ class CliMessageHandlerBase(BaseMessageHandler):
             ProviderTimeoutException: 如果首字节超时（TTFB timeout）
         """
         prefetched_chunks: list = []
-        max_prefetch_lines = 5  # 最多预读5行来检测错误
+        max_prefetch_lines = config.stream_prefetch_lines  # 最多预读行数来检测错误
+        max_prefetch_bytes = StreamDefaults.MAX_PREFETCH_BYTES  # 避免无换行响应导致 buffer 增长
+        total_prefetched_bytes = 0
         buffer = b""
         line_count = 0
         should_stop = False
@@ -730,14 +737,16 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 provider_name=str(provider.name),
             )
             prefetched_chunks.append(first_chunk)
+            total_prefetched_bytes += len(first_chunk)
             buffer += first_chunk
 
             # 继续读取剩余的预读数据
             async for chunk in aiter:
                 prefetched_chunks.append(chunk)
+                total_prefetched_bytes += len(chunk)
                 buffer += chunk
 
-                # 尝试按行解析缓冲区
+                # 尝试按行解析缓冲区（SSE 格式）
                 while b"\n" in buffer:
                     line_bytes, buffer = buffer.split(b"\n", 1)
                     try:
@@ -754,15 +763,15 @@ class CliMessageHandlerBase(BaseMessageHandler):
                     normalized_line = line.rstrip("\r")
 
                     # 检测 HTML 响应（base_url 配置错误的常见症状）
-                    lower_line = normalized_line.lower()
-                    if lower_line.startswith("<!doctype") or lower_line.startswith("<html"):
+                    if check_html_response(normalized_line):
                         logger.error(
                             f"  [{self.request_id}] 检测到 HTML 响应，可能是 base_url 配置错误: "
                             f"Provider={provider.name}, Endpoint={endpoint.id[:8]}..., "
                             f"base_url={endpoint.base_url}"
                         )
                         raise ProviderNotAvailableException(
-                            f"提供商 '{provider.name}' 返回了 HTML 页面而非 API 响应，请检查 endpoint 的 base_url 配置是否正确"
+                            f"提供商 '{provider.name}' 返回了 HTML 页面而非 API 响应，"
+                            f"请检查 endpoint 的 base_url 配置是否正确"
                         )
 
                     if not normalized_line or normalized_line.startswith(":"):
@@ -811,8 +820,29 @@ class CliMessageHandlerBase(BaseMessageHandler):
                     should_stop = True
                     break
 
+                # 达到预读字节上限，停止继续预读（避免无换行响应导致内存增长）
+                if not should_stop and total_prefetched_bytes >= max_prefetch_bytes:
+                    logger.debug(
+                        f"  [{self.request_id}] 预读达到字节上限，停止继续预读: "
+                        f"Provider={provider.name}, bytes={total_prefetched_bytes}, "
+                        f"max_bytes={max_prefetch_bytes}"
+                    )
+                    break
+
                 if should_stop or line_count >= max_prefetch_lines:
                     break
+
+            # 预读结束后，检查是否为非 SSE 格式的 HTML/JSON 响应
+            # 处理某些代理返回的纯 JSON 错误（可能无换行/多行 JSON）以及 HTML 页面（base_url 配置错误）
+            if not should_stop and prefetched_chunks:
+                check_prefetched_response_error(
+                    prefetched_chunks=prefetched_chunks,
+                    parser=provider_parser,
+                    request_id=self.request_id,
+                    provider_name=str(provider.name),
+                    endpoint_id=endpoint.id,
+                    base_url=endpoint.base_url,
+                )
 
         except (EmbeddedErrorException, ProviderTimeoutException, ProviderNotAvailableException):
             # 重新抛出可重试的 Provider 异常，触发故障转移
