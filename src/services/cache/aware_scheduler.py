@@ -121,11 +121,13 @@ class CacheAwareScheduler:
         PRIORITY_MODE_GLOBAL_KEY,
     }
     # 调度模式常量
-    SCHEDULING_MODE_FIXED_ORDER = "fixed_order"  # 固定顺序模式
-    SCHEDULING_MODE_CACHE_AFFINITY = "cache_affinity"  # 缓存亲和模式
+    SCHEDULING_MODE_FIXED_ORDER = "fixed_order"  # 固定顺序模式：严格按优先级，忽略缓存
+    SCHEDULING_MODE_CACHE_AFFINITY = "cache_affinity"  # 缓存亲和模式：优先缓存，同优先级哈希分散
+    SCHEDULING_MODE_LOAD_BALANCE = "load_balance"  # 负载均衡模式：忽略缓存，同优先级随机轮换
     ALLOWED_SCHEDULING_MODES = {
         SCHEDULING_MODE_FIXED_ORDER,
         SCHEDULING_MODE_CACHE_AFFINITY,
+        SCHEDULING_MODE_LOAD_BALANCE,
     }
 
     def __init__(
@@ -680,8 +682,9 @@ class CacheAwareScheduler:
             f"(api_format={target_format.value}, model={model_name})"
         )
 
-        # 4. 应用缓存亲和性排序（仅在缓存亲和模式下启用）
+        # 4. 根据调度模式应用不同的排序策略
         if self.scheduling_mode == self.SCHEDULING_MODE_CACHE_AFFINITY:
+            # 缓存亲和模式：优先使用缓存的，同优先级内哈希分散
             if affinity_key and candidates:
                 candidates = await self._apply_cache_affinity(
                     candidates=candidates,
@@ -689,8 +692,13 @@ class CacheAwareScheduler:
                     api_format=target_format,
                     global_model_id=global_model_id,
                 )
+        elif self.scheduling_mode == self.SCHEDULING_MODE_LOAD_BALANCE:
+            # 负载均衡模式：忽略缓存，同优先级内随机轮换
+            candidates = self._apply_load_balance(candidates)
+            for candidate in candidates:
+                candidate.is_cached = False
         else:
-            # 固定顺序模式：标记所有候选为非缓存
+            # 固定顺序模式：严格按优先级，忽略缓存
             for candidate in candidates:
                 candidate.is_cached = False
 
@@ -1160,6 +1168,57 @@ class CacheAwareScheduler:
                     )
 
                 result.extend(sorted(group, key=secondary_sort))
+
+        return result
+
+    def _apply_load_balance(
+        self, candidates: List[ProviderCandidate]
+    ) -> List[ProviderCandidate]:
+        """
+        负载均衡模式：同优先级内随机轮换
+
+        排序逻辑：
+        1. 按优先级分组（provider_priority, internal_priority 或 global_priority）
+        2. 同优先级组内随机打乱
+        3. 不考虑缓存亲和性
+        """
+        if not candidates:
+            return candidates
+
+        from collections import defaultdict
+
+        # 使用 tuple 作为统一的 key 类型，兼容两种模式
+        priority_groups: Dict[tuple, List[ProviderCandidate]] = defaultdict(list)
+
+        # 根据优先级模式选择分组方式
+        if self.priority_mode == self.PRIORITY_MODE_GLOBAL_KEY:
+            # 全局 Key 优先模式：按 global_priority 分组
+            for candidate in candidates:
+                global_priority = (
+                    candidate.key.global_priority
+                    if candidate.key and candidate.key.global_priority is not None
+                    else 999999
+                )
+                priority_groups[(global_priority,)].append(candidate)
+        else:
+            # 提供商优先模式：按 (provider_priority, internal_priority) 分组
+            for candidate in candidates:
+                key = (
+                    candidate.provider.provider_priority or 999999,
+                    candidate.key.internal_priority if candidate.key else 999999,
+                )
+                priority_groups[key].append(candidate)
+
+        result: List[ProviderCandidate] = []
+        for priority in sorted(priority_groups.keys()):
+            group = priority_groups[priority]
+            if len(group) > 1:
+                # 同优先级内随机打乱
+                shuffled = list(group)
+                random.shuffle(shuffled)
+                result.extend(shuffled)
+            else:
+                result.extend(group)
 
         return result
 

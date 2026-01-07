@@ -323,19 +323,6 @@
                 type="button"
                 class="px-2 py-1 text-xs font-medium rounded transition-all"
                 :class="[
-                  schedulingMode === 'fixed_order'
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-                ]"
-                title="严格按优先级顺序，不考虑缓存"
-                @click="schedulingMode = 'fixed_order'"
-              >
-                固定顺序
-              </button>
-              <button
-                type="button"
-                class="px-2 py-1 text-xs font-medium rounded transition-all"
-                :class="[
                   schedulingMode === 'cache_affinity'
                     ? 'bg-primary text-primary-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
@@ -344,6 +331,32 @@
                 @click="schedulingMode = 'cache_affinity'"
               >
                 缓存亲和
+              </button>
+              <button
+                type="button"
+                class="px-2 py-1 text-xs font-medium rounded transition-all"
+                :class="[
+                  schedulingMode === 'load_balance'
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                ]"
+                title="同优先级内随机轮换，不考虑缓存"
+                @click="schedulingMode = 'load_balance'"
+              >
+                负载均衡
+              </button>
+              <button
+                type="button"
+                class="px-2 py-1 text-xs font-medium rounded transition-all"
+                :class="[
+                  schedulingMode === 'fixed_order'
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                ]"
+                title="严格按优先级顺序，不考虑缓存"
+                @click="schedulingMode = 'fixed_order'"
+              >
+                固定顺序
               </button>
             </div>
           </div>
@@ -445,7 +458,7 @@ const saving = ref(false)
 const editingKeyPriority = ref<Record<string, string | null>>({})  // format -> keyId
 
 // 调度模式状态
-const schedulingMode = ref<'fixed_order' | 'cache_affinity'>('cache_affinity')
+const schedulingMode = ref<'fixed_order' | 'load_balance' | 'cache_affinity'>('cache_affinity')
 
 // 可用的 API 格式
 const availableFormats = computed(() => {
@@ -478,7 +491,11 @@ async function loadCurrentPriorityMode() {
     activeMainTab.value = currentMode === 'global_key' ? 'key' : 'provider'
 
     const currentSchedulingMode = schedulingResponse.value || 'cache_affinity'
-    schedulingMode.value = currentSchedulingMode === 'fixed_order' ? 'fixed_order' : 'cache_affinity'
+    if (currentSchedulingMode === 'fixed_order' || currentSchedulingMode === 'load_balance' || currentSchedulingMode === 'cache_affinity') {
+      schedulingMode.value = currentSchedulingMode
+    } else {
+      schedulingMode.value = 'cache_affinity'
+    }
   } catch {
     activeMainTab.value = 'provider'
     schedulingMode.value = 'cache_affinity'
