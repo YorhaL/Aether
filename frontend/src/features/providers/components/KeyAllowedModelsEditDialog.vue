@@ -116,8 +116,14 @@
                       :title="isLocked(model) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
                       @click="toggleLock(model, $event)"
                     >
-                      <Lock v-if="isLocked(model)" class="w-3.5 h-3.5" />
-                      <LockOpen v-else class="w-3.5 h-3.5" />
+                      <Lock
+                        v-if="isLocked(model)"
+                        class="w-3.5 h-3.5"
+                      />
+                      <LockOpen
+                        v-else
+                        class="w-3.5 h-3.5"
+                      />
                     </button>
                   </div>
                 </div>
@@ -181,8 +187,14 @@
                       :title="isLocked(model.name) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
                       @click="toggleLock(model.name, $event)"
                     >
-                      <Lock v-if="isLocked(model.name)" class="w-3.5 h-3.5" />
-                      <LockOpen v-else class="w-3.5 h-3.5" />
+                      <Lock
+                        v-if="isLocked(model.name)"
+                        class="w-3.5 h-3.5"
+                      />
+                      <LockOpen
+                        v-else
+                        class="w-3.5 h-3.5"
+                      />
                     </button>
                   </div>
                 </div>
@@ -243,8 +255,14 @@
                       :title="isLocked(model) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
                       @click="toggleLock(model, $event)"
                     >
-                      <Lock v-if="isLocked(model)" class="w-3.5 h-3.5" />
-                      <LockOpen v-else class="w-3.5 h-3.5" />
+                      <Lock
+                        v-if="isLocked(model)"
+                        class="w-3.5 h-3.5"
+                      />
+                      <LockOpen
+                        v-else
+                        class="w-3.5 h-3.5"
+                      />
                     </button>
                   </div>
                 </div>
@@ -600,7 +618,7 @@ async function loadGlobalModels() {
       name: m.name,
       display_name: m.display_name
     }))
-  } catch (err) {
+  } catch {
     if (loadingCancelled) return
     showError('加载全局模型失败', '错误')
   } finally {

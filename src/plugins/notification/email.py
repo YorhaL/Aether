@@ -11,18 +11,20 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
 
+aiosmtplib: Any
 try:
-    import aiosmtplib
-
-    AIOSMTPLIB_AVAILABLE = True
+    import aiosmtplib as _aiosmtplib
 except ImportError:
     AIOSMTPLIB_AVAILABLE = False
     aiosmtplib = None
+else:
+    AIOSMTPLIB_AVAILABLE = True
+    aiosmtplib = _aiosmtplib
 
 from src.core.logger import logger
+from src.utils.async_utils import run_in_executor
 
 from .base import Notification, NotificationLevel, NotificationPlugin
-
 
 
 class EmailNotificationPlugin(NotificationPlugin):
@@ -31,8 +33,8 @@ class EmailNotificationPlugin(NotificationPlugin):
     支持HTML和纯文本邮件
     """
 
-    def __init__(self, name: str = "email", config: Dict[str, Any] = None):
-        super().__init__(name, config)
+    def __init__(self, name: str = "email", config: Optional[Dict[str, Any]] = None):
+        super().__init__(name, config or {})
 
         # SMTP配置
         self.smtp_host = config.get("smtp_host") if config else None
@@ -60,7 +62,7 @@ class EmailNotificationPlugin(NotificationPlugin):
         # 缓冲配置
         self._buffer: List[Notification] = []
         self._lock = asyncio.Lock()
-        self._flush_task = None
+        self._flush_task: Optional[asyncio.Task[None]] = None
 
         # 验证配置
         config_errors = []
@@ -97,10 +99,10 @@ class EmailNotificationPlugin(NotificationPlugin):
 
         return True
 
-    def _start_flush_task(self):
+    def _start_flush_task(self) -> None:
         """启动定时刷新任务"""
 
-        async def flush_loop():
+        async def flush_loop() -> None:
             while self.enabled:
                 await asyncio.sleep(self.flush_interval)
                 await self.flush()
@@ -235,9 +237,7 @@ class EmailNotificationPlugin(NotificationPlugin):
                 return False
         else:
             # 使用同步SMTP（在线程中运行）
-            return await asyncio.get_event_loop().run_in_executor(
-                None, self._send_email_sync, subject, body, is_html
-            )
+            return await run_in_executor(self._send_email_sync, subject, body, is_html)
 
     def _send_email_sync(self, subject: str, body: str, is_html: bool = True) -> bool:
         """同步发送邮件"""
@@ -256,11 +256,15 @@ class EmailNotificationPlugin(NotificationPlugin):
             message.attach(MIMEText(body, "plain"))
 
         try:
+            smtp_host = self.smtp_host
+            assert smtp_host is not None
+
             # 连接SMTP服务器
+            server: smtplib.SMTP
             if self.use_ssl:
-                server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port)
+                server = smtplib.SMTP_SSL(smtp_host, self.smtp_port)
             else:
-                server = smtplib.SMTP(self.smtp_host, self.smtp_port)
+                server = smtplib.SMTP(smtp_host, self.smtp_port)
                 if self.use_tls:
                     server.starttls()
 
@@ -299,7 +303,7 @@ class EmailNotificationPlugin(NotificationPlugin):
 
         return True
 
-    async def _do_send_batch(self, notifications: List[Notification]) -> Dict[str, Any]:
+    async def _do_send_batch(self, notifications: List[Notification]) -> Dict[str, int]:
         """实际批量发送通知"""
         if not notifications:
             return {"total": 0, "sent": 0, "failed": 0}
@@ -357,7 +361,7 @@ class EmailNotificationPlugin(NotificationPlugin):
             "aiosmtplib_available": AIOSMTPLIB_AVAILABLE,
         }
 
-    async def close(self):
+    async def close(self) -> None:
         """关闭插件"""
         # 刷新缓冲
         await self.flush()
@@ -366,7 +370,7 @@ class EmailNotificationPlugin(NotificationPlugin):
         if self._flush_task:
             self._flush_task.cancel()
 
-    def __del__(self):
+    def __del__(self) -> None:
         """清理资源"""
         try:
             asyncio.create_task(self.close())

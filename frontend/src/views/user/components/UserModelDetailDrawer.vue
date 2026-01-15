@@ -351,7 +351,6 @@ import {
   Image as ImageIcon
 } from 'lucide-vue-next'
 import { useEscapeKey } from '@/composables/useEscapeKey'
-import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
@@ -375,7 +374,6 @@ const emit = defineEmits<{
   'toggleCapability': [modelName: string, capName: string]
 }>()
 
-const { success: showSuccess, error: showError } = useToast()
 const { copyToClipboard } = useClipboard()
 
 interface Props {

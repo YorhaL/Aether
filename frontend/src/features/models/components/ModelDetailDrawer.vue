@@ -470,7 +470,6 @@ import {
   BarChart3
 } from 'lucide-vue-next'
 import { useEscapeKey } from '@/composables/useEscapeKey'
-import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
@@ -506,7 +505,6 @@ const emit = defineEmits<{
   'linkProvider': [providerId: string]
   'linkProviders': [providerIds: string[]]
 }>()
-const { success: showSuccess, error: showError } = useToast()
 const { copyToClipboard } = useClipboard()
 
 interface Props {

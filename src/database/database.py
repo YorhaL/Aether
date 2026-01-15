@@ -3,19 +3,13 @@
 """
 
 import time
-from typing import AsyncGenerator, Generator, Optional
+from typing import Any, Generator, Optional, cast
 
 from starlette.requests import Request
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import Pool, QueuePool
+from sqlalchemy.pool import QueuePool
 
 from ..config import config
 from src.core.logger import logger
@@ -24,29 +18,27 @@ from ..models.database import Base, SystemConfig, User, UserRole
 
 # 延迟初始化的数据库引擎和会话工厂
 _engine: Optional[Engine] = None
-_SessionLocal: Optional[sessionmaker] = None
-_async_engine: Optional[AsyncEngine] = None
-_AsyncSessionLocal: Optional[async_sessionmaker] = None
+_SessionLocal: Optional[sessionmaker[Session]] = None
 
 # 连接池监控
 _last_pool_warning: float = 0.0
 POOL_WARNING_INTERVAL = 60  # 每60秒最多警告一次
 
 
-def _setup_pool_monitoring(engine: Engine):
+def _setup_pool_monitoring(engine: Engine) -> None:
     """设置连接池监控事件"""
 
     @event.listens_for(engine, "connect")
-    def receive_connect(dbapi_conn, connection_record):
+    def receive_connect(dbapi_conn: Any, connection_record: Any) -> None:
         """连接创建时的监控"""
         pass
 
     @event.listens_for(engine, "checkout")
-    def receive_checkout(dbapi_conn, connection_record, connection_proxy):
+    def receive_checkout(dbapi_conn: Any, connection_record: Any, connection_proxy: Any) -> None:
         """从连接池检出连接时的监控"""
         global _last_pool_warning
 
-        pool = engine.pool
+        pool = cast(QueuePool, engine.pool)
         # 获取连接池状态
         checked_out = pool.checkedout()
         pool_size = pool.size()
@@ -70,10 +62,10 @@ def _setup_pool_monitoring(engine: Engine):
                 )
 
 
-def get_pool_status() -> dict:
+def get_pool_status() -> dict[str, Any]:
     """获取连接池状态"""
     engine = _ensure_engine()
-    pool = engine.pool
+    pool = cast(QueuePool, engine.pool)
 
     return {
         "checked_out": pool.checkedout(),
@@ -84,7 +76,7 @@ def get_pool_status() -> dict:
     }
 
 
-def log_pool_status():
+def log_pool_status() -> None:
     """记录连接池状态到日志（用于监控）"""
     try:
         status = get_pool_status()
@@ -147,7 +139,7 @@ def _ensure_engine() -> Engine:
     return _engine
 
 
-def _log_pool_capacity():
+def _log_pool_capacity() -> None:
     theoretical = config.db_pool_size + config.db_max_overflow
     workers = max(1, config.worker_processes)
     total_estimated = theoretical * workers
@@ -167,82 +159,6 @@ def _log_pool_capacity():
             total_estimated,
             safe_limit,
         )
-
-
-def _ensure_async_engine() -> AsyncEngine:
-    """
-    确保异步数据库引擎已创建（延迟加载）
-
-    这允许异步路由使用非阻塞的数据库访问
-    """
-    global _async_engine, _AsyncSessionLocal
-
-    if _async_engine is not None:
-        return _async_engine
-
-    # 获取数据库配置并转换为异步URL
-    DATABASE_URL = config.database_url
-
-    # 转换同步URL为异步URL（postgresql:// -> postgresql+asyncpg://）
-    if DATABASE_URL.startswith("postgresql://"):
-        ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-    elif DATABASE_URL.startswith("sqlite:///"):
-        ASYNC_DATABASE_URL = DATABASE_URL.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
-    else:
-        raise ValueError(f"不支持的数据库类型: {DATABASE_URL}")
-
-    # 验证数据库类型（生产环境要求 PostgreSQL）
-    is_production = config.environment == "production"
-    if is_production and not ASYNC_DATABASE_URL.startswith("postgresql+asyncpg://"):
-        raise ValueError("生产环境只支持 PostgreSQL 数据库，请配置正确的 DATABASE_URL")
-
-    # 创建异步引擎
-    _async_engine = create_async_engine(
-        ASYNC_DATABASE_URL,
-        # AsyncEngine 不能使用 QueuePool；默认使用 AsyncAdaptedQueuePool
-        pool_size=config.db_pool_size,
-        max_overflow=config.db_max_overflow,
-        pool_timeout=config.db_pool_timeout,
-        pool_recycle=config.db_pool_recycle,
-        pool_pre_ping=True,
-        echo=False,
-    )
-
-    # 创建异步会话工厂
-    _AsyncSessionLocal = async_sessionmaker(
-        _async_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autocommit=False,
-        autoflush=False,
-    )
-
-    logger.debug(f"异步数据库引擎已初始化: {ASYNC_DATABASE_URL.split('@')[-1] if '@' in ASYNC_DATABASE_URL else 'local'}")
-
-    return _async_engine
-
-
-async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
-    """获取异步数据库会话
-
-    .. deprecated::
-        此方法已废弃，项目统一使用同步 Session。
-        未来版本可能移除此方法。请使用 get_db() 代替。
-    """
-    import warnings
-    warnings.warn(
-        "get_async_db() 已废弃，项目统一使用同步 Session。请使用 get_db() 代替。",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    # 确保异步引擎已初始化
-    _ensure_async_engine()
-
-    async with _AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
 
 
 def get_db(request: Request = None) -> Generator[Session, None, None]:  # type: ignore[assignment]
@@ -298,6 +214,7 @@ def get_db(request: Request = None) -> Generator[Session, None, None]:  # type: 
 
     # 确保引擎已初始化
     _ensure_engine()
+    assert _SessionLocal is not None
 
     db = _SessionLocal()
 
@@ -347,6 +264,7 @@ def create_session() -> Session:
             db.close()
     """
     _ensure_engine()
+    assert _SessionLocal is not None
     return _SessionLocal()
 
 
@@ -355,7 +273,7 @@ def get_db_url() -> str:
     return config.database_url
 
 
-def init_db():
+def init_db() -> None:
     """初始化数据库
 
     注意：数据库表结构由 Alembic 管理，部署时请运行 ./migrate.sh
@@ -367,6 +285,7 @@ def init_db():
 
     # 确保引擎已创建
     _ensure_engine()
+    assert _SessionLocal is not None
 
     # 数据库表结构由 Alembic 迁移管理
 
@@ -424,7 +343,7 @@ def init_db():
         db.close()
 
 
-def init_admin_user(db: Session):
+def init_admin_user(db: Session) -> None:
     """从环境变量创建管理员账户"""
     # 检查是否使用默认凭据
     if config.admin_email == "admin@localhost" and config.admin_password == "admin123":
@@ -447,9 +366,9 @@ def init_admin_user(db: Session):
             email=config.admin_email,
             username=config.admin_username,
             role=UserRole.ADMIN,
-            quota_usd=1000.0,
             is_active=True,
         )
+        admin.quota_usd = cast(Any, 1000.0)
         admin.set_password(config.admin_password)
 
         db.add(admin)
@@ -461,7 +380,7 @@ def init_admin_user(db: Session):
         raise
 
 
-def init_default_models(db: Session):
+def init_default_models(db: Session) -> None:
     """初始化默认模型配置"""
 
     # 注意：作为中转代理服务，不再预设模型配置
@@ -470,10 +389,10 @@ def init_default_models(db: Session):
     pass
 
 
-def init_system_configs(db: Session):
+def init_system_configs(db: Session) -> None:
     """初始化系统配置"""
 
-    configs = [
+    configs: list[dict[str, Any]] = [
         {"key": "default_user_quota_usd", "value": 10.0, "description": "新用户默认美元配额"},
         {"key": "rate_limit_per_minute", "value": 60, "description": "每分钟请求限制"},
         {"key": "enable_registration", "value": False, "description": "是否开放用户注册"},
@@ -484,12 +403,15 @@ def init_system_configs(db: Session):
     for config_data in configs:
         existing = db.query(SystemConfig).filter_by(key=config_data["key"]).first()
         if not existing:
-            config = SystemConfig(**config_data)
-            db.add(config)
+            row = SystemConfig()
+            row.key = config_data["key"]
+            row.value = config_data["value"]
+            row.description = config_data["description"]
+            db.add(row)
             logger.info(f"添加系统配置: {config_data['key']}")
 
 
-def reset_db():
+def reset_db() -> None:
     """重置数据库（仅用于开发）"""
     logger.warning("重置数据库...")
 

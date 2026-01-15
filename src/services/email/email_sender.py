@@ -3,20 +3,21 @@
 提供 SMTP 邮件发送功能
 """
 
-import asyncio
 import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, Union
 
+aiosmtplib: Any
 try:
-    import aiosmtplib
-
-    AIOSMTPLIB_AVAILABLE = True
+    import aiosmtplib as _aiosmtplib
 except ImportError:
     AIOSMTPLIB_AVAILABLE = False
     aiosmtplib = None
+else:
+    AIOSMTPLIB_AVAILABLE = True
+    aiosmtplib = _aiosmtplib
 
 
 def _create_ssl_context() -> ssl.SSLContext:
@@ -34,6 +35,7 @@ from sqlalchemy.orm import Session
 from src.core.crypto import crypto_service
 from src.core.logger import logger
 from src.services.system.config import SystemConfigService
+from src.utils.async_utils import run_in_executor
 
 from .email_template import EmailTemplate
 
@@ -260,9 +262,13 @@ class EmailSenderService:
         Returns:
             (是否发送成功, 错误信息)
         """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, EmailSenderService._send_email_sync, config, to_email, subject, html_body, text_body
+        return await run_in_executor(
+            EmailSenderService._send_email_sync,
+            config,
+            to_email,
+            subject,
+            html_body,
+            text_body,
         )
 
     @staticmethod
@@ -302,7 +308,7 @@ class EmailSenderService:
                 message.attach(MIMEText(html_body, "html", "utf-8"))
 
             # 连接 SMTP 服务器
-            server = None
+            server: Optional[smtplib.SMTP] = None
             ssl_context = _create_ssl_context()
             try:
                 if config["smtp_use_ssl"]:
@@ -320,6 +326,8 @@ class EmailSenderService:
                     )
                     if config["smtp_use_tls"]:
                         server.starttls(context=ssl_context)
+
+                assert server is not None
 
                 # 登录
                 if config["smtp_user"] and config["smtp_password"]:
@@ -393,6 +401,7 @@ class EmailSenderService:
                 await smtp.quit()
             else:
                 # 使用同步方式测试
+                server: Union[smtplib.SMTP, smtplib.SMTP_SSL]
                 if config["smtp_use_ssl"]:
                     server = smtplib.SMTP_SSL(
                         config["smtp_host"],

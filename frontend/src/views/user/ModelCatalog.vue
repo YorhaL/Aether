@@ -370,7 +370,7 @@ import UserModelDetailDrawer from './components/UserModelDetailDrawer.vue'
 import { useRowClick } from '@/composables/useRowClick'
 import { log } from '@/utils/logger'
 
-const { success, error: showError } = useToast()
+const { error: showError } = useToast()
 const { copyToClipboard } = useClipboard()
 
 // 状态

@@ -479,7 +479,6 @@ const filters = ref({
 })
 
 const filtersDaysString = ref('7')
-const filtersLimitString = ref('50')
 
 const currentPage = ref(1)
 const pageSize = ref(20)

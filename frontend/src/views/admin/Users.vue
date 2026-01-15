@@ -868,11 +868,6 @@ function formatNumber(value?: number | null): string {
   return numericValue.toLocaleString()
 }
 
-function formatCurrency(value?: number | null, fractionDigits = 4): string {
-  const numericValue = typeof value === 'number' && Number.isFinite(value) ? value : 0
-  return numericValue.toFixed(fractionDigits)
-}
-
 async function toggleUserStatus(user: any) {
   const action = user.is_active ? '禁用' : '启用'
   const confirmed = await confirmDanger(

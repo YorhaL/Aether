@@ -256,7 +256,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { Dialog, Button, Input, Label, Switch } from '@/components/ui'
 import { Key, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'

@@ -259,10 +259,7 @@ function handleDrop(targetIndex: number) {
   const groupNewPriority = new Map<number, number>() // 原优先级 -> 新优先级
   let currentPriority = 1
 
-  // 找到被拖动项在原数组中的索引对应的原始优先级
-  const draggedOriginalPriority = originalPriorityMap.get(dragIndex)!
-
-  items.forEach((alias, newIdx) => {
+  items.forEach(alias => {
     // 找到这个映射在原数组中的索引
     const originalIdx = aliases.value.findIndex(a => a === alias)
     const originalPriority = originalIdx >= 0 ? originalPriorityMap.get(originalIdx)! : alias.priority

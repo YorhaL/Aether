@@ -129,8 +129,14 @@
                     :disabled="testingModelId === model.id"
                     @click="handleTestClick(model)"
                   >
-                    <Loader2 v-if="testingModelId === model.id" class="w-3.5 h-3.5 animate-spin" />
-                    <Play v-else class="w-3.5 h-3.5" />
+                    <Loader2
+                      v-if="testingModelId === model.id"
+                      class="w-3.5 h-3.5 animate-spin"
+                    />
+                    <Play
+                      v-else
+                      class="w-3.5 h-3.5"
+                    />
                   </Button>
                   <!-- 格式选择下拉菜单 -->
                   <div

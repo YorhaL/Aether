@@ -338,7 +338,7 @@ onMounted(async () => {
     } else {
       authType.value = 'local'
     }
-  } catch (error) {
+  } catch {
     // If获取失败，保持默认：关闭注册 & 关闭邮箱验证 & 使用本地认证
     allowRegistration.value = false
     requireEmailVerification.value = false

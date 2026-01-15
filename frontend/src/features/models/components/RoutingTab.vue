@@ -607,6 +607,7 @@ import { API_FORMAT_ORDER } from '@/api/endpoints/types'
 import { recoverKeyHealth } from '@/api/endpoints/health'
 import { useToast } from '@/composables/useToast'
 import { useCountdownTimer, getProbeCountdown } from '@/composables/useCountdownTimer'
+import { MAX_MODEL_NAME_LENGTH, createLRURegexCache, getCompiledModelMappingRegex } from '@/features/models/utils/model-mapping-regex'
 
 const props = defineProps<{
   globalModelId: string
@@ -626,6 +627,9 @@ const { tick: countdownTick, start: startCountdownTimer } = useCountdownTimer()
 const loading = ref(false)
 const error = ref<string | null>(null)
 const routingData = ref<ModelRoutingPreviewResponse | null>(null)
+const modelMappingRegexCache = createLRURegexCache(200)
+const keyMatchedModelsCache = new Map<string, string[]>()
+const compiledGlobalModelMappingRegexes = ref<RegExp[]>([])
 
 // 是否为全局 Key 优先模式
 const isGlobalKeyMode = computed(() => routingData.value?.priority_mode === 'global_key')
@@ -804,11 +808,24 @@ function toggleProviderInFormat(format: string, providerId: string, endpointId?:
 async function loadRoutingData() {
   if (!props.globalModelId) return
 
+  modelMappingRegexCache.clear()
+  keyMatchedModelsCache.clear()
+  compiledGlobalModelMappingRegexes.value = []
+
   loading.value = true
   error.value = null
 
   try {
-    routingData.value = await getGlobalModelRoutingPreview(props.globalModelId)
+    const data = await getGlobalModelRoutingPreview(props.globalModelId)
+
+    const compiled: RegExp[] = []
+    for (const pattern of data.global_model_mappings || []) {
+      const regex = getCompiledModelMappingRegex(pattern, modelMappingRegexCache)
+      if (regex) compiled.push(regex)
+    }
+
+    routingData.value = data
+    compiledGlobalModelMappingRegexes.value = compiled
   } catch (err: any) {
     error.value = err.response?.data?.detail || '加载失败'
   } finally {
@@ -843,12 +860,24 @@ function hasModelMapping(provider: RoutingProviderInfo): boolean {
 // 获取 Key 的 allowed_models 中匹配当前 GlobalModel 的所有模型名
 // 逻辑：用 GlobalModel 的 model_mappings（正则模式）去匹配 Key 的 allowed_models 中的值
 function getKeyMatchedModels(key: RoutingKeyInfo): string[] {
+  const cached = keyMatchedModelsCache.get(key.id)
+  if (cached !== undefined) {
+    return cached
+  }
+
   if (!key.allowed_models || key.allowed_models.length === 0) {
+    keyMatchedModelsCache.set(key.id, [])
     return []
   }
   const globalModelName = routingData.value?.global_model_name
-  const globalModelMappings = routingData.value?.global_model_mappings || []
   if (!globalModelName) {
+    keyMatchedModelsCache.set(key.id, [])
+    return []
+  }
+
+  const patterns = compiledGlobalModelMappingRegexes.value
+  if (patterns.length === 0) {
+    keyMatchedModelsCache.set(key.id, [])
     return []
   }
 
@@ -859,18 +888,17 @@ function getKeyMatchedModels(key: RoutingKeyInfo): string[] {
     if (allowedModel === globalModelName) {
       continue
     }
+    if (allowedModel.length > MAX_MODEL_NAME_LENGTH) continue
+
     // 用 GlobalModel 的映射模式匹配白名单中的模型名
-    for (const pattern of globalModelMappings) {
-      try {
-        if (new RegExp(`^${pattern}$`, 'i').test(allowedModel)) {
-          matched.push(allowedModel)
-          break // 该 allowedModel 已匹配，不需要继续检查其他 pattern
-        }
-      } catch {
-        // 正则无效，跳过
+    for (const regex of patterns) {
+      if (regex.test(allowedModel)) {
+        matched.push(allowedModel)
+        break // 该 allowedModel 已匹配，不需要继续检查其他 pattern
       }
     }
   }
+  keyMatchedModelsCache.set(key.id, matched)
   return matched
 }
 
