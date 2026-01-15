@@ -153,7 +153,7 @@
         size="icon"
         class="h-8 w-8"
         :class="autoRefresh ? 'text-primary' : ''"
-        :title="autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新（每10秒刷新）'"
+        :title="autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新（每5秒刷新）'"
         @click="$emit('update:autoRefresh', !autoRefresh)"
       >
         <RefreshCcw
@@ -301,22 +301,48 @@
             <div class="flex flex-col text-xs gap-0.5">
               <div class="flex items-center gap-1">
                 <span>{{ record.provider }}</span>
+                <!-- 故障转移图标（优先显示） -->
                 <span
                   v-if="record.has_fallback"
                   class="inline-flex items-center justify-center w-4 h-4 text-xs text-amber-600 dark:text-amber-400"
-                  title="此请求发生了 Provider 切换"
+                  title="此请求发生了 Provider 故障转移"
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                    class="w-4 h-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    class="w-3.5 h-3.5"
                   >
-                    <path
-                      fill-rule="evenodd"
-                      d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z"
-                      clip-rule="evenodd"
-                    />
+                    <path d="m16 3 4 4-4 4" />
+                    <path d="M20 7H4" />
+                    <path d="m8 21-4-4 4-4" />
+                    <path d="M4 17h16" />
+                  </svg>
+                </span>
+                <!-- 重试图标（仅在无故障转移时显示） -->
+                <span
+                  v-else-if="record.has_retry"
+                  class="inline-flex items-center justify-center w-4 h-4 text-xs text-blue-600 dark:text-blue-400"
+                  title="此请求发生了亲和缓存重试"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    class="w-3.5 h-3.5"
+                  >
+                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                    <path d="M21 21v-5h-5" />
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
                   </svg>
                 </span>
               </div>

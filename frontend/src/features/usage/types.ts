@@ -87,6 +87,7 @@ export interface UsageRecord {
   status?: RequestStatus  // 请求状态: pending, streaming, completed, failed
   created_at: string
   has_fallback?: boolean
+  has_retry?: boolean
   request_metadata?: {
     model_version?: string  // Provider 返回的实际模型版本（如 Gemini 的 modelVersion）
     [key: string]: unknown

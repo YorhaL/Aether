@@ -132,7 +132,7 @@ class StreamTelemetryRecorder:
                     )
 
                 # 更新候选记录状态
-                await self._update_candidate_status(bg_db, ctx, response_time_ms)
+                await self._update_candidate_status(bg_db, ctx, response_time_ms, start_time)
 
             finally:
                 if bg_db:
@@ -234,6 +234,7 @@ class StreamTelemetryRecorder:
         db: Session,
         ctx: StreamContext,
         response_time_ms: int,
+        request_start_time: float,
     ) -> None:
         """更新候选记录状态"""
         if not ctx.attempt_id:
@@ -246,7 +247,14 @@ class StreamTelemetryRecorder:
             "data_count": ctx.data_count,
         }
         if ctx.first_byte_time_ms is not None:
-            extra_data["first_byte_time_ms"] = ctx.first_byte_time_ms
+            # 计算候选自身的 TTFB
+            first_byte_time_ms = RequestCandidateService.calculate_candidate_ttfb(
+                db=db,
+                candidate_id=ctx.attempt_id,
+                request_start_time=request_start_time,
+                global_first_byte_time_ms=ctx.first_byte_time_ms,
+            )
+            extra_data["first_byte_time_ms"] = first_byte_time_ms
 
         if ctx.is_success():
             RequestCandidateService.mark_candidate_success(

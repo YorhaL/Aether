@@ -432,6 +432,7 @@ class BaseMessageHandler:
         endpoint_id = ctx.endpoint_id
         key_id = ctx.key_id
         first_byte_time_ms = ctx.first_byte_time_ms
+        api_format = ctx.api_format
 
         # 如果 provider 为空，记录警告（不应该发生，但用于调试）
         if not provider:
@@ -455,6 +456,7 @@ class BaseMessageHandler:
                         provider_endpoint_id=endpoint_id,
                         provider_api_key_id=key_id,
                         first_byte_time_ms=first_byte_time_ms,
+                        api_format=api_format,
                     )
                 finally:
                     db.close()

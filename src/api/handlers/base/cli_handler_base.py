@@ -1432,6 +1432,16 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 if ctx.attempt_id:
                     from src.services.request.candidate import RequestCandidateService
 
+                    # 计算候选自身的 TTFB
+                    candidate_first_byte_time_ms: Optional[int] = None
+                    if ctx.first_byte_time_ms is not None:
+                        candidate_first_byte_time_ms = RequestCandidateService.calculate_candidate_ttfb(
+                            db=bg_db,
+                            candidate_id=ctx.attempt_id,
+                            request_start_time=self.start_time,
+                            global_first_byte_time_ms=ctx.first_byte_time_ms,
+                        )
+
                     # 根据状态码决定是成功还是失败
                     # 499 = 客户端断开连接，应标记为失败
                     # 503 = 服务不可用（如流中断），应标记为失败
@@ -1443,8 +1453,8 @@ class CliMessageHandlerBase(BaseMessageHandler):
                             "chunk_count": ctx.chunk_count,
                             "data_count": ctx.data_count,
                         }
-                        if ctx.first_byte_time_ms is not None:
-                            extra_data["first_byte_time_ms"] = ctx.first_byte_time_ms
+                        if candidate_first_byte_time_ms is not None:
+                            extra_data["first_byte_time_ms"] = candidate_first_byte_time_ms
                         RequestCandidateService.mark_candidate_failed(
                             db=bg_db,
                             candidate_id=ctx.attempt_id,
@@ -1462,8 +1472,8 @@ class CliMessageHandlerBase(BaseMessageHandler):
                             "chunk_count": ctx.chunk_count,
                             "data_count": ctx.data_count,
                         }
-                        if ctx.first_byte_time_ms is not None:
-                            extra_data["first_byte_time_ms"] = ctx.first_byte_time_ms
+                        if candidate_first_byte_time_ms is not None:
+                            extra_data["first_byte_time_ms"] = candidate_first_byte_time_ms
                         RequestCandidateService.mark_candidate_success(
                             db=bg_db,
                             candidate_id=ctx.attempt_id,

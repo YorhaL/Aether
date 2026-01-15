@@ -1,5 +1,6 @@
 """管理员使用情况统计路由。"""
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -717,19 +718,42 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
 
         request_ids = [usage.request_id for usage, _, _, _, _ in records if usage.request_id]
         fallback_map = {}
+        retry_map = {}
         if request_ids:
+            # 查询每个请求的候选执行情况
             # 只统计实际执行的候选（success 或 failed），不包括 skipped/pending/available
-            executed_counts = (
-                db.query(RequestCandidate.request_id, func.count(RequestCandidate.id))
+            executed_candidates = (
+                db.query(
+                    RequestCandidate.request_id,
+                    RequestCandidate.candidate_index,
+                    RequestCandidate.retry_index,
+                )
                 .filter(
                     RequestCandidate.request_id.in_(request_ids),
                     RequestCandidate.status.in_(["success", "failed"]),
                 )
-                .group_by(RequestCandidate.request_id)
                 .all()
             )
-            # 如果实际执行的候选数 > 1，说明发生了 Provider 切换
-            fallback_map = {req_id: count > 1 for req_id, count in executed_counts}
+
+            # 按 request_id 分组分析
+            request_candidates: dict[str, list[tuple[int, int]]] = defaultdict(list)
+            for req_id, candidate_idx, retry_idx in executed_candidates:
+                request_candidates[req_id].append((candidate_idx, retry_idx))
+
+            for req_id, candidates in request_candidates.items():
+                # 提取所有不同的 candidate_index
+                unique_candidates = set(c[0] for c in candidates)
+                # 如果有多个不同的 candidate_index，说明发生了 Fallback（Provider 切换）
+                fallback_map[req_id] = len(unique_candidates) > 1
+
+                # 检查是否有重试：同一个 candidate_index 有多个 retry_index
+                has_retry = False
+                for candidate_idx in unique_candidates:
+                    retry_indices = [c[1] for c in candidates if c[0] == candidate_idx]
+                    if len(retry_indices) > 1 or (retry_indices and max(retry_indices) > 0):
+                        has_retry = True
+                        break
+                retry_map[req_id] = has_retry
 
         context.add_audit_metadata(
             action="usage_records",
@@ -809,6 +833,7 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
                     "error_message": usage.error_message,
                     "status": usage.status,  # 请求状态: pending, streaming, completed, failed
                     "has_fallback": fallback_map.get(usage.request_id, False),
+                    "has_retry": retry_map.get(usage.request_id, False),
                     "api_format": usage.api_format
                     or (endpoint.api_format if endpoint and endpoint.api_format else None),
                     "api_key_name": provider_api_key.name if provider_api_key else None,

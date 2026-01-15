@@ -21,8 +21,12 @@ class CacheTTL:
     # L1 本地缓存（用于减少 Redis 访问）
     L1_LOCAL = 3  # 3秒
 
-    # 活跃度热力图缓存 - 历史数据变化不频繁
-    ACTIVITY_HEATMAP = 300  # 5分钟
+    # 活跃度热力图缓存 - 历史数据变化不频繁，查询成本高
+    ACTIVITY_HEATMAP = 600  # 10分钟
+
+    # 仪表盘统计缓存
+    DASHBOARD_STATS = 120  # 2分钟（管理员）
+    DASHBOARD_DAILY = 600  # 10分钟（每日统计）
 
     # 并发锁 TTL - 防止死锁
     CONCURRENCY_LOCK = 600  # 10分钟

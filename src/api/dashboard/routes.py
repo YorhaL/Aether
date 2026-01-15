@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from src.api.base.adapter import ApiAdapter, ApiMode
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.pipeline import ApiRequestPipeline
+from src.config.constants import CacheTTL
 from src.core.enums import UserRole
 from src.database import get_db
 from src.models.database import ApiKey, Provider, RequestCandidate, StatsDaily, StatsDailyModel, Usage
@@ -177,7 +178,7 @@ class DashboardStatsAdapter(DashboardAdapter):
 
 
 class AdminDashboardStatsAdapter(AdminApiAdapter):
-    @cache_result(key_prefix="dashboard:admin:stats", ttl=60, user_specific=False)
+    @cache_result(key_prefix="dashboard:admin:stats", ttl=CacheTTL.DASHBOARD_STATS, user_specific=False)
     async def handle(self, context):  # type: ignore[override]
         """管理员仪表盘统计 - 使用预聚合数据优化性能"""
         from zoneinfo import ZoneInfo
@@ -786,7 +787,7 @@ class DashboardProviderStatusAdapter(DashboardAdapter):
 class DashboardDailyStatsAdapter(DashboardAdapter):
     days: int
 
-    @cache_result(key_prefix="dashboard:daily:stats", ttl=300, user_specific=True)
+    @cache_result(key_prefix="dashboard:daily:stats", ttl=CacheTTL.DASHBOARD_DAILY, user_specific=True)
     async def handle(self, context):  # type: ignore[override]
         from zoneinfo import ZoneInfo
         from src.services.system.stats_aggregator import APP_TIMEZONE

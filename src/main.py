@@ -206,6 +206,11 @@ async def lifespan(app: FastAPI):
     task_scheduler = get_scheduler()
     task_scheduler.start()
 
+    # 启动缓存预热（后台任务，不阻塞启动）
+    from src.services.system.cache_warmup import start_cache_warmup
+
+    await start_cache_warmup()
+
     yield  # 应用运行期间
 
     # 关闭时执行

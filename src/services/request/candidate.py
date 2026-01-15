@@ -9,6 +9,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from src.core.batch_committer import get_batch_committer
+from src.core.logger import logger
 from src.models.database import RequestCandidate
 
 
@@ -289,3 +290,40 @@ class RequestCandidateService:
             "available_count": available_count,  # 新增：尚未被调度的候选数
             "failure_rate": round(failure_rate, 2),
         }
+
+    @staticmethod
+    def calculate_candidate_ttfb(
+        db: Session,
+        candidate_id: str,
+        request_start_time: float,
+        global_first_byte_time_ms: int,
+    ) -> int:
+        """
+        计算候选自身的首字节时间 (TTFB)
+
+        请求链路追踪中的 TTFB 应该是"该候选自身"的首字时间，
+        而不是整个请求从开始到收到首字节的时间。
+
+        Args:
+            db: 数据库会话
+            candidate_id: 候选 ID
+            request_start_time: 请求开始时间（Unix timestamp，秒）
+            global_first_byte_time_ms: 全局首字节时间（相对于 request_start_time 的毫秒数）
+
+        Returns:
+            候选自身的 TTFB（毫秒），如果计算失败则返回 global_first_byte_time_ms
+        """
+        try:
+            candidate = db.query(RequestCandidate).filter(RequestCandidate.id == candidate_id).first()
+            if candidate and candidate.started_at:
+                started_at = candidate.started_at
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                # 使用整数毫秒计算，避免浮点精度问题
+                request_start_epoch_ms = round(request_start_time * 1000)
+                started_at_epoch_ms = round(started_at.timestamp() * 1000)
+                first_byte_epoch_ms = request_start_epoch_ms + global_first_byte_time_ms
+                return max(0, int(first_byte_epoch_ms - started_at_epoch_ms))
+        except Exception as e:
+            logger.debug(f"计算候选 TTFB 失败: {e}")
+        return global_first_byte_time_ms

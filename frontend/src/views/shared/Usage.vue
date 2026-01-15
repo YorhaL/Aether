@@ -248,7 +248,7 @@ const hasActiveRequests = computed(() => activeRequestIds.value.length > 0)
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 let globalAutoRefreshTimer: ReturnType<typeof setInterval> | null = null
 const AUTO_REFRESH_INTERVAL = 1000 // 1秒刷新一次（用于活跃请求）
-const GLOBAL_AUTO_REFRESH_INTERVAL = 10000 // 10秒刷新一次（全局自动刷新）
+const GLOBAL_AUTO_REFRESH_INTERVAL = 5000 // 5秒刷新一次（全局自动刷新）
 const globalAutoRefresh = ref(false) // 全局自动刷新开关
 
 // 轮询活跃请求状态（轻量级，只更新状态变化的记录）

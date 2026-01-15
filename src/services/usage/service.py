@@ -1485,6 +1485,7 @@ class UsageService:
         provider_id: Optional[str] = None,
         provider_endpoint_id: Optional[str] = None,
         provider_api_key_id: Optional[str] = None,
+        api_format: Optional[str] = None,
     ) -> Optional[Usage]:
         """
         快速更新使用记录状态
@@ -1500,6 +1501,7 @@ class UsageService:
             provider_id: Provider ID（可选，streaming 状态时更新）
             provider_endpoint_id: Endpoint ID（可选，streaming 状态时更新）
             provider_api_key_id: Provider API Key ID（可选，streaming 状态时更新）
+            api_format: API 格式（可选，用于获取按格式配置的倍率）
 
         Returns:
             更新后的 Usage 记录，如果未找到则返回 None
@@ -1531,12 +1533,51 @@ class UsageService:
             usage.provider_endpoint_id = provider_endpoint_id
         if provider_api_key_id is not None:
             usage.provider_api_key_id = provider_api_key_id
+            # 当设置 provider_api_key_id 时，同步获取并更新 rate_multiplier
+            # 这样前端在 streaming 状态就能显示倍率
+            rate_multiplier = cls._get_rate_multiplier_sync(
+                db, provider_api_key_id, api_format or usage.api_format
+            )
+            if rate_multiplier is not None:
+                usage.rate_multiplier = rate_multiplier
 
         db.commit()
 
         logger.debug(f"更新使用记录状态: request_id={request_id}, {old_status} -> {status}")
 
         return usage
+
+    @staticmethod
+    def _get_rate_multiplier_sync(
+        db: Session,
+        provider_api_key_id: str,
+        api_format: Optional[str] = None,
+    ) -> Optional[float]:
+        """
+        同步获取 ProviderAPIKey 的 rate_multiplier
+
+        Args:
+            db: 数据库会话
+            provider_api_key_id: ProviderAPIKey ID
+            api_format: API 格式（可选），如 "CLAUDE"、"OPENAI"
+
+        Returns:
+            rate_multiplier 或 None
+        """
+        from src.services.cache.provider_cache import ProviderCacheService
+
+        provider_key = (
+            db.query(ProviderAPIKey.rate_multiplier, ProviderAPIKey.rate_multipliers)
+            .filter(ProviderAPIKey.id == provider_api_key_id)
+            .first()
+        )
+
+        if not provider_key:
+            return None
+
+        return ProviderCacheService.compute_rate_multiplier(
+            provider_key.rate_multiplier, provider_key.rate_multipliers, api_format
+        )
 
     @classmethod
     def get_active_requests(
