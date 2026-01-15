@@ -193,7 +193,7 @@
           <TableHead class="h-12 font-semibold w-[80px]">
             API格式
           </TableHead>
-          <TableHead class="h-12 font-semibold w-[50px] text-center">
+          <TableHead class="h-12 font-semibold w-[70px] text-center">
             类型
           </TableHead>
           <TableHead class="h-12 font-semibold w-[140px] text-right">
@@ -372,7 +372,7 @@
               class="text-muted-foreground text-xs"
             >-</span>
           </TableCell>
-          <TableCell class="text-center py-4 w-[50px]">
+          <TableCell class="text-center py-4 w-[70px]">
             <!-- 优先显示请求状态 -->
             <Badge
               v-if="record.status === 'pending'"
