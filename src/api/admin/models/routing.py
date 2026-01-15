@@ -18,7 +18,10 @@ from sqlalchemy.orm import Session, selectinload
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.crypto import CryptoService
-from src.core.model_permissions import parse_allowed_models_to_list
+from src.core.model_permissions import (
+    check_model_allowed_with_mappings,
+    parse_allowed_models_to_list,
+)
 from src.database import get_db
 from src.models.database import (
     GlobalModel,
@@ -247,6 +250,13 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
                     keys_by_provider[key.provider_id] = []
                 keys_by_provider[key.provider_id].append(key)
 
+        # 提取 GlobalModel 的 model_mappings（用于 Key 白名单匹配）
+        global_model_mappings: List[str] = []
+        if global_model.config and isinstance(global_model.config, dict):
+            mappings = global_model.config.get("model_mappings")
+            if isinstance(mappings, list):
+                global_model_mappings = [m for m in mappings if isinstance(m, str)]
+
         # 构建 Provider 路由信息
         provider_infos: List[RoutingProviderInfo] = []
         for model in models:
@@ -358,7 +368,20 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
                         )
                     )
 
-                active_keys = sum(1 for k in key_infos if k.is_active)
+                # 计算有效 Keys 数量：is_active 且模型权限匹配
+                def is_key_effective(k: RoutingKeyInfo) -> bool:
+                    if not k.is_active:
+                        return False
+                    # 检查模型权限（包括正则映射匹配）
+                    is_allowed, _ = check_model_allowed_with_mappings(
+                        model_name=global_model.name,
+                        allowed_models=k.allowed_models,
+                        resolved_model_name=global_model.name,
+                        model_mappings=global_model_mappings,
+                    )
+                    return is_allowed
+
+                active_keys = sum(1 for k in key_infos if is_key_effective(k))
                 endpoint_infos.append(
                     RoutingEndpointInfo(
                         id=ep.id or "",
@@ -468,13 +491,6 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
                     allowed_models=allowed_models_list,
                 )
             )
-
-        # 从 GlobalModel.config 中提取 model_mappings
-        global_model_mappings: List[str] = []
-        if global_model.config and isinstance(global_model.config, dict):
-            mappings = global_model.config.get("model_mappings")
-            if isinstance(mappings, list):
-                global_model_mappings = [m for m in mappings if isinstance(m, str)]
 
         return ModelRoutingPreviewResponse(
             global_model_id=global_model.id,
