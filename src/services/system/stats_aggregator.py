@@ -17,6 +17,7 @@ from src.models.database import (
     RequestCandidate,
     StatsDaily,
     StatsDailyModel,
+    StatsDailyProvider,
     StatsSummary,
     StatsUserDaily,
     Usage,
@@ -283,6 +284,68 @@ class StatsAggregatorService:
         db.commit()
         logger.info(
             f"[StatsAggregator] 聚合日期 {date.date()} 模型统计完成: {len(results)} 个模型"
+        )
+        return results
+
+    @staticmethod
+    def aggregate_daily_provider_stats(db: Session, date: datetime) -> list[StatsDailyProvider]:
+        """聚合指定日期的供应商维度统计数据
+
+        Args:
+            db: 数据库会话
+            date: 要聚合的业务日期
+
+        Returns:
+            StatsDailyProvider 记录列表
+        """
+        day_start, day_end = _get_business_day_range(date)
+
+        # 按供应商分组统计
+        provider_name_expr = func.coalesce(Usage.provider_name, "Unknown")
+        provider_stats = (
+            db.query(
+                provider_name_expr.label("provider_name"),
+                func.count(Usage.id).label("total_requests"),
+                func.sum(Usage.input_tokens).label("input_tokens"),
+                func.sum(Usage.output_tokens).label("output_tokens"),
+                func.sum(Usage.cache_creation_input_tokens).label("cache_creation_tokens"),
+                func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
+                func.sum(Usage.total_cost_usd).label("total_cost"),
+            )
+            .filter(and_(Usage.created_at >= day_start, Usage.created_at < day_end))
+            .group_by(provider_name_expr)
+            .all()
+        )
+
+        results = []
+        for stat in provider_stats:
+            existing = (
+                db.query(StatsDailyProvider)
+                .filter(and_(StatsDailyProvider.date == day_start, StatsDailyProvider.provider_name == stat.provider_name))
+                .first()
+            )
+
+            if existing:
+                record = existing
+            else:
+                record = StatsDailyProvider(
+                    id=str(uuid.uuid4()), date=day_start, provider_name=stat.provider_name
+                )
+
+            record.total_requests = stat.total_requests or 0
+            record.input_tokens = int(stat.input_tokens or 0)
+            record.output_tokens = int(stat.output_tokens or 0)
+            record.cache_creation_tokens = int(stat.cache_creation_tokens or 0)
+            record.cache_read_tokens = int(stat.cache_read_tokens or 0)
+            record.total_cost = float(stat.total_cost or 0)
+
+            if not existing:
+                db.add(record)
+            results.append(record)
+
+        db.commit()
+        logger.info(
+            f"[StatsAggregator] 聚合日期 {date.date()} 供应商统计完成: {len(results)} 个供应商"
         )
         return results
 
@@ -613,6 +676,7 @@ class StatsAggregatorService:
         while current_date < today_local:
             StatsAggregatorService.aggregate_daily_stats(db, current_date)
             StatsAggregatorService.aggregate_daily_model_stats(db, current_date)
+            StatsAggregatorService.aggregate_daily_provider_stats(db, current_date)
             count += 1
             current_date += timedelta(days=1)
 
