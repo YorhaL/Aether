@@ -4,7 +4,7 @@
     title="优先级管理"
     description="调整提供商和 API Key 的优先级顺序，保存后自动切换对应的调度策略"
     :icon="ListOrdered"
-    size="3xl"
+    size="2xl"
     @update:model-value="handleDialogUpdate"
   >
     <div class="space-y-4">
@@ -39,7 +39,7 @@
       </div>
 
       <!-- 内容区域 -->
-      <div class="min-h-[420px]">
+      <div class="min-h-[70vh]">
         <!-- 提供商优先级 -->
         <div
           v-show="activeMainTab === 'provider'"
@@ -63,12 +63,12 @@
           <!-- 提供商列表 -->
           <div
             v-else
-            class="space-y-2 max-h-[380px] overflow-y-auto pr-1"
+            class="space-y-1 max-h-[65vh] overflow-y-auto pr-1"
           >
             <div
               v-for="(provider, index) in sortedProviders"
               :key="provider.id"
-              class="group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all duration-200"
+              class="group flex items-center gap-3 px-3 py-1.5 rounded-lg border transition-all duration-200"
               :class="[
                 draggedProvider === index
                   ? 'border-primary/50 bg-primary/5 shadow-md scale-[1.01]'
@@ -122,26 +122,30 @@
                   停用
                 </Badge>
               </div>
-              <!-- API 格式标签 -->
-              <div
-                v-if="provider.api_formats?.length"
-                class="flex items-center gap-1 shrink-0"
-              >
-                <span
-                  v-for="fmt in provider.api_formats"
-                  :key="fmt"
-                  class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
-                >
-                  {{ API_FORMAT_SHORT[fmt] || fmt }}
-                </span>
+              <div class="flex items-center gap-3 shrink-0 ml-2">
+                <!-- API 格式标签 (自适应宽度) -->
+                <div class="flex items-center justify-end gap-1">
+                  <template v-if="provider.api_formats?.length">
+                    <span
+                      v-for="fmt in provider.api_formats"
+                      :key="fmt"
+                      class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground whitespace-nowrap"
+                    >
+                      {{ API_FORMAT_SHORT[fmt] || fmt }}
+                    </span>
+                  </template>
+                </div>
+                
+                <!-- 余额显示 (表格对齐) -->
+                <div class="min-w-[4rem] text-right">
+                  <span
+                    v-if="formatBalanceDisplay(provider.id)"
+                    class="text-xs font-semibold text-foreground/90 tabular-nums"
+                  >
+                    {{ formatBalanceDisplay(provider.id) }}
+                  </span>
+                </div>
               </div>
-              <!-- 余额显示-->
-              <span
-                v-if="formatBalanceDisplay(provider.id)"
-                class="text-xs shrink-0"
-              >
-                <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(provider.id) }}</span>
-              </span>
             </div>
           </div>
         </div>
@@ -209,7 +213,7 @@
               >
                 <div
                   v-if="keysByFormat[format]?.length > 0"
-                  class="space-y-2 max-h-[380px] overflow-y-auto pr-1"
+                  class="space-y-2 max-h-[65vh] overflow-y-auto pr-1"
                 >
                   <div
                     v-for="(key, index) in keysByFormat[format]"

@@ -284,6 +284,7 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
             "api_format": e.api_format,
             "health_score": endpoint_health_map.get(e.id, 1.0),
             "is_active": e.is_active,
+            "total_keys": len(keys_by_endpoint.get(e.id, [])),
             "active_keys": active_keys_by_endpoint.get(e.id, 0),
         }
         for e in endpoints
