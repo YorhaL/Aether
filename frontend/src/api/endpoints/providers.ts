@@ -68,6 +68,7 @@ export interface TestModelRequest {
   provider_id: string
   model_name: string
   api_key_id?: string
+  endpoint_id?: string
   message?: string
   api_format?: string
 }

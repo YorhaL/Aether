@@ -45,6 +45,7 @@ class TestModelRequest(BaseModel):
     provider_id: str
     model_name: str
     api_key_id: Optional[str] = None
+    endpoint_id: Optional[str] = None  # 指定使用的端点ID
     stream: bool = False
     message: Optional[str] = "你好"
     api_format: Optional[str] = None  # 指定使用的API格式，如果不指定则使用端点的默认格式
@@ -200,17 +201,73 @@ async def test_model(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
 
-    # 构建 api_format -> endpoint 映射
+    # 构建 api_format -> endpoint 映射 和 id -> endpoint 映射
     format_to_endpoint: dict[str, ProviderEndpoint] = {}
+    id_to_endpoint: dict[str, ProviderEndpoint] = {}
     for ep in provider.endpoints:
         if ep.is_active:
             format_to_endpoint[ep.api_format] = ep
+            id_to_endpoint[ep.id] = ep
 
     # 找到合适的端点和 API Key
     endpoint = None
     api_key = None
 
-    if request.api_key_id:
+    # 优先级: api_format > endpoint_id > api_key_id > 自动选择
+    # 如果指定了 api_format，优先使用该格式对应的 endpoint
+    if request.api_format:
+        endpoint = format_to_endpoint.get(request.api_format)
+        if not endpoint:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active endpoint found for API format: {request.api_format}"
+            )
+
+        if request.api_key_id:
+            # 使用指定的 Key，但需要校验是否支持该格式
+            api_key = next(
+                (key for key in provider.api_keys if key.id == request.api_key_id and key.is_active),
+                None
+            )
+            if api_key and request.api_format not in (api_key.api_formats or []):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"API Key does not support format: {request.api_format}"
+                )
+        else:
+            # 找支持该格式的第一个可用 Key
+            for key in provider.api_keys:
+                if not key.is_active:
+                    continue
+                if request.api_format in (key.api_formats or []):
+                    api_key = key
+                    break
+    elif request.endpoint_id:
+        # 使用指定的端点
+        endpoint = id_to_endpoint.get(request.endpoint_id)
+        if not endpoint:
+            raise HTTPException(status_code=404, detail="Endpoint not found or not active")
+
+        if request.api_key_id:
+            # 同时指定了 Key，需要校验是否支持该端点格式
+            api_key = next(
+                (key for key in provider.api_keys if key.id == request.api_key_id and key.is_active),
+                None
+            )
+            if api_key and endpoint.api_format not in (api_key.api_formats or []):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"API Key does not support endpoint format: {endpoint.api_format}"
+                )
+        else:
+            # 找支持该端点格式的第一个可用 Key
+            for key in provider.api_keys:
+                if not key.is_active:
+                    continue
+                if endpoint.api_format in (key.api_formats or []):
+                    api_key = key
+                    break
+    elif request.api_key_id:
         # 使用指定的 API Key
         api_key = next(
             (key for key in provider.api_keys if key.id == request.api_key_id and key.is_active),
@@ -273,24 +330,6 @@ async def test_model(
 
         logger.debug(f"[test-model] 使用 Adapter: {adapter_class.__name__}")
         logger.debug(f"[test-model] 端点 API Format: {endpoint.api_format}")
-
-        # 如果请求指定了 api_format，优先使用它
-        target_api_format = request.api_format or endpoint.api_format
-        if request.api_format and request.api_format != endpoint.api_format:
-            logger.debug(f"[test-model] 请求指定 API Format: {request.api_format}")
-            # 重新获取适配器
-            adapter_class = _get_adapter_for_format(request.api_format)
-            if not adapter_class:
-                return {
-                    "success": False,
-                    "error": f"Unknown API format: {request.api_format}",
-                    "provider": {
-                        "id": provider.id,
-                        "name": provider.name,
-                    },
-                    "model": request.model_name,
-                }
-            logger.debug(f"[test-model] 重新选择 Adapter: {adapter_class.__name__}")
 
         # 准备测试请求数据
         check_request = {

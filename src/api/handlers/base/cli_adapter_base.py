@@ -684,17 +684,18 @@ class CliAdapterBase(ApiAdapter):
         raise NotImplementedError(f"{cls.FORMAT_ID} adapter must implement build_endpoint_url")
 
     @classmethod
-    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建CLI API请求体 - 子类应覆盖
+    def build_request_body(cls, request_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """构建测试请求体，使用转换器注册表自动处理格式转换
 
         Args:
-            request_data: 请求数据
+            request_data: 可选的请求数据，会与默认测试请求合并
 
         Returns:
-            请求体字典
+            转换为目标 API 格式的请求体
         """
-        raise NotImplementedError(f"{cls.FORMAT_ID} adapter must implement build_request_body")
+        from src.api.handlers.base.request_builder import build_test_request_body
+
+        return build_test_request_body(cls.FORMAT_ID, request_data)
 
     @classmethod
     def get_cli_user_agent(cls) -> Optional[str]:

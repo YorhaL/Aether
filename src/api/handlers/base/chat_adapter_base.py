@@ -107,10 +107,18 @@ class ChatAdapterBase(ApiAdapter):
         return build_adapter_headers(cls._get_api_format(), api_key, extra_headers)
 
     @classmethod
-    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """构建请求体，子类可以覆盖以自定义请求格式转换"""
-        # 默认实现：直接使用请求数据
-        return request_data.copy()
+    def build_request_body(cls, request_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """构建测试请求体，使用转换器注册表自动处理格式转换
+
+        Args:
+            request_data: 可选的请求数据，会与默认测试请求合并
+
+        Returns:
+            转换为目标 API 格式的请求体
+        """
+        from src.api.handlers.base.request_builder import build_test_request_body
+
+        return build_test_request_body(cls.FORMAT_ID, request_data)
 
     def extract_api_key(self, request: Request) -> Optional[str]:
         """从请求中提取 API 密钥，使用统一的 headers.py 实现"""

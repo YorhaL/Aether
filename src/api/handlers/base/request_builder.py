@@ -28,6 +28,67 @@ SENSITIVE_HEADERS: FrozenSet[str] = UPSTREAM_DROP_HEADERS
 
 
 # ==============================================================================
+# 测试请求常量与辅助函数
+# ==============================================================================
+
+# 标准测试请求体（OpenAI 格式）
+# 用于 check_endpoint 等测试场景，使用简单安全的消息内容避免触发安全过滤
+DEFAULT_TEST_REQUEST: Dict[str, Any] = {
+    "messages": [{"role": "user", "content": "Hi"}],
+    "max_tokens": 5,
+    "temperature": 0,
+}
+
+
+def get_test_request_data(request_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """获取测试请求数据
+
+    如果传入 request_data，则合并到默认测试请求中；
+    否则使用默认测试请求。
+
+    Args:
+        request_data: 用户提供的请求数据（会覆盖默认值）
+
+    Returns:
+        合并后的测试请求数据（OpenAI 格式）
+    """
+    if request_data:
+        merged = DEFAULT_TEST_REQUEST.copy()
+        merged.update(request_data)
+        return merged
+    return DEFAULT_TEST_REQUEST.copy()
+
+
+def build_test_request_body(
+    format_id: str,
+    request_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """构建测试请求体，自动处理格式转换
+
+    使用 converter_registry 将 OpenAI 格式的测试请求转换为目标格式。
+
+    Args:
+        format_id: 目标 API 格式 ID（如 "CLAUDE", "GEMINI", "OPENAI_CLI"）
+        request_data: 可选的请求数据，会与默认测试请求合并
+
+    Returns:
+        转换为目标 API 格式的请求体
+    """
+    from src.core.api_format.conversion import converter_registry
+    from src.core.api_format.utils import get_base_format
+
+    # 获取测试请求数据（OpenAI 格式）
+    source_data = get_test_request_data(request_data)
+
+    # CLI 格式使用基础格式进行转换（CLAUDE_CLI -> CLAUDE）
+    # 因为 converter_registry 只注册了基础格式之间的转换器
+    target_format = get_base_format(format_id) or format_id
+
+    # 使用注册表进行格式转换 (OPENAI -> 目标基础格式)
+    return converter_registry.convert_request(source_data, "OPENAI", target_format)
+
+
+# ==============================================================================
 # 请求构建器
 # ==============================================================================
 

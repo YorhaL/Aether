@@ -1,6 +1,9 @@
 import client from '../client'
 import type { EndpointAPIKey, AllowedModels } from './types'
 
+// Re-export types for convenience
+export type { EndpointAPIKey, AllowedModels }
+
 /**
  * 能力定义类型
  */

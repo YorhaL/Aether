@@ -150,13 +150,47 @@
               <span class="font-mono text-sm truncate">
                 {{ mapping.name }}
               </span>
+              <!-- 测试按钮（支持多格式选择） -->
+              <DropdownMenu
+                v-if="getItemAvailableFormats(item).length > 1"
+                v-model:open="formatMenuOpen[`${item.key}-${mapping.name}`]"
+              >
+                <DropdownMenuTrigger as-child>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0"
+                    title="测试映射"
+                    :disabled="testingMapping === `${item.key}-${mapping.name}`"
+                  >
+                    <Loader2
+                      v-if="testingMapping === `${item.key}-${mapping.name}`"
+                      class="w-3 h-3 animate-spin"
+                    />
+                    <Play
+                      v-else
+                      class="w-3 h-3"
+                    />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    v-for="fmt in getItemAvailableFormats(item)"
+                    :key="fmt"
+                    @select="testMapping(item, mapping, fmt)"
+                  >
+                    {{ fmt }}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button
+                v-else
                 variant="ghost"
                 size="icon"
                 class="h-7 w-7 shrink-0"
                 title="测试映射"
-                :disabled="testingMapping === `${item.key}-${mapping.name}`"
-                @click="testMapping(item, mapping)"
+                :disabled="testingMapping === `${item.key}-${mapping.name}` || getItemAvailableFormats(item).length === 0"
+                @click="testMapping(item, mapping, getItemAvailableFormats(item)[0])"
               >
                 <Loader2
                   v-if="testingMapping === `${item.key}-${mapping.name}`"
@@ -281,7 +315,10 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { Tag, Plus, Edit, Trash2, ChevronRight, Loader2, Play } from 'lucide-vue-next'
-import { Card, Button, Badge } from '@/components/ui'
+import {
+  Card, Button, Badge,
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem
+} from '@/components/ui'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import ModelMappingDialog, { type AliasGroup } from '../ModelMappingDialog.vue'
 import { useToast } from '@/composables/useToast'
@@ -293,6 +330,9 @@ import {
   type ProviderModelAlias,
   type ProviderMappingPreviewResponse
 } from '@/api/endpoints'
+import { getProviderEndpoints } from '@/api/endpoints/endpoints'
+import { getProviderKeys, type EndpointAPIKey } from '@/api/endpoints/keys'
+import type { ProviderEndpoint } from '@/api/endpoints/types'
 import { updateModel } from '@/api/endpoints/models'
 import { parseTestModelError } from '@/utils/errorParser'
 
@@ -340,6 +380,15 @@ const editingGroup = ref<AliasGroup | null>(null)
 const deletingGroup = ref<AliasGroup | null>(null)
 const testingMapping = ref<string | null>(null)
 const preselectedModelId = ref<string | null>(null)
+
+// 端点数据（用于测试格式选择）
+const providerEndpoints = ref<ProviderEndpoint[]>([])
+
+// Key 数据（用于判断支持的格式）
+const providerKeys = ref<EndpointAPIKey[]>([])
+
+// 测试下拉菜单状态
+const formatMenuOpen = ref<Record<string, boolean>>({})
 
 // 展开状态
 const expandedItems = ref<Set<number>>(new Set())
@@ -470,12 +519,16 @@ const combinedMappings = computed<CombinedMapping[]>(() => {
 async function loadData() {
   try {
     loading.value = true
-    const [modelsData, previewData] = await Promise.all([
+    const [modelsData, previewData, endpointsData, keysData] = await Promise.all([
       getProviderModels(props.provider.id),
-      getProviderMappingPreview(props.provider.id).catch(() => null)
+      getProviderMappingPreview(props.provider.id).catch(() => null),
+      getProviderEndpoints(props.provider.id).catch(() => []),
+      getProviderKeys(props.provider.id).catch(() => [])
     ])
     models.value = modelsData
     aliasMappingPreview.value = previewData
+    providerEndpoints.value = endpointsData
+    providerKeys.value = keysData
   } catch (err: any) {
     showError(err.response?.data?.detail || '加载失败', '错误')
   } finally {
@@ -566,16 +619,69 @@ async function onDialogSaved() {
   emit('refresh')
 }
 
-// 测试模型映射（精确映射）
-async function testMapping(item: CombinedMapping, mapping: MappingItem) {
+// 获取可用的 API 格式（有活跃端点，去重）
+const availableApiFormats = computed(() => {
+  const formats = new Set(
+    providerEndpoints.value
+      .filter(ep => ep.is_active)
+      .map(ep => ep.api_format)
+  )
+  return [...formats]
+})
+
+// 获取映射项支持的 API 格式
+// 逻辑：找到支持该映射格式的所有活跃 Key，获取这些 Key 支持的所有格式，与活跃端点格式取交集
+function getItemAvailableFormats(item: CombinedMapping): string[] {
+  // 精确映射：基于 group.apiFormats 筛选
+  if (item.type === 'exact' && item.group?.apiFormats && item.group.apiFormats.length > 0) {
+    const mappingFormats = item.group.apiFormats
+
+    // 找到所有支持该映射格式的活跃 Key
+    const supportingKeys = providerKeys.value.filter(key => {
+      if (!key.is_active) return false
+      // Key 的 api_formats 与映射的 apiFormats 有交集
+      return key.api_formats?.some(fmt => mappingFormats.includes(fmt))
+    })
+
+    if (supportingKeys.length === 0) {
+      return []
+    }
+
+    // 收集这些 Key 支持的所有格式
+    const keyFormats = new Set<string>()
+    for (const key of supportingKeys) {
+      for (const fmt of key.api_formats || []) {
+        keyFormats.add(fmt)
+      }
+    }
+
+    // 与活跃端点格式取交集
+    return availableApiFormats.value.filter(fmt => keyFormats.has(fmt))
+  }
+
+  // 正则映射或无限制：返回所有有活跃 Key 支持的端点格式
+  const allKeyFormats = new Set<string>()
+  for (const key of providerKeys.value) {
+    if (!key.is_active) continue
+    for (const fmt of key.api_formats || []) {
+      allKeyFormats.add(fmt)
+    }
+  }
+  return availableApiFormats.value.filter(fmt => allKeyFormats.has(fmt))
+}
+
+// 测试精确映射（直接发请求或显示下拉菜单选择格式）
+async function testMapping(item: CombinedMapping, mapping: MappingItem, apiFormat?: string) {
   const testingKey = `${item.key}-${mapping.name}`
   testingMapping.value = testingKey
+  formatMenuOpen.value[testingKey] = false
 
   try {
     const result = await testModel({
       provider_id: props.provider.id,
       model_name: mapping.name,
-      message: "hello"
+      message: "hello",
+      api_format: apiFormat
     })
 
     if (result.success) {
@@ -591,7 +697,7 @@ async function testMapping(item: CombinedMapping, mapping: MappingItem) {
   }
 }
 
-// 测试正则映射（指定 Key）
+// 测试正则映射（指定 Key，直接发请求，因为已经有 Key 信息）
 async function testRegexMapping(item: CombinedMapping, keyItem: MatchedKeyInfo, match: MappingItem) {
   const testingKey = `${item.key}-${keyItem.keyId}-${match.name}`
   testingMapping.value = testingKey

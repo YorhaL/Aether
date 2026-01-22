@@ -149,19 +149,7 @@ class GeminiCliAdapter(CliAdapterBase):
             prefix = f"{base_url}/v1beta"
         return f"{prefix}/models/{effective_model_name}:generateContent"
 
-    @classmethod
-    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """构建Gemini CLI API请求体"""
-        return {
-            "contents": request_data.get("messages", []),
-            "generationConfig": {
-                "maxOutputTokens": request_data.get("max_tokens", 100),
-                "temperature": request_data.get("temperature", 0.7),
-            },
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}
-            ],
-        }
+    # build_request_body 使用基类实现，通过 converter_registry 自动转换 OPENAI -> GEMINI_CLI
 
     @classmethod
     def get_cli_user_agent(cls) -> Optional[str]:

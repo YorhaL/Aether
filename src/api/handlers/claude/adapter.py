@@ -198,14 +198,7 @@ class ClaudeChatAdapter(ChatAdapterBase):
         else:
             return f"{base_url}/v1/messages"
 
-    @classmethod
-    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """构建Claude API请求体"""
-        return {
-            "model": request_data.get("model"),
-            "max_tokens": request_data.get("max_tokens", 100),
-            "messages": request_data.get("messages", []),
-        }
+    # build_request_body 使用基类实现，通过 converter_registry 自动转换 OPENAI -> CLAUDE
 
 
 def build_claude_adapter(x_app_header: Optional[str]):

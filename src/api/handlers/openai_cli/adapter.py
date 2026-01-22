@@ -70,10 +70,8 @@ class OpenAICliAdapter(CliAdapterBase):
         else:
             return f"{base_url}/v1/chat/completions"
 
-    @classmethod
-    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """构建OpenAI CLI API请求体"""
-        return request_data.copy()
+    # build_request_body 使用基类实现
+    # OPENAI -> OPENAI_CLI 无转换器，会直接透传原始请求
 
     @classmethod
     def get_cli_user_agent(cls) -> Optional[str]:
