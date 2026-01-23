@@ -255,6 +255,19 @@ class ModelCacheService:
         logger.debug(f"GlobalModel 缓存已清除: {global_model_id}")
 
     @staticmethod
+    async def invalidate_all_resolve_cache() -> None:
+        """
+        清除所有 GlobalModel 解析缓存
+
+        在 Provider 启用/禁用时调用，因为 Provider 状态变更会影响模型解析结果。
+        """
+        try:
+            deleted = await CacheService.delete_pattern("global_model:resolve:*")
+            logger.debug(f"已清除 {deleted} 个 GlobalModel resolve 缓存")
+        except Exception as e:
+            logger.error(f"GlobalModel resolve 缓存清除失败: {e}")
+
+    @staticmethod
     async def resolve_global_model_by_name_or_mapping(
         db: Session, model_name: str
     ) -> Optional[GlobalModel]:

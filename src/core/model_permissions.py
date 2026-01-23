@@ -350,8 +350,8 @@ def check_model_allowed_with_mappings(
 
     匹配优先级：
     1. 精确匹配 model_name（用户请求的模型名，即 GlobalModel.name）
-    2. 精确匹配 candidate_models 中的任一模型名（Provider 的 provider_model_mappings）
-    3. 遍历 model_mappings，检查每个映射是否匹配 allowed_models 中的任一项
+    2. 精确匹配 candidate_models ∩ allowed_models（Provider 支持且 Key 允许的模型名）
+    3. 遍历 model_mappings 正则，检查 allowed_models 中是否有匹配项
 
     映射匹配顺序说明：
     - 按 allowed_models 集合的迭代顺序遍历（通常为字母顺序，因为内部使用 set）
@@ -362,8 +362,9 @@ def check_model_allowed_with_mappings(
     Args:
         model_name: 请求的模型名称（GlobalModel.name）
         allowed_models: 允许的模型配置（来自 Provider Key）
-        model_mappings: GlobalModel 的映射列表（来自 config.model_mappings）
-        candidate_models: 可选的候选模型集合（Provider 的 provider_model_names，包含 provider_model_name 和 provider_model_mappings）
+        model_mappings: GlobalModel 的映射列表（来自 config.model_mappings），支持正则表达式
+        candidate_models: 可选的候选模型集合（Provider 的 provider_model_names），
+                         仅用于步骤 2 的精确匹配，不影响步骤 3 的正则匹配
 
     Returns:
         (is_allowed, matched_model_name):
@@ -400,13 +401,15 @@ def check_model_allowed_with_mappings(
     if not model_mappings:
         return False, None
 
-    # 映射匹配的搜索空间：allowed_models ∩ candidate_models
-    # 只在 Provider 实际支持的模型名中进行正则匹配，避免匹配到 Provider 不支持的模型
-    if candidate_models is not None:
-        allowed_set = allowed_set & candidate_models
-        if len(allowed_set) == 0:
-            return False, None
-
+    # 正则映射匹配：直接在 allowed_models 上进行匹配
+    # GlobalModel.config.model_mappings 定义了"可以用哪些 Provider 模型名来提供服务"
+    # 如果 Key 的 allowed_models 中有能被正则匹配的模型名，说明这个 Key 可以用于请求
+    #
+    # 注意：不再用 candidate_models 限制搜索空间
+    # 原因：用户可能只配置了 GlobalModel 的正则映射规则，而没有在 Provider Model 的
+    # provider_model_mappings 中添加对应的模型名。正则映射的语义是"将请求重定向到匹配的模型名"，
+    # 所以应该直接检查 Key 的 allowed_models 是否包含能被正则匹配的模型名。
+    #
     # 遍历 allowed_set，检查是否有模型名能匹配 model_mappings 中的任一正则
     # 排序确保确定性行为
     for allowed_model in sorted(allowed_set):

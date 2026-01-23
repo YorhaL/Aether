@@ -905,7 +905,7 @@ const getStatusColorClass = (status: string) => {
 .sub-dot.status-failed { background: #ef4444; color: #ef4444; }
 .sub-dot.status-cancelled { background: #f59e0b; color: #f59e0b; }
 .sub-dot.status-pending { background: #3b82f6; color: #3b82f6; }
-.sub-dot.status-skipped { background: #1f2937; color: #1f2937; }
+.sub-dot.status-skipped { background: hsl(var(--primary)); color: hsl(var(--primary)); }
 .sub-dot.status-available { background: #d1d5db; color: #d1d5db; }
 
 /* 选中状态：呼吸动画 + 涟漪效果 */
@@ -968,7 +968,7 @@ const getStatusColorClass = (status: string) => {
 .node-dot.status-failed { color: #ef4444; }
 .node-dot.status-cancelled { color: #f59e0b; }
 .node-dot.status-pending { color: #3b82f6; }
-.node-dot.status-skipped { color: #1f2937; }
+.node-dot.status-skipped { color: hsl(var(--primary)); }
 .node-dot.status-available { color: #d1d5db; }
 
 .node-line {
@@ -1016,7 +1016,7 @@ const getStatusColorClass = (status: string) => {
 .title-dot.status-failed { background: #ef4444; }
 .title-dot.status-cancelled { background: #f59e0b; }
 .title-dot.status-pending { background: #3b82f6; }
-.title-dot.status-skipped { background: #1f2937; }
+.title-dot.status-skipped { background: hsl(var(--primary)); }
 .title-dot.status-available { background: #d1d5db; }
 
 .title-text {
@@ -1090,27 +1090,27 @@ const getStatusColorClass = (status: string) => {
 
 .status-tag.status-success {
   background: #22c55e20;
-  color: #16a34a;
+  color: #22c55e;
 }
 
 .status-tag.status-failed {
   background: #ef444420;
-  color: #dc2626;
+  color: #ef4444;
 }
 
 .status-tag.status-cancelled {
   background: #f59e0b20;
-  color: #d97706;
+  color: #f59e0b;
 }
 
 .status-tag.status-pending {
   background: #3b82f620;
-  color: #2563eb;
+  color: #3b82f6;
 }
 
 .status-tag.status-skipped {
-  background: #1f293720;
-  color: #1f2937;
+  background: hsl(var(--primary) / 0.15);
+  color: hsl(var(--primary));
 }
 
 .status-tag.status-available {

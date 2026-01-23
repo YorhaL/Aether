@@ -567,10 +567,20 @@ const availableFormats = computed(() => {
   return Object.keys(keysByFormat.value).sort()
 })
 
+// 排序 providers：启用的在前，停用的在后，各自按优先级排序
+function sortProvidersByActiveAndPriority(providers: ProviderWithEndpointsSummary[]) {
+  return [...providers].sort((a, b) => {
+    if (a.is_active !== b.is_active) {
+      return a.is_active ? -1 : 1
+    }
+    return a.provider_priority - b.provider_priority
+  })
+}
+
 // 监听 props.providers 变化
 watch(() => props.providers, (newProviders) => {
   if (newProviders) {
-    sortedProviders.value = [...newProviders].sort((a, b) => a.provider_priority - b.provider_priority)
+    sortedProviders.value = sortProvidersByActiveAndPriority(newProviders)
   }
 }, { immediate: true })
 
@@ -691,8 +701,8 @@ function finishEditProviderPriority(provider: ProviderWithEndpointsSummary, even
         provider_priority: newPriority
       }
     }
-    // 按 provider_priority 重新排序
-    sortedProviders.value = [...sortedProviders.value].sort((a, b) => a.provider_priority - b.provider_priority)
+    // 重新排序
+    sortedProviders.value = sortProvidersByActiveAndPriority(sortedProviders.value)
   }
 
   editingProviderPriority.value = null
@@ -777,7 +787,7 @@ function handleProviderDrop(dropIndex: number) {
   })
 
   // 重新排序
-  sortedProviders.value = [...items].sort((a, b) => a.provider_priority - b.provider_priority)
+  sortedProviders.value = sortProvidersByActiveAndPriority(items)
   draggedProvider.value = null
   dragOverProvider.value = null
 }
