@@ -80,7 +80,12 @@ class UsageRecordParams:
             raise ValueError(f"无效的 HTTP 状态码: {self.status_code}")
 
         # 状态值校验
-        valid_statuses = {"pending", "streaming", "completed", "failed"}
+        # - pending: 请求已创建，等待处理
+        # - streaming: 流式响应进行中
+        # - completed: 请求成功完成
+        # - failed: 请求失败（上游错误、超时等）
+        # - cancelled: 客户端主动断开连接
+        valid_statuses = {"pending", "streaming", "completed", "failed", "cancelled"}
         if self.status not in valid_statuses:
             raise ValueError(f"无效的状态值: {self.status}，有效值: {valid_statuses}")
 
@@ -1006,6 +1011,216 @@ class UsageService:
             raise
 
         return usage
+
+    @classmethod
+    async def record_usage_batch(
+        cls,
+        db: Session,
+        records: List[Dict[str, Any]],
+    ) -> List[Usage]:
+        """批量记录使用量（高性能版，单次提交多条记录）
+
+        此方法针对高并发场景优化，特点：
+        - 批量插入 Usage 记录，减少 commit 次数
+        - 聚合更新用户/API Key 统计（按 user_id/api_key_id 分组）
+        - 聚合更新 GlobalModel 和 Provider 统计
+
+        Args:
+            db: 数据库会话
+            records: 记录列表，每条记录包含 record_usage 所需的参数
+
+        Returns:
+            创建的 Usage 记录列表
+        """
+        if not records:
+            return []
+
+        from collections import defaultdict
+        from sqlalchemy import update
+        from src.models.database import ApiKey as ApiKeyModel, User as UserModel, GlobalModel
+
+        usages: List[Usage] = []
+        user_costs: Dict[str, float] = defaultdict(float)  # user_id -> total_cost
+        apikey_stats: Dict[str, Dict[str, Any]] = defaultdict(
+            lambda: {"requests": 0, "cost": 0.0, "is_standalone": False}
+        )
+        model_counts: Dict[str, int] = defaultdict(int)  # model -> count
+        provider_costs: Dict[str, float] = defaultdict(float)  # provider_id -> cost
+
+        # 批量预取 User 和 ApiKey，避免 N+1 查询
+        user_ids = {r.get("user_id") for r in records if r.get("user_id")}
+        api_key_ids = {r.get("api_key_id") for r in records if r.get("api_key_id")}
+
+        users_map: Dict[str, User] = {}
+        if user_ids:
+            users = db.query(User).filter(User.id.in_(user_ids)).all()
+            users_map = {str(u.id): u for u in users}
+
+        api_keys_map: Dict[str, ApiKey] = {}
+        if api_key_ids:
+            api_keys = db.query(ApiKey).filter(ApiKey.id.in_(api_key_ids)).all()
+            api_keys_map = {str(k.id): k for k in api_keys}
+
+        skipped_count = 0
+        total_count = len(records)
+
+        for record in records:
+            try:
+                # 从预取的 map 中获取 user 和 api_key 对象
+                user_id = record.get("user_id")
+                api_key_id = record.get("api_key_id")
+                user = users_map.get(str(user_id)) if user_id else None
+                api_key = api_keys_map.get(str(api_key_id)) if api_key_id else None
+
+                # 准备记录参数
+                request_id = record.get("request_id") or str(uuid.uuid4())[:8]
+                params = UsageRecordParams(
+                    db=db,
+                    user=user,
+                    api_key=api_key,
+                    provider=record.get("provider") or "unknown",
+                    model=record.get("model") or "unknown",
+                    input_tokens=int(record.get("input_tokens") or 0),
+                    output_tokens=int(record.get("output_tokens") or 0),
+                    cache_creation_input_tokens=int(record.get("cache_creation_input_tokens") or 0),
+                    cache_read_input_tokens=int(record.get("cache_read_input_tokens") or 0),
+                    request_type=record.get("request_type") or "chat",
+                    api_format=record.get("api_format"),
+                    endpoint_api_format=record.get("endpoint_api_format"),
+                    has_format_conversion=bool(record.get("has_format_conversion")),
+                    is_stream=bool(record.get("is_stream", True)),
+                    response_time_ms=record.get("response_time_ms"),
+                    first_byte_time_ms=record.get("first_byte_time_ms"),
+                    status_code=int(record.get("status_code") or 200),
+                    error_message=record.get("error_message"),
+                    metadata=record.get("metadata"),
+                    request_headers=record.get("request_headers"),
+                    request_body=record.get("request_body"),
+                    provider_request_headers=record.get("provider_request_headers"),
+                    response_headers=record.get("response_headers"),
+                    client_response_headers=record.get("client_response_headers"),
+                    response_body=record.get("response_body"),
+                    request_id=request_id,
+                    provider_id=record.get("provider_id"),
+                    provider_endpoint_id=record.get("provider_endpoint_id"),
+                    provider_api_key_id=record.get("provider_api_key_id"),
+                    status=record.get("status") or "completed",
+                    cache_ttl_minutes=record.get("cache_ttl_minutes"),
+                    use_tiered_pricing=record.get("use_tiered_pricing", True),
+                    target_model=record.get("target_model"),
+                )
+
+                usage_params, total_cost = await cls._prepare_usage_record(params)
+
+                # 创建 Usage 记录
+                usage = Usage(**usage_params)
+                db.add(usage)
+                usages.append(usage)
+
+                # 聚合统计
+                model_name = record.get("model") or "unknown"
+                model_counts[model_name] += 1
+
+                provider_id = record.get("provider_id")
+                if provider_id:
+                    actual_cost = usage_params.get("actual_total_cost_usd", 0)
+                    provider_costs[provider_id] += actual_cost
+
+                # 用户统计（独立 Key 不计入创建者）
+                if user and not (api_key and api_key.is_standalone):
+                    user_costs[str(user.id)] += total_cost
+
+                # API Key 统计
+                if api_key:
+                    key_id = str(api_key.id)
+                    apikey_stats[key_id]["requests"] += 1
+                    apikey_stats[key_id]["cost"] += total_cost
+                    apikey_stats[key_id]["is_standalone"] = api_key.is_standalone
+
+            except Exception as e:
+                skipped_count += 1
+                logger.warning(f"批量记录中跳过无效记录: {e}, request_id={record.get('request_id')}")
+                continue
+
+        # 统计跳过的记录，失败率超过 10% 时提升日志级别
+        if skipped_count > 0:
+            skip_ratio = skipped_count / total_count if total_count > 0 else 0
+            if skip_ratio > 0.1:
+                logger.error(
+                    f"批量记录失败率过高: {skipped_count}/{total_count} ({skip_ratio:.1%}) 条记录被跳过"
+                )
+            else:
+                logger.warning(
+                    f"批量记录部分失败: {skipped_count}/{total_count} 条记录被跳过"
+                )
+
+        # 批量更新 GlobalModel 使用计数
+        for model_name, count in model_counts.items():
+            db.execute(
+                update(GlobalModel)
+                .where(GlobalModel.name == model_name)
+                .values(usage_count=GlobalModel.usage_count + count)
+            )
+
+        # 批量更新 Provider 月度使用量
+        for provider_id, cost in provider_costs.items():
+            if cost > 0:
+                db.execute(
+                    update(Provider)
+                    .where(Provider.id == provider_id)
+                    .values(monthly_used_usd=Provider.monthly_used_usd + cost)
+                )
+
+        # 批量更新用户使用量
+        from sqlalchemy import func as sql_func
+        for user_id, cost in user_costs.items():
+            if cost > 0:
+                db.execute(
+                    update(UserModel)
+                    .where(UserModel.id == user_id)
+                    .values(
+                        used_usd=UserModel.used_usd + cost,
+                        total_usd=UserModel.total_usd + cost,
+                        updated_at=sql_func.now(),
+                    )
+                )
+
+        # 批量更新 API Key 统计
+        for key_id, stats in apikey_stats.items():
+            if stats["is_standalone"]:
+                db.execute(
+                    update(ApiKeyModel)
+                    .where(ApiKeyModel.id == key_id)
+                    .values(
+                        total_requests=ApiKeyModel.total_requests + stats["requests"],
+                        total_cost_usd=ApiKeyModel.total_cost_usd + stats["cost"],
+                        balance_used_usd=ApiKeyModel.balance_used_usd + stats["cost"],
+                        last_used_at=sql_func.now(),
+                        updated_at=sql_func.now(),
+                    )
+                )
+            else:
+                db.execute(
+                    update(ApiKeyModel)
+                    .where(ApiKeyModel.id == key_id)
+                    .values(
+                        total_requests=ApiKeyModel.total_requests + stats["requests"],
+                        total_cost_usd=ApiKeyModel.total_cost_usd + stats["cost"],
+                        last_used_at=sql_func.now(),
+                        updated_at=sql_func.now(),
+                    )
+                )
+
+        # 单次提交所有更改
+        try:
+            db.commit()
+            logger.debug(f"批量记录 {len(usages)} 条使用记录成功")
+        except Exception as e:
+            logger.error(f"批量提交使用记录时出错: {e}")
+            db.rollback()
+            raise
+
+        return usages
 
     @staticmethod
     def check_user_quota(

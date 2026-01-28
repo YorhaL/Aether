@@ -20,6 +20,7 @@ from src.config.settings import config
 from src.core.logger import logger
 from src.database import get_db
 from src.models.database import ApiKey, User
+from src.services.usage.telemetry_writer import DbTelemetryWriter, QueueTelemetryWriter, TelemetryWriter
 
 
 class StreamTelemetryRecorder:
@@ -90,60 +91,39 @@ class StreamTelemetryRecorder:
             bg_db = next(db_gen)
 
             try:
-                user = bg_db.query(User).filter(User.id == self.user_id).first()
-                api_key_obj = bg_db.query(ApiKey).filter(ApiKey.id == self.api_key_id).first()
-
-                if not user or not api_key_obj:
-                    logger.warning(
-                        f"[{self.request_id}] User or ApiKey not found, updating status directly"
-                    )
-                    if ctx.is_success():
-                        status = "completed"
-                    elif ctx.is_client_disconnected():
-                        status = "cancelled"
-                    else:
-                        status = "failed"
-                    await self._update_usage_status_directly(
-                        bg_db,
-                        status=status,
-                        response_time_ms=response_time_ms,
-                        status_code=ctx.status_code,
-                    )
+                writer = await self._get_telemetry_writer(bg_db, ctx, response_time_ms)
+                if writer is None:
                     return
-
-                bg_telemetry = MessageTelemetry(
-                    bg_db, user, api_key_obj, self.request_id, self.client_ip
-                )
-
                 actual_request_body = ctx.provider_request_body or original_request_body
-                response_body = ctx.build_response_body(response_time_ms)
+                response_body = None
+                if not isinstance(writer, QueueTelemetryWriter) or config.usage_queue_include_bodies:
+                    response_body = ctx.build_response_body(response_time_ms)
 
-                if ctx.is_success():
-                    await self._record_success(
-                        bg_telemetry,
-                        ctx,
-                        original_headers,
-                        actual_request_body,
-                        response_body,
-                        response_time_ms,
+                try:
+                    await self._dispatch_record(
+                        writer, ctx, original_headers, actual_request_body,
+                        response_body, response_time_ms,
                     )
-                elif ctx.is_client_disconnected():
-                    await self._record_cancelled(
-                        bg_telemetry,
-                        ctx,
-                        original_headers,
-                        actual_request_body,
-                        response_body,
-                        response_time_ms,
+                except Exception as writer_error:
+                    if not isinstance(writer, QueueTelemetryWriter):
+                        raise
+                    logger.warning(
+                        f"[{self.request_id}] Queue writer failed, falling back to DB: {writer_error}"
                     )
-                else:
-                    await self._record_failure(
-                        bg_telemetry,
-                        ctx,
-                        original_headers,
-                        actual_request_body,
-                        response_body,
-                        response_time_ms,
+                    db_writer = self._build_db_writer(bg_db)
+                    if db_writer is None:
+                        await self._update_usage_status_directly(
+                            bg_db,
+                            status=self._get_status_from_ctx(ctx),
+                            response_time_ms=response_time_ms,
+                            status_code=ctx.status_code,
+                        )
+                        return
+                    if response_body is None:
+                        response_body = ctx.build_response_body(response_time_ms)
+                    await self._dispatch_record(
+                        db_writer, ctx, original_headers, actual_request_body,
+                        response_body, response_time_ms,
                     )
 
                 # 更新候选记录状态
@@ -162,11 +142,11 @@ class StreamTelemetryRecorder:
 
     async def _record_success(
         self,
-        telemetry: MessageTelemetry,
+        writer: TelemetryWriter,
         ctx: StreamContext,
         original_headers: Dict[str, str],
         actual_request_body: Dict[str, Any],
-        response_body: Dict[str, Any],
+        response_body: Optional[Dict[str, Any]],
         response_time_ms: int,
     ) -> None:
         """记录成功的请求"""
@@ -178,7 +158,7 @@ class StreamTelemetryRecorder:
             "content-type": "text/event-stream",
         })
 
-        await telemetry.record_success(
+        await writer.record_success(
             provider=ctx.provider_name or "unknown",
             model=ctx.model,
             input_tokens=ctx.input_tokens,
@@ -200,6 +180,10 @@ class StreamTelemetryRecorder:
             provider_endpoint_id=ctx.endpoint_id,
             provider_api_key_id=ctx.key_id,
             target_model=ctx.mapped_model,
+            request_type="chat",
+            metadata={"stream": True, "content_length": ctx.data_count},
+            endpoint_api_format=ctx.provider_api_format,
+            has_format_conversion=ctx.needs_conversion,
         )
 
         logger.debug(f"{self.format_id} 流式响应完成")
@@ -207,18 +191,18 @@ class StreamTelemetryRecorder:
 
     async def _record_failure(
         self,
-        telemetry: MessageTelemetry,
+        writer: TelemetryWriter,
         ctx: StreamContext,
         original_headers: Dict[str, str],
         actual_request_body: Dict[str, Any],
-        response_body: Dict[str, Any],
+        response_body: Optional[Dict[str, Any]],
         response_time_ms: int,
     ) -> None:
         """记录失败的请求"""
         # 失败时返回给客户端的是 JSON 错误响应，如果没有设置则使用默认值
         client_response_headers = ctx.client_response_headers or {"content-type": "application/json"}
 
-        await telemetry.record_failure(
+        await writer.record_failure(
             provider=ctx.provider_name or "unknown",
             model=ctx.model,
             response_time_ms=response_time_ms,
@@ -237,6 +221,10 @@ class StreamTelemetryRecorder:
             response_headers=ctx.response_headers,
             client_response_headers=client_response_headers,
             target_model=ctx.mapped_model,
+            request_type="chat",
+            metadata={"stream": True, "content_length": ctx.data_count},
+            endpoint_api_format=ctx.provider_api_format,
+            has_format_conversion=ctx.needs_conversion,
         )
 
         logger.debug(f"{self.format_id} 流式响应中断")
@@ -246,17 +234,17 @@ class StreamTelemetryRecorder:
 
     async def _record_cancelled(
         self,
-        telemetry: MessageTelemetry,
+        writer: TelemetryWriter,
         ctx: StreamContext,
         original_headers: Dict[str, str],
         actual_request_body: Dict[str, Any],
-        response_body: Dict[str, Any],
+        response_body: Optional[Dict[str, Any]],
         response_time_ms: int,
     ) -> None:
         """记录客户端取消的请求"""
         client_response_headers = ctx.client_response_headers or {"content-type": "application/json"}
 
-        await telemetry.record_cancelled(
+        await writer.record_cancelled(
             provider=ctx.provider_name or "unknown",
             model=ctx.model,
             response_time_ms=response_time_ms,
@@ -275,6 +263,10 @@ class StreamTelemetryRecorder:
             response_headers=ctx.response_headers,
             client_response_headers=client_response_headers,
             target_model=ctx.mapped_model,
+            request_type="chat",
+            metadata={"stream": True, "content_length": ctx.data_count},
+            endpoint_api_format=ctx.provider_api_format,
+            has_format_conversion=ctx.needs_conversion,
         )
 
         logger.debug(f"{self.format_id} 流式响应被客户端取消")
@@ -383,3 +375,72 @@ class StreamTelemetryRecorder:
                 logger.debug(f"[{self.request_id}] Usage 状态已更新: {status}")
         except Exception as e:
             logger.error(f"[{self.request_id}] 直接更新 Usage 状态失败: {e}")
+
+    async def _get_telemetry_writer(
+        self, bg_db: Session, ctx: StreamContext, response_time_ms: int
+    ) -> Optional[TelemetryWriter]:
+        if config.usage_queue_enabled and self.user_id and self.api_key_id:
+            return QueueTelemetryWriter(
+                request_id=self.request_id,
+                user_id=self.user_id,
+                api_key_id=self.api_key_id,
+            )
+        db_writer = self._build_db_writer(bg_db)
+        if db_writer is None:
+            await self._update_usage_status_directly(
+                bg_db,
+                status=self._get_status_from_ctx(ctx),
+                response_time_ms=response_time_ms,
+                status_code=ctx.status_code,
+            )
+            return None
+        return db_writer
+
+    async def _dispatch_record(
+        self,
+        writer: TelemetryWriter,
+        ctx: StreamContext,
+        original_headers: Dict[str, str],
+        actual_request_body: Dict[str, Any],
+        response_body: Optional[Dict[str, Any]],
+        response_time_ms: int,
+    ) -> None:
+        """根据上下文状态分发到对应的记录方法"""
+        if ctx.is_success():
+            await self._record_success(
+                writer, ctx, original_headers, actual_request_body,
+                response_body, response_time_ms,
+            )
+        elif ctx.is_client_disconnected():
+            await self._record_cancelled(
+                writer, ctx, original_headers, actual_request_body,
+                response_body, response_time_ms,
+            )
+        else:
+            await self._record_failure(
+                writer, ctx, original_headers, actual_request_body,
+                response_body, response_time_ms,
+            )
+
+    def _get_status_from_ctx(self, ctx: StreamContext) -> str:
+        """根据上下文获取状态字符串"""
+        if ctx.is_success():
+            return "completed"
+        if ctx.is_client_disconnected():
+            return "cancelled"
+        return "failed"
+
+    def _build_db_writer(self, bg_db: Session) -> Optional[DbTelemetryWriter]:
+        user = bg_db.query(User).filter(User.id == self.user_id).first()
+        api_key_obj = bg_db.query(ApiKey).filter(ApiKey.id == self.api_key_id).first()
+
+        if not user or not api_key_obj:
+            logger.warning(
+                f"[{self.request_id}] User or ApiKey not found, updating status directly"
+            )
+            return None
+
+        bg_telemetry = MessageTelemetry(
+            bg_db, user, api_key_obj, self.request_id, self.client_ip
+        )
+        return DbTelemetryWriter(bg_telemetry)

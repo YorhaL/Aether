@@ -147,6 +147,13 @@ async def lifespan(app: FastAPI):
     await init_batch_committer()
     logger.info("[OK] 批量提交器已启动，数据库写入性能优化已启用")
 
+    # 初始化 Usage 队列消费者（可选）
+    if config.usage_queue_enabled:
+        logger.info("初始化 Usage 队列消费者...")
+        from src.services.usage.consumer_streams import start_usage_queue_consumer
+
+        await start_usage_queue_consumer()
+
     # 初始化插件系统
     logger.info("初始化插件系统...")
     plugin_manager = get_plugin_manager()
@@ -247,6 +254,13 @@ async def lifespan(app: FastAPI):
 
     await shutdown_batch_committer()
     logger.info("[OK] 批量提交器已停止，所有待提交数据已保存")
+
+    # 停止 Usage 队列消费者
+    if config.usage_queue_enabled:
+        logger.info("停止 Usage 队列消费者...")
+        from src.services.usage.consumer_streams import stop_usage_queue_consumer
+
+        await stop_usage_queue_consumer()
 
     # 停止维护调度器
     if maintenance_scheduler:

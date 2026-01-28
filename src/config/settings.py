@@ -180,6 +180,44 @@ class Config:
         self.stream_stats_delay = float(os.getenv("STREAM_STATS_DELAY", "0.1"))
         self.stream_first_byte_timeout = float(os.getenv("STREAM_FIRST_BYTE_TIMEOUT", "30.0"))
 
+        # Usage 队列配置（Redis Streams）
+        # 默认启用队列模式，通过 Redis Streams 异步写入 DB，提升响应性能
+        self.usage_queue_enabled = os.getenv("USAGE_QUEUE_ENABLED", "true").lower() == "true"
+        # 默认传输 headers/bodies，由系统设置（request_log_level）决定最终存储内容
+        self.usage_queue_include_headers = (
+            os.getenv("USAGE_QUEUE_INCLUDE_HEADERS", "true").lower() == "true"
+        )
+        self.usage_queue_include_bodies = (
+            os.getenv("USAGE_QUEUE_INCLUDE_BODIES", "true").lower() == "true"
+        )
+        # 0 表示不截断，由系统设置（max_request/response_body_size）统一控制
+        self.usage_queue_body_max_bytes = int(
+            os.getenv("USAGE_QUEUE_BODY_MAX_BYTES", "0")
+        )
+        self.usage_queue_stream_key = os.getenv("USAGE_QUEUE_STREAM_KEY", "usage:events")
+        self.usage_queue_stream_group = os.getenv(
+            "USAGE_QUEUE_STREAM_GROUP", "usage_consumers"
+        )
+        self.usage_queue_stream_maxlen = int(
+            os.getenv("USAGE_QUEUE_STREAM_MAXLEN", "200000")
+        )
+        self.usage_queue_dlq_key = os.getenv("USAGE_QUEUE_DLQ_KEY", "usage:events:dlq")
+        self.usage_queue_dlq_maxlen = int(os.getenv("USAGE_QUEUE_DLQ_MAXLEN", "5000"))
+        self.usage_queue_consumer_batch = int(
+            os.getenv("USAGE_QUEUE_CONSUMER_BATCH", "200")
+        )
+        self.usage_queue_consumer_block_ms = int(
+            os.getenv("USAGE_QUEUE_CONSUMER_BLOCK_MS", "500")
+        )
+        self.usage_queue_claim_idle_ms = int(os.getenv("USAGE_QUEUE_CLAIM_IDLE_MS", "30000"))
+        self.usage_queue_claim_interval_seconds = float(
+            os.getenv("USAGE_QUEUE_CLAIM_INTERVAL_SECONDS", "5")
+        )
+        self.usage_queue_max_retries = int(os.getenv("USAGE_QUEUE_MAX_RETRIES", "2"))
+        self.usage_queue_metrics_interval_seconds = float(
+            os.getenv("USAGE_QUEUE_METRICS_INTERVAL_SECONDS", "30")
+        )
+
         # Thinking 整流器配置
         # THINKING_RECTIFIER_ENABLED: 是否启用 Thinking 整流器
         #   当遇到跨 Provider 的 thinking 签名错误时，自动整流请求体后重试

@@ -8,9 +8,12 @@
 
 import hashlib
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from starlette.requests import Request
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.config import config
@@ -105,6 +108,7 @@ class PluginMiddleware:
 
             if message["type"] == "http.response.start":
                 response_status_code = message.get("status", 0)
+                await self._maybe_release_streaming_db_session(request, message)
 
             await send(message)
 
@@ -154,6 +158,43 @@ class PluginMiddleware:
             "body": body,
         })
 
+    def _finalize_db_session(
+        self,
+        db: "Session",
+        *,
+        should_commit: bool,
+        should_rollback: bool,
+        log_prefix: str = "",
+    ) -> None:
+        """统一的数据库会话清理逻辑
+
+        Args:
+            db: SQLAlchemy 会话
+            should_commit: 是否需要提交（仅当 should_rollback=False 时生效）
+            should_rollback: 是否需要回滚（优先于 commit）
+            log_prefix: 日志前缀，用于区分调用场景
+        """
+        try:
+            if should_rollback:
+                try:
+                    db.rollback()
+                except Exception as rollback_error:
+                    logger.debug(f"{log_prefix}回滚事务时出错（可忽略）: {rollback_error}")
+            elif should_commit:
+                try:
+                    db.commit()
+                except Exception as commit_error:
+                    logger.error(f"{log_prefix}提交失败: {commit_error}")
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        finally:
+            try:
+                db.close()
+            except Exception as close_error:
+                logger.debug(f"{log_prefix}关闭数据库连接时出错（可忽略）: {close_error}")
+
     async def _cleanup_db_session(
         self, request: Request, exception: Optional[Exception]
     ) -> None:
@@ -167,37 +208,56 @@ class PluginMiddleware:
         """
         from sqlalchemy.orm import Session
 
+        if getattr(request.state, "db_released_early", False):
+            return
+        if not getattr(request.state, "db_managed_by_middleware", False):
+            return
+
         db = getattr(request.state, "db", None)
         if not isinstance(db, Session):
             return
 
-        # 检查是否由路由层已经提交
         tx_committed_by_route = getattr(request.state, "tx_committed_by_route", False)
+        self._finalize_db_session(
+            db,
+            should_commit=not tx_committed_by_route and exception is None,
+            should_rollback=exception is not None,
+        )
 
-        try:
-            if exception is not None:
-                # 发生异常，回滚事务（无论谁负责提交）
-                try:
-                    db.rollback()
-                except Exception as rollback_error:
-                    logger.debug(f"回滚事务时出错（可忽略）: {rollback_error}")
-            elif not tx_committed_by_route:
-                # 正常完成且路由未自行提交，由中间件提交事务
-                try:
-                    db.commit()
-                except Exception as commit_error:
-                    logger.error(f"关键事务提交失败: {commit_error}")
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-            # 如果 tx_committed_by_route 为 True，跳过 commit（路由已提交）
-        finally:
-            # 关闭会话，归还连接到连接池
-            try:
-                db.close()
-            except Exception as close_error:
-                logger.debug(f"关闭数据库连接时出错（可忽略）: {close_error}")
+    async def _maybe_release_streaming_db_session(
+        self, request: Request, message: Message
+    ) -> None:
+        """在 SSE 响应开始时提前释放请求级 DB session。"""
+        if getattr(request.state, "db_released_early", False):
+            return
+        if not getattr(request.state, "db_managed_by_middleware", False):
+            return
+
+        headers = message.get("headers") or []
+        content_type = None
+        for key, value in headers:
+            if key.lower() == b"content-type":
+                content_type = value.decode("utf-8", errors="ignore").lower()
+                break
+
+        if not content_type or "text/event-stream" not in content_type:
+            return
+
+        from sqlalchemy.orm import Session
+
+        db = getattr(request.state, "db", None)
+        if not isinstance(db, Session):
+            return
+
+        tx_committed_by_route = getattr(request.state, "tx_committed_by_route", False)
+        self._finalize_db_session(
+            db,
+            should_commit=not tx_committed_by_route,
+            should_rollback=False,
+            log_prefix="流式响应提前",
+        )
+        request.state.db = None
+        request.state.db_released_early = True
 
     def _get_client_ip(self, request: Request) -> str:
         """
