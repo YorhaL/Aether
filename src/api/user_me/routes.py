@@ -896,7 +896,7 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
                 "offset": self.offset,
                 "has_more": self.offset + self.limit < total_records,
             },
-            "records": self._build_usage_records(usage_records),
+            "records": self._build_usage_records(usage_records, is_admin=(user.role == "admin")),
         }
 
         # 管理员可以看到真实成本
@@ -914,8 +914,13 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
 
         return response_data
 
-    def _build_usage_records(self, usage_records: list) -> list:
-        """构建使用记录列表，包含格式转换信息的回填逻辑"""
+    def _build_usage_records(self, usage_records: list, is_admin: bool = False) -> list:
+        """构建使用记录列表，包含格式转换信息的回填逻辑
+        
+        Args:
+            usage_records: 使用记录列表
+            is_admin: 是否为管理员，管理员可以看到模型映射信息
+        """
         from src.core.api_format.metadata import can_passthrough
 
         records = []
@@ -939,7 +944,8 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
             records.append({
                 "id": r.id,
                 "model": r.model,
-                "target_model": r.target_model,  # 映射后的目标模型名
+                # 只有管理员可以看到模型映射信息，普通用户只能看到请求的模型
+                "target_model": r.target_model if is_admin else None,
                 "api_format": api_format,
                 "endpoint_api_format": endpoint_api_format,
                 "has_format_conversion": bool(has_format_conversion),
