@@ -637,11 +637,10 @@ class CliAdapterBase(ApiAdapter):
         # 构建请求组件
         url = cls.build_endpoint_url(base_url, request_data, model_name)
 
-        # 添加 CLI User-Agent 到 extra_headers
-        cli_user_agent = cls.get_cli_user_agent()
+        # 合并 CLI 额外头部到 extra_headers
+        cli_extra = cls.get_cli_extra_headers()
         merged_extra = dict(extra_headers) if extra_headers else {}
-        if cli_user_agent:
-            merged_extra["User-Agent"] = cli_user_agent
+        merged_extra.update(cli_extra)
 
         # 使用统一的头部构建函数
         headers = cls.build_headers_with_extra(api_key, merged_extra if merged_extra else None)
@@ -707,6 +706,23 @@ class CliAdapterBase(ApiAdapter):
             CLI User-Agent字符串，如果不需要则为None
         """
         return None
+
+    @classmethod
+    def get_cli_extra_headers(cls) -> Dict[str, str]:
+        """
+        获取CLI额外请求头 - 子类可覆盖
+
+        用于 check_endpoint 测试请求时添加额外的头部。
+        默认实现只添加 User-Agent（如果有）。
+
+        Returns:
+            额外请求头字典
+        """
+        headers: Dict[str, str] = {}
+        cli_user_agent = cls.get_cli_user_agent()
+        if cli_user_agent:
+            headers["User-Agent"] = cli_user_agent
+        return headers
 
 # =========================================================================
 # CLI Adapter 注册表 - 用于根据 API format 获取 CLI Adapter 实例
