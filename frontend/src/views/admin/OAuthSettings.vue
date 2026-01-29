@@ -177,7 +177,7 @@
                     v-model="form.attribute_mapping_json"
                     class="mt-1 font-mono text-xs"
                     rows="3"
-                    placeholder='{"id": "user_id", "username": "login"}'
+                    placeholder="{&quot;id&quot;: &quot;user_id&quot;, &quot;username&quot;: &quot;login&quot;}"
                   />
                 </div>
                 <div>
@@ -186,7 +186,7 @@
                     v-model="form.extra_config_json"
                     class="mt-1 font-mono text-xs"
                     rows="3"
-                    placeholder='{"min_trust_level": 1}'
+                    placeholder="{&quot;min_trust_level&quot;: 1}"
                   />
                 </div>
               </div>

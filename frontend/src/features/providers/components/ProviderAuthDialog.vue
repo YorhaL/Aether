@@ -7,13 +7,19 @@
     size="md"
     @update:open="$emit('update:open', $event)"
   >
-    <form :name="`provider-auth-${Date.now()}`" autocomplete="off" @submit.prevent>
+    <form
+      :name="`provider-auth-${Date.now()}`"
+      autocomplete="off"
+      @submit.prevent
+    >
       <!-- 加载状态 -->
       <div
         v-if="isLoadingConfig"
         class="flex items-center justify-center py-8"
       >
-        <div class="text-sm text-muted-foreground">加载配置中...</div>
+        <div class="text-sm text-muted-foreground">
+          加载配置中...
+        </div>
       </div>
       <div
         v-else
@@ -283,9 +289,6 @@ import {
   type AuthTemplateFieldGroup,
 } from '../auth-templates'
 
-// 敏感字段列表（用于验证和加载配置时的特殊处理）
-const SENSITIVE_FIELDS = ['api_key', 'password', 'session_token', 'session_cookie', 'token_cookie', 'auth_cookie', 'cookie_string', 'cookie', 'proxy_password'] as const
-
 const props = defineProps<{
   open: boolean
   providerId: string
@@ -297,6 +300,9 @@ const emit = defineEmits<{
   (e: 'update:open', value: boolean): void
   (e: 'saved'): void
 }>()
+
+// 敏感字段列表（用于验证和加载配置时的特殊处理）
+const SENSITIVE_FIELDS = ['api_key', 'password', 'session_token', 'session_cookie', 'token_cookie', 'auth_cookie', 'cookie_string', 'cookie', 'proxy_password'] as const
 
 const { success: showSuccess, error: showError } = useToast()
 

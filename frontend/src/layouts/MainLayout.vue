@@ -245,7 +245,10 @@
       <header class="hidden lg:flex h-16 px-8 items-center justify-between shrink-0 border-b border-[#3d3929]/5 dark:border-white/5 sticky top-0 z-40 backdrop-blur-md bg-[#faf9f5]/90 dark:bg-[#191714]/90">
         <div class="flex flex-col gap-0.5">
           <div class="flex items-center gap-2 text-sm text-muted-foreground">
-            <template v-for="(crumb, index) in breadcrumbs" :key="index">
+            <template
+              v-for="(crumb, index) in breadcrumbs"
+              :key="index"
+            >
               <template v-if="index > 0">
                 <ChevronRight class="w-3 h-3 opacity-50" />
               </template>

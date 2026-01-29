@@ -187,7 +187,6 @@
               </div>
             </div>
           </div>
-
         </div>
       </CardSection>
 
@@ -538,7 +537,9 @@
             <li>
               API Keys: {{ importPreview.providers?.reduce((sum: number, p: any) => sum + (p.api_keys?.length || 0), 0) }} 个
             </li>
-            <li v-if="importPreview.ldap_config">LDAP 配置: 1 个</li>
+            <li v-if="importPreview.ldap_config">
+              LDAP 配置: 1 个
+            </li>
             <li v-if="importPreview.oauth_providers?.length">
               OAuth Providers: {{ importPreview.oauth_providers.length }} 个
             </li>

@@ -1,9 +1,9 @@
 <template>
   <section
     ref="sectionRef"
-    class="min-h-screen snap-start flex items-center px-4 sm:px-8 md:px-16 lg:px-20 py-20"
+    class="min-h-screen snap-start flex items-center justify-center px-4 sm:px-8 md:px-16 lg:px-20 py-20"
   >
-    <div class="max-w-7xl mx-auto grid md:grid-cols-2 gap-12 items-center">
+    <div class="max-w-7xl mx-auto grid md:grid-cols-2 gap-12 items-center w-full">
       <!-- Content column -->
       <div :class="contentOrder">
         <!-- Badge -->
@@ -105,10 +105,10 @@
         </div>
       </div>
 
-      <!-- Logo placeholder column -->
+      <!-- Logo placeholder column - hidden on mobile since logo is fixed positioned -->
       <div
         :class="logoOrder"
-        class="flex items-center justify-center h-full min-h-[300px] relative"
+        class="hidden md:flex items-center justify-center h-full min-h-[300px] relative"
       >
         <slot name="logo" />
       </div>

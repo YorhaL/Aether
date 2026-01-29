@@ -17,6 +17,11 @@ import {
   type ChartOptions
 } from 'chart.js'
 
+const props = withDefaults(defineProps<Props>(), {
+  height: 300,
+  options: undefined
+})
+
 ChartJS.register(
   ArcElement,
   DoughnutController,
@@ -30,11 +35,6 @@ interface Props {
   options?: ChartOptions<'doughnut'>
   height?: number
 }
-
-const props = withDefaults(defineProps<Props>(), {
-  height: 300,
-  options: undefined
-})
 
 const chartRef = ref<HTMLCanvasElement>()
 let chart: ChartJS<'doughnut'> | null = null

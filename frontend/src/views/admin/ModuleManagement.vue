@@ -10,7 +10,10 @@
           :disabled="loading"
           @click="fetchModules"
         >
-          <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': loading }" />
+          <RefreshCw
+            class="w-4 h-4 mr-2"
+            :class="{ 'animate-spin': loading }"
+          />
           刷新
         </Button>
       </template>
@@ -62,10 +65,15 @@
                 ? 'bg-primary/15 text-primary'
                 : 'bg-muted text-muted-foreground group-hover:bg-muted/80'"
             >
-              <component :is="getCategoryIcon(module.category)" class="w-5 h-5" />
+              <component
+                :is="getCategoryIcon(module.category)"
+                class="w-5 h-5"
+              />
             </div>
             <div class="flex-1 min-w-0 pt-1">
-              <h4 class="font-semibold text-base truncate">{{ module.display_name }}</h4>
+              <h4 class="font-semibold text-base truncate">
+                {{ module.display_name }}
+              </h4>
             </div>
           </div>
 
@@ -91,7 +99,10 @@
                 @update:model-value="(val: boolean) => toggleModule(module.name, val)"
               />
               <div class="flex flex-col">
-                <span class="text-sm" :class="module.enabled ? 'text-foreground' : 'text-muted-foreground'">
+                <span
+                  class="text-sm"
+                  :class="module.enabled ? 'text-foreground' : 'text-muted-foreground'"
+                >
                   {{ module.enabled ? '已启用' : '已禁用' }}
                 </span>
                 <!-- 配置未验证提示（小字） -->
@@ -123,7 +134,9 @@
         class="text-center py-16"
       >
         <Search class="w-12 h-12 mx-auto text-muted-foreground/50 mb-4" />
-        <p class="text-muted-foreground">没有找到匹配的模块</p>
+        <p class="text-muted-foreground">
+          没有找到匹配的模块
+        </p>
       </div>
 
       <!-- 空状态 -->
@@ -132,7 +145,9 @@
         class="text-center py-16"
       >
         <Puzzle class="w-12 h-12 mx-auto text-muted-foreground/50 mb-4" />
-        <p class="text-muted-foreground">暂无可管理的模块</p>
+        <p class="text-muted-foreground">
+          暂无可管理的模块
+        </p>
       </div>
     </div>
   </PageContainer>

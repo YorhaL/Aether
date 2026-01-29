@@ -1,5 +1,8 @@
 <template>
-  <div v-if="masked" class="group relative">
+  <div
+    v-if="masked"
+    class="group relative"
+  >
     <input
       ref="inputRef"
       :class="inputClass"
@@ -25,8 +28,14 @@
       :aria-label="isVisible ? '隐藏内容' : '显示内容'"
       @click="toggleVisibility"
     >
-      <EyeOff v-if="isVisible" class="h-4 w-4" />
-      <Eye v-else class="h-4 w-4" />
+      <EyeOff
+        v-if="isVisible"
+        class="h-4 w-4"
+      />
+      <Eye
+        v-else
+        class="h-4 w-4"
+      />
     </button>
   </div>
   <input
@@ -53,6 +62,12 @@
 import { computed, useAttrs, ref } from 'vue'
 import { Eye, EyeOff } from 'lucide-vue-next'
 import { cn } from '@/lib/utils'
+
+const props = defineProps<Props>()
+
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+}>()
 
 // 开发环境警告：type="password" 已被弃用
 const warnPasswordType = import.meta.env.DEV
@@ -96,12 +111,7 @@ interface Props {
   disableAutofill?: boolean
 }
 
-const props = defineProps<Props>()
 const attrs = useAttrs()
-const emit = defineEmits<{
-  'update:modelValue': [value: string]
-}>()
-
 const inputRef = ref<HTMLInputElement | null>(null)
 const isVisible = ref(false)
 
