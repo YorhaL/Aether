@@ -264,7 +264,8 @@ import {
 import { useToast } from '@/composables/useToast'
 import {
   type Model,
-  type ProviderModelAlias
+  type ProviderModelAlias,
+  type UpstreamModel,
 } from '@/api/endpoints'
 import { updateModel } from '@/api/endpoints/models'
 import { useUpstreamModelsCache } from '../composables/useUpstreamModelsCache'
@@ -311,7 +312,7 @@ const searchQuery = ref('')
 const collapsedGroups = ref<Set<string>>(new Set())
 
 // 上游模型
-const upstreamModels = ref<{ id: string; api_format?: string }[]>([])
+const upstreamModels = ref<UpstreamModel[]>([])
 
 // 表单数据
 const formData = ref<{

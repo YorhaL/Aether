@@ -3,6 +3,7 @@ Provider Query API 端点
 用于查询提供商的模型列表等信息
 """
 
+import asyncio
 from typing import Optional
 
 import httpx
@@ -23,6 +24,10 @@ from src.services.model.upstream_fetcher import (
 )
 from src.utils.auth_utils import get_current_user
 from src.utils.ssl_utils import get_ssl_context
+from src.services.model.fetch_scheduler import (
+    get_upstream_models_from_cache,
+    set_upstream_models_to_cache,
+)
 
 
 router = APIRouter(prefix="/api/admin/provider-query", tags=["Provider Query"])
@@ -66,17 +71,16 @@ async def query_available_models(
     优先从缓存获取（缓存由定时任务刷新），缓存未命中时实时调用上游 API。
     从所有 API 格式尝试获取模型，然后聚合去重。
 
+    行为:
+    - 指定 api_key_id: 只获取该 Key 能访问的模型
+    - 不指定 api_key_id: 遍历所有活跃的 Key，聚合所有模型（每个 Key 独立缓存）
+
     Args:
         request: 查询请求
 
     Returns:
         所有端点的模型列表（合并）
     """
-    from src.services.model.fetch_scheduler import (
-        get_upstream_models_from_cache,
-        set_upstream_models_to_cache,
-    )
-
     # 获取提供商基本信息
     provider = (
         db.query(Provider)
@@ -91,11 +95,171 @@ async def query_available_models(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
 
-    # 如果指定了 api_key_id 且不是强制刷新，优先从缓存获取
-    if request.api_key_id and not request.force_refresh:
-        cached_models = await get_upstream_models_from_cache(
-            request.provider_id, request.api_key_id
+    # 构建 api_format -> endpoint 映射
+    format_to_endpoint: dict[str, ProviderEndpoint] = {}
+    for endpoint in provider.endpoints:
+        if endpoint.is_active:
+            format_to_endpoint[endpoint.api_format] = endpoint
+
+    if not format_to_endpoint:
+        raise HTTPException(status_code=400, detail="No active endpoints found for this provider")
+
+    # 如果指定了 api_key_id，只获取该 Key 的模型
+    if request.api_key_id:
+        return await _fetch_models_for_single_key(
+            provider=provider,
+            api_key_id=request.api_key_id,
+            format_to_endpoint=format_to_endpoint,
+            force_refresh=request.force_refresh,
         )
+
+    # 未指定 api_key_id，遍历所有活跃的 Key 并聚合结果
+    active_keys = [key for key in provider.api_keys if key.is_active]
+    if not active_keys:
+        raise HTTPException(status_code=400, detail="No active API Key found for this provider")
+
+    # 并发获取所有 Key 的模型
+    async def fetch_for_key(api_key):
+        # 非强制刷新时，先检查缓存
+        if not request.force_refresh:
+            cached_models = await get_upstream_models_from_cache(
+                request.provider_id, api_key.id
+            )
+            if cached_models is not None:
+                return cached_models, None, True  # models, error, from_cache
+
+        # 缓存未命中或强制刷新，实时获取
+        try:
+            api_key_value = crypto_service.decrypt(api_key.api_key)
+        except Exception as e:
+            logger.error(f"Failed to decrypt API key {api_key.id}: {e}")
+            return [], f"Key {api_key.name or api_key.id}: decrypt failed", False
+
+        endpoint_configs = build_all_format_configs(api_key_value, format_to_endpoint)
+        models, errors, has_success = await fetch_models_from_endpoints(endpoint_configs)
+
+        # 写入缓存
+        if models:
+            await set_upstream_models_to_cache(request.provider_id, api_key.id, models)
+
+        error = f"Key {api_key.name or api_key.id}: {'; '.join(errors)}" if errors else None
+        return models, error, False  # models, error, from_cache
+
+    # 并发执行所有 Key 的获取
+    results = await asyncio.gather(*[fetch_for_key(key) for key in active_keys])
+
+    # 合并结果
+    all_models: list = []
+    all_errors: list[str] = []
+    cache_hit_count = 0
+    fetch_count = 0
+    for models, error, from_cache in results:
+        all_models.extend(models)
+        if error:
+            all_errors.append(error)
+        if from_cache:
+            cache_hit_count += 1
+        else:
+            fetch_count += 1
+
+    # 按 model id 聚合，合并所有 api_format 到 api_formats 数组
+    unique_models = _aggregate_models_by_id(all_models)
+
+    error = "; ".join(all_errors) if all_errors else None
+    if not unique_models and not error:
+        error = "No models returned from any key"
+
+    return {
+        "success": len(unique_models) > 0,
+        "data": {
+            "models": unique_models,
+            "error": error,
+            "from_cache": fetch_count == 0 and cache_hit_count > 0,
+            "keys_total": len(active_keys),
+            "keys_cached": cache_hit_count,
+            "keys_fetched": fetch_count,
+        },
+        "provider": {
+            "id": provider.id,
+            "name": provider.name,
+        },
+    }
+
+
+def _aggregate_models_by_id(models: list[dict]) -> list[dict]:
+    """
+    按 model id 聚合模型，合并所有 api_format 到 api_formats 数组
+
+    支持两种输入格式:
+    - 原始模型: 有 api_format (singular) 字段
+    - 已聚合模型: 有 api_formats (array) 字段（来自缓存）
+
+    Args:
+        models: 模型列表，每个模型可能有 api_format 或 api_formats 字段
+
+    Returns:
+        聚合后的模型列表，每个模型有 api_formats 数组
+    """
+    model_map: dict[str, dict] = {}
+
+    for model in models:
+        model_id = model.get("id")
+        if not model_id:
+            continue
+
+        # 支持两种格式：api_format (singular) 或 api_formats (array)
+        api_format = model.get("api_format", "")
+        existing_formats = model.get("api_formats") or []
+
+        if model_id not in model_map:
+            # 第一次遇到这个模型，复制基础信息
+            aggregated = {
+                "id": model_id,
+                "api_formats": [],
+            }
+            # 复制其他字段（排除 api_format 和 api_formats）
+            for key, value in model.items():
+                if key not in ("id", "api_format", "api_formats"):
+                    aggregated[key] = value
+            model_map[model_id] = aggregated
+
+        # 添加 api_format 到列表（避免重复）
+        if api_format and api_format not in model_map[model_id]["api_formats"]:
+            model_map[model_id]["api_formats"].append(api_format)
+
+        # 添加已有的 api_formats（处理缓存的聚合数据）
+        for fmt in existing_formats:
+            if fmt and fmt not in model_map[model_id]["api_formats"]:
+                model_map[model_id]["api_formats"].append(fmt)
+
+    # 对每个模型的 api_formats 排序
+    result = list(model_map.values())
+    for model in result:
+        model["api_formats"].sort()
+
+    # 按 model id 排序
+    result.sort(key=lambda m: m["id"])
+    return result
+
+
+async def _fetch_models_for_single_key(
+    provider: Provider,
+    api_key_id: str,
+    format_to_endpoint: dict[str, ProviderEndpoint],
+    force_refresh: bool,
+):
+    """获取单个 Key 的模型列表"""
+    # 查找指定的 Key
+    api_key = next(
+        (key for key in provider.api_keys if key.id == api_key_id),
+        None
+    )
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API Key not found")
+
+    # 非强制刷新时，优先从缓存获取
+    if not force_refresh:
+        cached_models = await get_upstream_models_from_cache(provider.id, api_key_id)
         if cached_models is not None:
             return {
                 "success": True,
@@ -107,64 +271,25 @@ async def query_available_models(
             }
 
     # 缓存未命中或强制刷新，实时获取
-
-    # 构建 api_format -> endpoint 映射
-    format_to_endpoint: dict[str, ProviderEndpoint] = {}
-    for endpoint in provider.endpoints:
-        if endpoint.is_active:
-            format_to_endpoint[endpoint.api_format] = endpoint
-
-    if not format_to_endpoint:
-        raise HTTPException(status_code=400, detail="No active endpoints found for this provider")
-
-    # 获取 API Key
-    if request.api_key_id:
-        # 指定了特定的 API Key
-        api_key = next(
-            (key for key in provider.api_keys if key.id == request.api_key_id),
-            None
-        )
-        if not api_key:
-            raise HTTPException(status_code=404, detail="API Key not found")
-    else:
-        # 使用第一个可用的 Key
-        api_key = next(
-            (key for key in provider.api_keys if key.is_active),
-            None
-        )
-        if not api_key:
-            raise HTTPException(status_code=400, detail="No active API Key found for this provider")
-
     try:
         api_key_value = crypto_service.decrypt(api_key.api_key)
     except Exception as e:
         logger.error(f"Failed to decrypt API key: {e}")
         raise HTTPException(status_code=500, detail="Failed to decrypt API key")
 
-    # 使用公共函数构建所有格式的端点配置并获取模型
-    endpoint_configs = build_all_format_configs(api_key_value, format_to_endpoint)  # type: ignore[arg-type]
+    endpoint_configs = build_all_format_configs(api_key_value, format_to_endpoint)
     all_models, errors, has_success = await fetch_models_from_endpoints(endpoint_configs)
 
-    # 按 model id + api_format 去重（保留第一个）
-    seen_keys: set[str] = set()
-    unique_models: list = []
-    for model in all_models:
-        model_id = model.get("id")
-        api_format = model.get("api_format", "")
-        unique_key = f"{model_id}:{api_format}"
-        if model_id and unique_key not in seen_keys:
-            seen_keys.add(unique_key)
-            unique_models.append(model)
+    # 按 model id 聚合，合并所有 api_format
+    unique_models = _aggregate_models_by_id(all_models)
 
     error = "; ".join(errors) if errors else None
     if not unique_models and not error:
         error = "No models returned from any endpoint"
 
-    # 如果指定了 api_key_id 且获取成功，写入缓存
-    if request.api_key_id and unique_models:
-        await set_upstream_models_to_cache(
-            request.provider_id, request.api_key_id, unique_models
-        )
+    # 获取成功时写入缓存
+    if unique_models:
+        await set_upstream_models_to_cache(provider.id, api_key_id, unique_models)
 
     return {
         "success": len(unique_models) > 0,

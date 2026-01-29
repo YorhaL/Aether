@@ -2,7 +2,7 @@
   <Dialog
     :model-value="isOpen"
     title="获取上游模型"
-    :description="`使用密钥 ${props.apiKey?.name || props.apiKey?.api_key_masked || ''} 从上游获取模型列表。导入的模型需要关联全局模型后才能参与路由。`"
+    description="从上游获取所有密钥可用的模型列表。导入的模型需要关联全局模型后才能参与路由。"
     :icon="Layers"
     size="2xl"
     @update:model-value="handleDialogUpdate"
@@ -100,7 +100,7 @@
         <div class="max-h-[320px] overflow-y-auto pr-1 space-y-1 custom-scrollbar">
           <div
             v-for="model in upstreamModels"
-            :key="`${model.id}:${model.api_format || ''}`"
+            :key="model.id"
             class="group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all duration-200 cursor-pointer select-none"
             :class="[
               selectedModels.includes(model.id)
@@ -121,11 +121,12 @@
                   {{ model.display_name || model.id }}
                 </span>
                 <Badge
-                  v-if="model.api_format"
+                  v-for="fmt in model.api_formats"
+                  :key="fmt"
                   variant="outline"
                   class="text-[10px] px-1.5 py-0 shrink-0"
                 >
-                  {{ API_FORMAT_LABELS[model.api_format] || model.api_format }}
+                  {{ API_FORMAT_LABELS[fmt] || fmt }}
                 </Badge>
                 <Badge
                   v-if="isModelExisting(model.id)"
@@ -274,15 +275,16 @@ async function loadExistingModels() {
   }
 }
 
-// 获取上游模型
+// 获取上游模型（获取所有 Key 的聚合结果）
 async function fetchUpstreamModels() {
-  if (!props.providerId || !props.apiKey) return
+  if (!props.providerId) return
 
   loading.value = true
   errorMessage.value = ''
 
   try {
-    const response = await adminApi.queryProviderModels(props.providerId, props.apiKey.id)
+    // 不传 apiKeyId，后端会遍历所有 Key 并聚合结果
+    const response = await adminApi.queryProviderModels(props.providerId)
 
     if (response.success && response.data?.models) {
       upstreamModels.value = response.data.models

@@ -468,28 +468,10 @@ function isGlobalModel(modelId: string): boolean {
   return globalModelNamesSet.value.has(modelId)
 }
 
-// 上游模型信息（包含 api_format）
-interface UpstreamModelInfo {
-  id: string
-  api_formats: string[]  // 该模型支持的所有 API 格式
-}
-
-// 上游模型列表（按 id 聚合，包含所有 api_format）
+// 上游模型列表（后端已按 id 聚合，包含 api_formats 数组）
+// 这里只做排序
 const upstreamModelList = computed(() => {
-  const modelMap = new Map<string, Set<string>>()
-  upstreamModels.value.forEach(m => {
-    if (!modelMap.has(m.id)) {
-      modelMap.set(m.id, new Set())
-    }
-    if (m.api_format) {
-      modelMap.get(m.id)!.add(m.api_format)
-    }
-  })
-  const result: UpstreamModelInfo[] = []
-  modelMap.forEach((formats, id) => {
-    result.push({ id, api_formats: sortApiFormats(Array.from(formats)) })
-  })
-  return result.sort((a, b) => a.id.localeCompare(b.id))
+  return [...upstreamModels.value].sort((a, b) => a.id.localeCompare(b.id))
 })
 
 // 上游模型名称列表（用于计数和全选判断）
@@ -687,11 +669,13 @@ async function loadGlobalModels() {
 }
 
 // 从提供商获取模型（使用缓存）
+// 不传 apiKeyId，获取所有 Key 的聚合结果
 async function fetchUpstreamModels(forceRefresh = false) {
   if (!props.providerId || !props.apiKey) return
   try {
     fetchingUpstreamModels.value = true
-    const result = await fetchCachedModels(props.providerId, props.apiKey.id, forceRefresh)
+    // 不传 apiKeyId，后端会遍历所有 Key 并聚合结果
+    const result = await fetchCachedModels(props.providerId, undefined, forceRefresh)
     if (loadingCancelled) return
     if (result.models.length > 0) {
       upstreamModels.value = result.models

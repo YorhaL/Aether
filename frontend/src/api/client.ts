@@ -174,9 +174,12 @@ class ApiClient {
     const errorDetail = error.response?.data?.detail || ''
     log.debug('Got 401 error, attempting token refresh', { errorDetail })
 
-    // 检查是否为业务相关的401错误
+    // 检查是否为业务相关的401错误（用户被禁用/删除等）
     if (!isRefreshableAuthError(errorDetail)) {
-      log.info('401 error but not authentication issue, keeping session', { errorDetail })
+      log.info('User account issue detected, logging out and redirecting to home', { errorDetail })
+      this.clearAuth()
+      // 跳转到首页
+      window.location.href = '/'
       return Promise.reject(error)
     }
 

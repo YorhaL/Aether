@@ -119,36 +119,33 @@
               </div>
 
               <!-- 上游模型组 -->
-              <div
-                v-for="group in filteredUpstreamGroups"
-                :key="group.api_format"
-              >
+              <div v-if="filteredUpstreamModels.length > 0">
                 <div
                   class="flex items-center justify-between px-3 py-2 bg-muted sticky top-0 z-10 cursor-pointer hover:bg-muted/80 transition-colors"
-                  @click="toggleGroupCollapse(group.api_format)"
+                  @click="toggleGroupCollapse('upstream')"
                 >
                   <div class="flex items-center gap-2">
                     <ChevronDown
                       class="w-4 h-4 transition-transform shrink-0"
-                      :class="collapsedGroups.has(group.api_format) ? '-rotate-90' : ''"
+                      :class="collapsedGroups.has('upstream') ? '-rotate-90' : ''"
                     />
-                    <span class="text-xs font-medium">{{ API_FORMAT_LABELS[group.api_format] || group.api_format }}</span>
-                    <span class="text-xs text-muted-foreground">({{ group.models.length }})</span>
+                    <span class="text-xs font-medium">上游模型</span>
+                    <span class="text-xs text-muted-foreground">({{ filteredUpstreamModels.length }})</span>
                   </div>
                   <button
                     type="button"
                     class="text-xs text-primary hover:underline shrink-0"
-                    @click.stop="toggleAllUpstreamGroup(group.api_format)"
+                    @click.stop="toggleAllUpstreamModels"
                   >
-                    {{ isUpstreamGroupAllSelected(group.api_format) ? '取消全选' : '全选' }}
+                    {{ isAllUpstreamModelsSelected ? '取消全选' : '全选' }}
                   </button>
                 </div>
                 <div
-                  v-show="!collapsedGroups.has(group.api_format)"
+                  v-show="!collapsedGroups.has('upstream')"
                   class="space-y-1 p-2"
                 >
                   <div
-                    v-for="model in group.models"
+                    v-for="model in filteredUpstreamModels"
                     :key="model.id"
                     class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted cursor-pointer"
                     @click="toggleUpstreamModelSelection(model.id)"
@@ -163,11 +160,23 @@
                       />
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="text-sm font-medium truncate">
-                        {{ model.id }}
-                      </p>
-                      <p class="text-xs text-muted-foreground truncate font-mono">
-                        {{ model.owned_by || model.id }}
+                      <div class="flex items-center gap-1.5">
+                        <p class="text-sm font-medium truncate">
+                          {{ model.id }}
+                        </p>
+                        <span
+                          v-for="fmt in model.api_formats"
+                          :key="fmt"
+                          class="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground shrink-0"
+                        >
+                          {{ API_FORMAT_LABELS[fmt] || fmt }}
+                        </span>
+                      </div>
+                      <p
+                        v-if="model.owned_by"
+                        class="text-xs text-muted-foreground truncate"
+                      >
+                        {{ model.owned_by }}
                       </p>
                     </div>
                   </div>
@@ -176,7 +185,7 @@
 
               <!-- 空状态 -->
               <div
-                v-if="filteredGlobalModels.length === 0 && filteredUpstreamGroups.length === 0"
+                v-if="filteredGlobalModels.length === 0 && filteredUpstreamModels.length === 0"
                 class="flex flex-col items-center justify-center py-12 text-muted-foreground"
               >
                 <Layers class="w-10 h-10 mb-2 opacity-30" />
@@ -319,34 +328,42 @@ const filteredGlobalModels = computed(() => {
   })
 })
 
-// 过滤后的上游模型（按 API 格式分组）
-const filteredUpstreamGroups = computed(() => {
+// 过滤后的上游模型（后端已按 id 聚合）
+const filteredUpstreamModels = computed(() => {
   if (!upstreamModelsLoaded.value) return []
 
   const query = searchQuery.value.toLowerCase().trim()
-  const groups: Record<string, UpstreamModel[]> = {}
+  let models = upstreamModels.value
 
-  for (const model of upstreamModels.value) {
-    if (query && !model.id.toLowerCase().includes(query)) continue
-
-    const format = model.api_format || 'unknown'
-    if (!groups[format]) groups[format] = []
-    groups[format].push(model)
+  if (query) {
+    models = models.filter(m => m.id.toLowerCase().includes(query))
   }
 
-  const order = Object.keys(API_FORMAT_LABELS)
-  return Object.entries(groups)
-    .map(([api_format, models]) => ({ api_format, models }))
-    .filter(g => g.models.length > 0)
-    .sort((a, b) => {
-      const aIndex = order.indexOf(a.api_format)
-      const bIndex = order.indexOf(b.api_format)
-      if (aIndex === -1 && bIndex === -1) return a.api_format.localeCompare(b.api_format)
-      if (aIndex === -1) return 1
-      if (bIndex === -1) return -1
-      return aIndex - bIndex
-    })
+  // 按 id 排序
+  return [...models].sort((a, b) => a.id.localeCompare(b.id))
 })
+
+// 上游模型是否全选
+const isAllUpstreamModelsSelected = computed(() => {
+  if (filteredUpstreamModels.value.length === 0) return false
+  return filteredUpstreamModels.value.every(m => selectedUpstreamModelIds.value.has(m.id))
+})
+
+// 全选/取消全选上游模型
+function toggleAllUpstreamModels() {
+  const allIds = filteredUpstreamModels.value.map(m => m.id)
+  if (isAllUpstreamModelsSelected.value) {
+    // 取消全选
+    for (const id of allIds) {
+      selectedUpstreamModelIds.value.delete(id)
+    }
+  } else {
+    // 全选
+    for (const id of allIds) {
+      selectedUpstreamModelIds.value.add(id)
+    }
+  }
+}
 
 // 检查全局模型是否已选中
 function isGlobalModelSelected(globalModelId: string): boolean {
@@ -363,13 +380,6 @@ const isAllGlobalModelsSelected = computed(() => {
   if (filteredGlobalModels.value.length === 0) return false
   return filteredGlobalModels.value.every(m => isGlobalModelSelected(m.id))
 })
-
-// 检查某个上游组是否全选
-function isUpstreamGroupAllSelected(apiFormat: string): boolean {
-  const group = filteredUpstreamGroups.value.find(g => g.api_format === apiFormat)
-  if (!group || group.models.length === 0) return false
-  return group.models.every(m => isUpstreamModelSelected(m.id))
-}
 
 // 计算待添加的全局模型
 const globalModelsToAdd = computed(() => {
@@ -466,26 +476,6 @@ function toggleAllGlobalModels() {
     }
   }
   selectedGlobalModelIds.value = new Set(selectedGlobalModelIds.value)
-}
-
-// 全选/取消全选某个上游组
-function toggleAllUpstreamGroup(apiFormat: string) {
-  const group = filteredUpstreamGroups.value.find(g => g.api_format === apiFormat)
-  if (!group) return
-
-  const allIds = group.models.map(m => m.id)
-  if (isUpstreamGroupAllSelected(apiFormat)) {
-    // 取消全选
-    for (const id of allIds) {
-      selectedUpstreamModelIds.value.delete(id)
-    }
-  } else {
-    // 全选
-    for (const id of allIds) {
-      selectedUpstreamModelIds.value.add(id)
-    }
-  }
-  selectedUpstreamModelIds.value = new Set(selectedUpstreamModelIds.value)
 }
 
 // 切换折叠状态
@@ -672,14 +662,8 @@ async function fetchUpstreamModels(forceRefresh = false) {
         upstreamModelsLoaded.value = true
         // 同步上游模型选择状态
         syncUpstreamModelSelection()
-        // 有多个分组时全部折叠
-        const allGroups = new Set(['global'])
-        for (const model of result.models) {
-          if (model.api_format) {
-            allGroups.add(model.api_format)
-          }
-        }
-        collapsedGroups.value = allGroups
+        // 全部折叠
+        collapsedGroups.value = new Set(['global', 'upstream'])
       }
     }
   } finally {

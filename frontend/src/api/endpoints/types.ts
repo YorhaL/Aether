@@ -630,12 +630,13 @@ export interface GlobalModelListResponse {
 
 /**
  * 上游模型（从提供商 API 获取的原始模型）
+ * 后端已按 model id 聚合，api_formats 包含该模型支持的所有 API 格式
  */
 export interface UpstreamModel {
   id: string
   owned_by?: string
   display_name?: string
-  api_format?: string
+  api_formats: string[]  // 该模型支持的所有 API 格式（后端保证返回数组）
 }
 
 /**
