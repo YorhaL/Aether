@@ -173,6 +173,85 @@ def _resolve_default_path(api_format: str | None) -> str:
     return "/"
 
 
+# ==============================================================================
+# Vertex AI 配置
+# ==============================================================================
+
+# Vertex AI 模型前缀到 API 格式的映射
+# 用于 auth_type=vertex_ai 时，根据模型名动态确定实际的请求/响应格式
+# 格式：前缀 -> APIFormat 值
+VERTEX_AI_MODEL_FORMAT_MAPPING: dict[str, str] = {
+    "claude-": "CLAUDE",  # Anthropic Claude 模型
+    "gemini-": "GEMINI",  # Google Gemini 模型
+    "imagen-": "GEMINI",  # Google Imagen 模型（使用 Gemini 格式）
+}
+
+# Vertex AI 默认 API 格式（当模型前缀不匹配时）
+VERTEX_AI_DEFAULT_FORMAT: str = "GEMINI"
+
+
+def get_vertex_ai_effective_format(
+    model: str,
+    auth_config: dict[str, Any] | None = None,
+) -> str:
+    """
+    获取 Vertex AI 模式下模型的实际 API 格式
+
+    优先级：
+    1. auth_config.model_format_mapping 中的精确匹配
+    2. auth_config.model_format_mapping 中的前缀匹配
+    3. 内置 VERTEX_AI_MODEL_FORMAT_MAPPING 前缀匹配
+    4. auth_config.default_format
+    5. 内置 VERTEX_AI_DEFAULT_FORMAT
+
+    auth_config 配置示例::
+
+        {
+            "project_id": "your-gcp-project-id",
+            "model_format_mapping": {
+                "claude-": "CLAUDE",           # 前缀匹配
+                "my-custom-model": "OPENAI"    # 精确匹配
+            },
+            "default_format": "GEMINI"
+        }
+
+    Args:
+        model: 模型名称
+        auth_config: 解密后的认证配置（可选），可包含 model_format_mapping 和 default_format
+
+    Returns:
+        实际应使用的 API 格式（如 "CLAUDE", "GEMINI"）
+    """
+    # 用户配置的模型-格式映射
+    user_format_mapping: dict[str, str] = {}
+    user_default_format: str | None = None
+
+    if auth_config:
+        user_format_mapping = auth_config.get("model_format_mapping", {})
+        user_default_format = auth_config.get("default_format")
+
+    # 1. 用户配置：精确匹配
+    if model in user_format_mapping:
+        return user_format_mapping[model].upper()
+
+    # 2. 用户配置：前缀匹配
+    for prefix, api_format in user_format_mapping.items():
+        if prefix.endswith("-") and model.startswith(prefix):
+            return api_format.upper()
+
+    # 3. 内置配置：前缀匹配
+    for prefix, api_format in VERTEX_AI_MODEL_FORMAT_MAPPING.items():
+        if model.startswith(prefix):
+            return api_format
+
+    # 4. 用户默认格式
+    if user_default_format:
+        return user_default_format.upper()
+
+    # 5. 内置默认格式
+    return VERTEX_AI_DEFAULT_FORMAT
+
+
 # Vertex AI 模型默认 region 映射
 # 用户可以通过 auth_config.model_regions 覆盖
 VERTEX_AI_DEFAULT_MODEL_REGIONS: dict[str, str] = {
@@ -209,7 +288,8 @@ def _build_vertex_ai_url(
     构建 Vertex AI URL
 
     Vertex AI URL 格式:
-    https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:{action}
+    - Gemini: https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:{action}
+    - Claude: https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{action}
 
     从 auth_config 中读取:
     - project_id: GCP 项目 ID（必需）
@@ -233,6 +313,7 @@ def _build_vertex_ai_url(
         完整的 Vertex AI URL
     """
     import json
+
     from src.core.crypto import crypto_service
 
     # 优先使用传入的已解密配置，避免重复解密
@@ -241,11 +322,15 @@ def _build_vertex_ai_url(
         auth_config = decrypted_auth_config
     else:
         # 兜底：从 key.auth_config 解密（理论上不应走到这里）
-        encrypted_auth_config = getattr(key, "auth_config", None)
-        if encrypted_auth_config:
+        raw_auth_config = getattr(key, "auth_config", None)
+        if raw_auth_config:
             try:
-                decrypted_config = crypto_service.decrypt(encrypted_auth_config)
-                auth_config = json.loads(decrypted_config)
+                # auth_config 可能是加密字符串或未加密的 dict
+                if isinstance(raw_auth_config, dict):
+                    auth_config = raw_auth_config
+                else:
+                    decrypted_config = crypto_service.decrypt(raw_auth_config)
+                    auth_config = json.loads(decrypted_config)
             except Exception as e:
                 logger.error(f"解密 Vertex AI auth_config 失败: {e}")
                 auth_config = {}
@@ -255,7 +340,9 @@ def _build_vertex_ai_url(
     # 获取必需的配置
     project_id = auth_config.get("project_id")
     if not project_id:
-        raise InvalidRequestException("Vertex AI 配置缺少 project_id（请在 Key 的 auth_config 中提供）")
+        raise InvalidRequestException(
+            "Vertex AI 配置缺少 project_id（请在 Key 的 auth_config 中提供）"
+        )
 
     # 获取模型名
     model = (path_params or {}).get("model", "")
@@ -275,22 +362,34 @@ def _build_vertex_ai_url(
     else:
         region = "global"
 
-    # 确定 action
-    action = "streamGenerateContent" if is_stream else "generateContent"
+    # 判断是 Claude 还是 Gemini 模型
+    is_claude_model = model.startswith("claude-")
+
+    # 根据模型类型确定 publisher 和 action
+    if is_claude_model:
+        # Claude 模型使用 Anthropic publisher
+        publisher = "anthropic"
+        action = "streamRawPredict" if is_stream else "rawPredict"
+    else:
+        # Gemini 模型使用 Google publisher
+        publisher = "google"
+        action = "streamGenerateContent" if is_stream else "generateContent"
 
     # 构建 URL（global region 使用不同的 URL 格式）
     if region == "global":
         base_url = "https://aiplatform.googleapis.com"
     else:
         base_url = f"https://{region}-aiplatform.googleapis.com"
-    path = f"/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:{action}"
+    path = f"/v1/projects/{project_id}/locations/{region}/publishers/{publisher}/models/{model}:{action}"
     url = f"{base_url}{path}"
 
     # 添加查询参数
     effective_query_params = dict(query_params) if query_params else {}
-    # Vertex AI 流式请求使用 SSE 格式
-    if is_stream:
+    # Gemini 流式请求使用 SSE 格式，Claude 不需要
+    if is_stream and not is_claude_model:
         effective_query_params.setdefault("alt", "sse")
+    # 移除不适用于 Vertex AI 的参数
+    effective_query_params.pop("beta", None)
 
     if effective_query_params:
         query_string = urlencode(effective_query_params, doseq=True)

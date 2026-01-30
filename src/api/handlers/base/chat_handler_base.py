@@ -24,10 +24,8 @@ from __future__ import annotations
 import asyncio
 import json
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
-
-from collections.abc import Callable
-from collections.abc import AsyncGenerator, Awaitable
 
 import httpx
 from fastapi import BackgroundTasks, Request
@@ -70,13 +68,65 @@ from src.models.database import (
     User,
 )
 from src.services.cache.aware_scheduler import ProviderCandidate
-from src.services.provider.transport import build_provider_url, redact_url_for_log
+from src.services.provider.transport import (
+    build_provider_url,
+    get_vertex_ai_effective_format,
+    redact_url_for_log,
+)
 
 
 def _get_error_status_code(e: Exception, default: int = 400) -> int:
     """从异常中提取 HTTP 状态码"""
     code = getattr(e, "status_code", None)
     return code if isinstance(code, int) and code > 0 else default
+
+
+def _resolve_vertex_ai_format(
+    key: ProviderAPIKey,
+    auth_info: Any,
+    model: str,
+    provider_api_format: str,
+    client_api_format: str,
+    candidate: ProviderCandidate | None,
+) -> tuple[str, bool]:
+    """
+    解析 Vertex AI 动态格式并计算 needs_conversion
+
+    当 auth_type=vertex_ai 时，同一个 GCP 项目可以访问 Gemini 和 Claude，
+    但它们的请求/响应格式不同，需要根据模型名动态选择。
+    用户可通过 auth_config.model_format_mapping 配置自定义映射。
+
+    Args:
+        key: Provider API Key
+        auth_info: 认证信息（包含 decrypted_auth_config）
+        model: 模型名
+        provider_api_format: 当前 provider API 格式
+        client_api_format: 客户端 API 格式
+        candidate: Provider 候选（用于获取原始 needs_conversion）
+
+    Returns:
+        (effective_provider_format, needs_conversion) 元组
+    """
+    key_auth_type = getattr(key, "auth_type", "api_key")
+
+    if key_auth_type == "vertex_ai":
+        vertex_auth_config = auth_info.decrypted_auth_config if auth_info else None
+        effective_format = get_vertex_ai_effective_format(model, vertex_auth_config)
+        if effective_format.upper() != provider_api_format.upper():
+            logger.debug(
+                f"Vertex AI 动态格式切换: {provider_api_format} -> {effective_format} "
+                f"(model={model})"
+            )
+            provider_api_format = effective_format
+        # Vertex AI 模式下，根据动态格式与客户端格式比较确定是否需要转换
+        needs_conversion = provider_api_format.upper() != client_api_format.upper()
+    else:
+        # 非 Vertex AI：使用 candidate 的 needs_conversion
+        needs_conversion = (
+            bool(getattr(candidate, "needs_conversion", False)) if candidate else False
+        )
+
+    return provider_api_format, needs_conversion
 
 
 def _convert_error_response_best_effort(
@@ -595,7 +645,9 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         except (ThinkingSignatureException, UpstreamClientException) as e:
             # ThinkingSignatureException: orchestrator 层已处理整流重试但仍失败
             # UpstreamClientException: 上游客户端错误（HTTP 4xx），不重试，直接返回给客户端
-            error_type = "签名错误" if isinstance(e, ThinkingSignatureException) else "上游客户端错误"
+            error_type = (
+                "签名错误" if isinstance(e, ThinkingSignatureException) else "上游客户端错误"
+            )
             self._log_request_error(f"流式请求失败（{error_type}）", e)
             await self._record_stream_failure(ctx, e, original_headers, original_request_body)
             client_format = (ctx.client_api_format or "").upper()
@@ -645,9 +697,15 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         )
         provider_api_format = ctx.provider_api_format or _api_format_str
         client_api_format = ctx.client_api_format or _api_format_str
-        needs_conversion = (
-            bool(getattr(candidate, "needs_conversion", False)) if candidate else False
+
+        # 提前获取认证信息（Vertex AI 格式判断需要使用 auth_config）
+        auth_info = await get_provider_auth(endpoint, key)
+
+        # 解析 Vertex AI 动态格式并计算 needs_conversion
+        provider_api_format, needs_conversion = _resolve_vertex_ai_format(
+            key, auth_info, ctx.model, provider_api_format, client_api_format, candidate
         )
+        ctx.provider_api_format = provider_api_format
         ctx.needs_conversion = needs_conversion
 
         # 获取模型映射（优先使用映射匹配到的模型，其次是 Provider 级别的映射）
@@ -691,9 +749,6 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         else:
             # 同格式：按原逻辑做轻量清理（子类可覆盖以移除不需要的字段）
             request_body = self.prepare_provider_request_body(request_body)
-
-        # 获取认证信息（处理 Service Account 等异步认证场景）
-        auth_info = await get_provider_auth(endpoint, key)
 
         # 构建请求（上游始终使用 header 认证，不跟随客户端的 query 方式）
         provider_payload, provider_headers = self._request_builder.build(
@@ -956,7 +1011,15 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             client_api_format = (
                 api_format.value if hasattr(api_format, "value") else str(api_format)
             )
-            needs_conversion = bool(getattr(candidate, "needs_conversion", False))
+
+            # 提前获取认证信息（Vertex AI 格式判断需要使用 auth_config）
+            auth_info = await get_provider_auth(endpoint, key)
+
+            # 解析 Vertex AI 动态格式并计算 needs_conversion
+            provider_api_format, needs_conversion = _resolve_vertex_ai_format(
+                key, auth_info, model, provider_api_format, client_api_format, candidate
+            )
+
             provider_api_format_for_error = provider_api_format
             client_api_format_for_error = client_api_format
             needs_conversion_for_error = needs_conversion
@@ -1002,9 +1065,6 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             else:
                 # 同格式：按原逻辑做轻量清理（子类可覆盖以移除不需要的字段）
                 request_body = self.prepare_provider_request_body(request_body)
-
-            # 获取认证信息（处理 Service Account 等异步认证场景）
-            auth_info = await get_provider_auth(endpoint, key)
 
             # 构建请求（上游始终使用 header 认证，不跟随客户端的 query 方式）
             provider_payload, provider_hdrs = self._request_builder.build(

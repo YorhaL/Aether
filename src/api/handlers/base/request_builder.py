@@ -18,8 +18,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from src.core.api_format import UPSTREAM_DROP_HEADERS, HeaderBuilder
 from src.core.crypto import crypto_service
-from src.core.api_format import HeaderBuilder, UPSTREAM_DROP_HEADERS
 
 if TYPE_CHECKING:
     from src.models.database import ProviderAPIKey, ProviderEndpoint
@@ -42,6 +42,7 @@ class ProviderAuthInfo:
     def as_tuple(self) -> tuple[str, str]:
         """返回 (auth_header, auth_value) 元组"""
         return (self.auth_header, self.auth_value)
+
 
 # ==============================================================================
 # 统一的头部配置常量
@@ -346,9 +347,14 @@ async def get_provider_auth(
             # 优先从 auth_config 读取，兼容从 api_key 读取（过渡期）
             encrypted_auth_config = getattr(key, "auth_config", None)
             if encrypted_auth_config:
-                # auth_config 是加密存储的，需要解密
-                decrypted_config = crypto_service.decrypt(encrypted_auth_config)
-                sa_json = json.loads(decrypted_config)
+                # auth_config 可能是加密字符串或未加密的 dict
+                if isinstance(encrypted_auth_config, dict):
+                    # 已经是 dict，直接使用（兼容未加密存储的情况）
+                    sa_json = encrypted_auth_config
+                else:
+                    # 是加密字符串，需要解密
+                    decrypted_config = crypto_service.decrypt(encrypted_auth_config)
+                    sa_json = json.loads(decrypted_config)
             else:
                 # 兼容旧数据：从 api_key 读取
                 decrypted_key = crypto_service.decrypt(key.api_key)
