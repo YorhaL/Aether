@@ -266,7 +266,8 @@ class AuthService:
             logger.warning(f"登录失败 - 该用户使用 LDAP 认证: {email}")
             return None
 
-        if not user.verify_password(password):
+        # 在线程池中执行 bcrypt 密码验证，避免阻塞事件循环
+        if not await run_in_threadpool(user.verify_password, password):
             logger.warning(f"登录失败 - 密码错误: {email}")
             return None
 

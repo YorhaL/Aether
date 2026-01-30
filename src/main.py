@@ -34,7 +34,7 @@ from src.plugins.manager import get_plugin_manager
 
 async def initialize_providers():
     """从数据库初始化提供商（仅用于日志记录）"""
-    from sqlalchemy.orm import Session
+    from sqlalchemy.orm import Session, selectinload
 
     from src.database.database import create_session
     from src.models.database import Provider
@@ -44,9 +44,10 @@ async def initialize_providers():
         db: Session = create_session()
 
         try:
-            # 从数据库加载所有活跃的提供商
+            # 从数据库加载所有活跃的提供商（使用 selectinload 预加载 endpoints 避免 N+1 查询）
             providers = (
                 db.query(Provider)
+                .options(selectinload(Provider.endpoints))
                 .filter(Provider.is_active.is_(True))
                 .order_by(Provider.provider_priority.asc())
                 .all()
