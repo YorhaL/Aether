@@ -1,21 +1,34 @@
-"""
-API 格式枚举定义
+"""API format enums.
 
-定义所有支持的 API 格式，决定请求/响应的处理方式。
+新模式下系统使用结构化的 (ApiFamily, EndpointKind) / `family:kind` signature 作为唯一标识。
 """
 
 from enum import Enum
 
 
-class APIFormat(Enum):
-    """API 格式枚举 - 决定请求/响应的处理方式"""
+class ApiFamily(str, Enum):
+    """
+    协议族（兼容族）- 决定数据格式与认证方式的基础。
 
-    CLAUDE = "CLAUDE"  # Claude API 格式
-    CLAUDE_CLI = "CLAUDE_CLI"  # Claude CLI API 格式（使用 authorization: Bearer）
-    OPENAI = "OPENAI"  # OpenAI API 格式
-    OPENAI_CLI = "OPENAI_CLI"  # OpenAI CLI/Responses API 格式（用于 Claude Code 等客户端）
-    GEMINI = "GEMINI"  # Google Gemini API 格式
-    GEMINI_CLI = "GEMINI_CLI"  # Gemini CLI API 格式
+    注意：不叫 Provider 避免与 ORM 的 Provider 模型撞名。
+    """
+
+    OPENAI = "openai"  # openai-compatible（含 deepseek, grok, qwen 等）
+    CLAUDE = "claude"  # claude-compatible
+    GEMINI = "gemini"  # gemini-compatible
+
+
+class EndpointKind(str, Enum):
+    """
+    端点变体 - 决定 API 路径/认证变体/数据格式变体等。
+
+    注意：不复用现有 EndpointType（EndpointType 用于请求上下文检测/功能分类）。
+    """
+
+    CHAT = "chat"
+    CLI = "cli"
+    VIDEO = "video"
+    IMAGE = "image"
 
 
 class AuthMethod(str, Enum):
@@ -40,4 +53,9 @@ class EndpointType(str, Enum):
     MODELS = "models"  # Models API
 
 
-__all__ = ["APIFormat", "AuthMethod", "EndpointType"]
+__all__ = [
+    "ApiFamily",
+    "EndpointKind",
+    "AuthMethod",
+    "EndpointType",
+]

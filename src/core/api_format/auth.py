@@ -9,7 +9,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from src.core.api_format.enums import APIFormat, AuthMethod
+from src.core.api_format.enums import AuthMethod
+from src.core.api_format.metadata import resolve_endpoint_definition
+from src.core.api_format.signature import EndpointSignature
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -104,17 +106,16 @@ def get_auth_handler(auth_method: AuthMethod) -> AuthHandler:
     return handler
 
 
-def get_default_auth_method(api_format: APIFormat) -> AuthMethod:
-    """从 APIFormat 推断默认 AuthMethod（兼容旧逻辑）"""
-    mapping = {
-        APIFormat.OPENAI: AuthMethod.BEARER,
-        APIFormat.OPENAI_CLI: AuthMethod.BEARER,
-        APIFormat.CLAUDE: AuthMethod.API_KEY,
-        APIFormat.CLAUDE_CLI: AuthMethod.BEARER,
-        APIFormat.GEMINI: AuthMethod.GOOG_API_KEY,
-        APIFormat.GEMINI_CLI: AuthMethod.GOOG_API_KEY,
-    }
-    return mapping.get(api_format, AuthMethod.BEARER)
+def get_default_auth_method_for_endpoint(
+    value: str | EndpointSignature | tuple,  # tuple[ApiFamily, EndpointKind]
+) -> AuthMethod:
+    """
+    新模式：从 endpoint signature 推断默认 AuthMethod。
+
+    只接受 `family:kind` / EndpointSignature / (ApiFamily, EndpointKind)。
+    """
+    definition = resolve_endpoint_definition(value)
+    return definition.auth_method if definition else AuthMethod.BEARER
 
 
 __all__ = [
@@ -125,5 +126,5 @@ __all__ = [
     "OAuth2AuthHandler",
     "QueryKeyAuthHandler",
     "get_auth_handler",
-    "get_default_auth_method",
+    "get_default_auth_method_for_endpoint",
 ]

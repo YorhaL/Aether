@@ -12,14 +12,13 @@
 
 from __future__ import annotations
 
-
 import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.core.api_format.conversion.registry import FormatConversionRegistry
 
-from src.core.api_format.metadata import can_passthrough
+from src.core.api_format.metadata import can_passthrough_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +58,16 @@ def is_format_compatible(
         register_default_normalizers()
         registry = format_conversion_registry
 
-    provider_format = endpoint_api_format.upper()
-    client_format_upper = client_format.upper()
+    # 统一大写用于比较和 registry 查找（registry 以大写 key 索引 normalizer）
+    client_key = client_format.upper()
+    provider_key = endpoint_api_format.upper()
 
     # 1. 格式完全匹配 -> 透传（无需转换）
-    if provider_format == client_format_upper:
+    if provider_key == client_key:
         return True, False, None
 
     # 2. 格式不同 -> 需要检查全局格式转换开关
-    # 即使 data_format_id 相同（如 CLAUDE/CLAUDE_CLI），也需要全局开关启用
+    # 即使 data_format_id 相同（如 claude:chat / claude:cli），也需要全局开关启用
     if not global_conversion_enabled:
         return False, False, "全局格式转换未启用（环境变量 FORMAT_CONVERSION_ENABLED=false）"
 
@@ -83,18 +83,18 @@ def is_format_compatible(
 
     # 检查 reject_formats（优先）
     reject_formats = config.get("reject_formats", [])
-    if client_format_upper in [f.upper() for f in reject_formats]:
+    if client_key in [f.upper() for f in reject_formats]:
         return False, False, f"端点拒绝 {client_format} 格式"
 
     # 检查 accept_formats
     accept_formats = config.get("accept_formats", [])
-    if accept_formats and client_format_upper not in [f.upper() for f in accept_formats]:
+    if accept_formats and client_key not in [f.upper() for f in accept_formats]:
         return False, False, f"端点不接受 {client_format} 格式"
 
     # 4. 检查是否可以透传（data_format_id 相同）
-    # 例如：CLAUDE/CLAUDE_CLI 的 data_format_id 都是 "claude"，数据格式相同可透传
-    #      OPENAI 是 "openai_chat"，OPENAI_CLI 是 "openai_responses"，需要转换
-    if can_passthrough(client_format_upper, provider_format):
+    # 例如：claude:chat / claude:cli 的 data_format_id 都是 "claude"，数据格式相同可透传
+    #      openai:chat 是 "openai_chat"，openai:cli 是 "openai_responses"，需要转换
+    if can_passthrough_endpoint(client_key, provider_key):
         # data_format_id 相同，可透传（无需数据转换）
         return True, False, None
 
@@ -105,11 +105,11 @@ def is_format_compatible(
 
     # 6. 检查转换器能力
     if not registry.can_convert_full(
-        client_format_upper,
-        provider_format,
+        client_key,
+        provider_key,
         require_stream=is_stream,
     ):
-        return False, False, f"不存在 {client_format} <-> {provider_format} 的完整转换器"
+        return False, False, f"不存在 {client_format} <-> {endpoint_api_format} 的完整转换器"
 
     return True, True, None
 

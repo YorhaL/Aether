@@ -9,9 +9,6 @@
   这些应复用 `src/core/api_format/metadata.py`（API_FORMAT_DEFINITIONS）作为单一事实来源。
 """
 
-
-
-
 # 角色映射（仅作为辅助；system/tool 的具体落点以 Normalizer 规则为准）
 ROLE_MAPPINGS: dict[str, dict[str, str]] = {
     "OPENAI": {
@@ -128,4 +125,3 @@ __all__ = [
     "ERROR_TYPE_MAPPINGS",
     "RETRYABLE_ERROR_TYPES",
 ]
-

@@ -262,7 +262,9 @@ def test_claude_stream_chunk_and_event_roundtrip_basic() -> None:
     assert any(isinstance(e, MessageStartEvent) for e in events)
     assert [e.text_delta for e in events if isinstance(e, ContentDeltaEvent)] == ["Hel", "lo"]
     assert any(isinstance(e, ToolCallDeltaEvent) and e.tool_id == "toolu_1" for e in events)
-    assert any(isinstance(e, MessageStopEvent) and e.stop_reason == StopReason.END_TURN for e in events)
+    assert any(
+        isinstance(e, MessageStopEvent) and e.stop_reason == StopReason.END_TURN for e in events
+    )
 
     # internal events -> Claude events
     state2 = StreamState()
@@ -273,7 +275,11 @@ def test_claude_stream_chunk_and_event_roundtrip_basic() -> None:
     assert out_events[0]["type"] == "message_start"
     assert out_events[0]["message"]["id"] == "msg_1"
 
-    assert any(ev.get("type") == "content_block_delta" and ev.get("delta", {}).get("type") == "input_json_delta" for ev in out_events)
+    assert any(
+        ev.get("type") == "content_block_delta"
+        and ev.get("delta", {}).get("type") == "input_json_delta"
+        for ev in out_events
+    )
     assert out_events[-1]["type"] == "message_stop"
 
 
@@ -305,9 +311,7 @@ def test_claude_request_metadata_preserved() -> None:
             {"type": "text", "text": "System prompt 1"},
             {"type": "text", "text": "System prompt 2"},
         ],
-        "metadata": {
-            "user_id": "user_abc123_session_xyz456"
-        },
+        "metadata": {"user_id": "user_abc123_session_xyz456"},
         "max_tokens": 32000,
         "stream": True,
     }

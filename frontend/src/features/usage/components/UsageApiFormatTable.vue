@@ -76,6 +76,7 @@ import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import { formatTokens, formatCurrency } from '@/utils/format'
+import { API_FORMAT_LABELS } from '@/api/endpoints/types'
 import type { ApiFormatStatsItem } from '../types'
 
 defineProps<{
@@ -85,15 +86,13 @@ defineProps<{
 
 // 格式化 API 格式显示名称
 function formatApiFormat(format: string): string {
-  const formatMap: Record<string, string> = {
-    'CLAUDE': 'Claude',
-    'CLAUDE_CLI': 'Claude CLI',
-    'OPENAI': 'OpenAI',
-    'OPENAI_CLI': 'OpenAI CLI',
-    'GEMINI': 'Gemini',
-    'GEMINI_CLI': 'Gemini CLI',
-  }
-  return formatMap[format.toUpperCase()] || format
+  const raw = (format || '').trim()
+  return (
+    API_FORMAT_LABELS[raw] ||
+    API_FORMAT_LABELS[raw.toLowerCase()] ||
+    API_FORMAT_LABELS[raw.toUpperCase()] ||
+    raw
+  )
 }
 
 </script>

@@ -9,19 +9,17 @@ source -> internal -> target
 - 转换失败将抛出 `FormatConversionError`（不再静默回退）。
 """
 
-
 import threading
 import time
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
-from collections.abc import Generator
-
-from src.core.logger import logger
-from src.core.metrics import format_conversion_duration_seconds, format_conversion_total
 
 from src.core.api_format.conversion.exceptions import FormatConversionError
 from src.core.api_format.conversion.normalizer import FormatNormalizer
 from src.core.api_format.conversion.stream_state import StreamState
+from src.core.logger import logger
+from src.core.metrics import format_conversion_duration_seconds, format_conversion_total
 
 
 @contextmanager
@@ -76,7 +74,9 @@ class FormatConversionRegistry:
         src = self._require_normalizer(source_format)
         tgt = self._require_normalizer(target_format)
 
-        with _track_conversion_metrics("request", str(source_format).upper(), str(target_format).upper()):
+        with _track_conversion_metrics(
+            "request", str(source_format).upper(), str(target_format).upper()
+        ):
             try:
                 internal = src.request_to_internal(request)
                 return tgt.request_from_internal(internal)
@@ -115,7 +115,9 @@ class FormatConversionRegistry:
         src = self._require_normalizer(source_format)
         tgt = self._require_normalizer(target_format)
 
-        with _track_conversion_metrics("response", str(source_format).upper(), str(target_format).upper()):
+        with _track_conversion_metrics(
+            "response", str(source_format).upper(), str(target_format).upper()
+        ):
             try:
                 internal = src.response_to_internal(response)
                 return tgt.response_from_internal(internal, requested_model=requested_model)
@@ -134,14 +136,19 @@ class FormatConversionRegistry:
         src = self._require_normalizer(source_format)
         tgt = self._require_normalizer(target_format)
 
-        if not (src.capabilities.supports_error_conversion and tgt.capabilities.supports_error_conversion):
+        if not (
+            src.capabilities.supports_error_conversion
+            and tgt.capabilities.supports_error_conversion
+        ):
             raise FormatConversionError(
                 source_format,
                 target_format,
                 "source/target normalizer 不支持错误转换",
             )
 
-        with _track_conversion_metrics("error", str(source_format).upper(), str(target_format).upper()):
+        with _track_conversion_metrics(
+            "error", str(source_format).upper(), str(target_format).upper()
+        ):
             try:
                 internal = src.error_to_internal(error_response)
                 return tgt.error_from_internal(internal)
@@ -179,7 +186,9 @@ class FormatConversionRegistry:
             )
             state = StreamState()
 
-        with _track_conversion_metrics("stream", str(source_format).upper(), str(target_format).upper()):
+        with _track_conversion_metrics(
+            "stream", str(source_format).upper(), str(target_format).upper()
+        ):
             try:
                 events = src.stream_chunk_to_internal(chunk, state)
                 out: list[dict[str, Any]] = []
@@ -194,7 +203,10 @@ class FormatConversionRegistry:
     def can_convert_request(self, source_format: str, target_format: str) -> bool:
         if str(source_format).upper() == str(target_format).upper():
             return True
-        return self.get_normalizer(source_format) is not None and self.get_normalizer(target_format) is not None
+        return (
+            self.get_normalizer(source_format) is not None
+            and self.get_normalizer(target_format) is not None
+        )
 
     def can_convert_response(self, source_format: str, target_format: str) -> bool:
         return self.can_convert_request(source_format, target_format)
@@ -215,15 +227,22 @@ class FormatConversionRegistry:
         tgt = self.get_normalizer(target_format)
         if src is None or tgt is None:
             return False
-        return bool(src.capabilities.supports_error_conversion and tgt.capabilities.supports_error_conversion)
+        return bool(
+            src.capabilities.supports_error_conversion
+            and tgt.capabilities.supports_error_conversion
+        )
 
-    def can_convert_full(self, format_a: str, format_b: str, *, require_stream: bool = False) -> bool:
+    def can_convert_full(
+        self, format_a: str, format_b: str, *, require_stream: bool = False
+    ) -> bool:
         if not self.can_convert_request(format_a, format_b):
             return False
         if not self.can_convert_request(format_b, format_a):
             return False
         if require_stream:
-            return self.can_convert_stream(format_a, format_b) and self.can_convert_stream(format_b, format_a)
+            return self.can_convert_stream(format_a, format_b) and self.can_convert_stream(
+                format_b, format_a
+            )
         return True
 
     def list_normalizers(self) -> list[str]:

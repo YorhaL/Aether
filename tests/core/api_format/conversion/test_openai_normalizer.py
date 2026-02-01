@@ -297,7 +297,9 @@ def test_openai_stream_chunk_and_event_roundtrip_basic() -> None:
     assert any(isinstance(e, ContentBlockStartEvent) for e in events)
     assert [e.text_delta for e in events if isinstance(e, ContentDeltaEvent)] == ["Hel", "lo"]
     assert any(isinstance(e, ToolCallDeltaEvent) for e in events)
-    assert any(isinstance(e, MessageStopEvent) and e.stop_reason == StopReason.TOOL_USE for e in events)
+    assert any(
+        isinstance(e, MessageStopEvent) and e.stop_reason == StopReason.TOOL_USE for e in events
+    )
 
     # internal events -> OpenAI chunks（验证关键字段与 tool_calls index 稳定）
     state2 = StreamState()
@@ -313,14 +315,20 @@ def test_openai_stream_chunk_and_event_roundtrip_basic() -> None:
 
     # tool_calls start chunk
     tool_start = next(
-        c for c in out_chunks if c["choices"][0]["delta"].get("tool_calls") and c["choices"][0]["delta"]["tool_calls"][0]["function"].get("name")
+        c
+        for c in out_chunks
+        if c["choices"][0]["delta"].get("tool_calls")
+        and c["choices"][0]["delta"]["tool_calls"][0]["function"].get("name")
     )
     assert tool_start["choices"][0]["delta"]["tool_calls"][0]["id"] == "call_1"
     assert tool_start["choices"][0]["delta"]["tool_calls"][0]["index"] == 0
 
     # tool_calls delta chunk（arguments 片段）
     tool_delta = next(
-        c for c in out_chunks if c["choices"][0]["delta"].get("tool_calls") and "arguments" in c["choices"][0]["delta"]["tool_calls"][0]["function"]
+        c
+        for c in out_chunks
+        if c["choices"][0]["delta"].get("tool_calls")
+        and "arguments" in c["choices"][0]["delta"]["tool_calls"][0]["function"]
     )
     assert tool_delta["choices"][0]["delta"]["tool_calls"][0]["id"] == "call_1"
     assert tool_delta["choices"][0]["delta"]["tool_calls"][0]["index"] == 0

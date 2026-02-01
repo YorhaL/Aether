@@ -60,7 +60,8 @@ from src.core.logger import logger
 
 
 class OpenAINormalizer(FormatNormalizer):
-    FORMAT_ID = "OPENAI"
+    # 新模式：ApiFamily + EndpointKind 的 signature key
+    FORMAT_ID = "openai:chat"
     capabilities = FormatCapabilities(
         supports_stream=True,
         supports_error_conversion=True,

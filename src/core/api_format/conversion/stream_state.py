@@ -5,7 +5,6 @@
 每个 Normalizer 通过 `substate(format_id)` 获取自己的隔离状态字典。
 """
 
-
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,4 +45,3 @@ class StreamState:
 __all__ = [
     "StreamState",
 ]
-

@@ -33,9 +33,9 @@ def _make_registry_with_cli() -> FormatConversionRegistry:
 
 def test_registry_can_convert_full_with_cli_stream() -> None:
     reg = _make_registry_with_cli()
-    assert reg.can_convert_full("OPENAI_CLI", "OPENAI", require_stream=True) is True
-    assert reg.can_convert_full("OPENAI_CLI", "CLAUDE_CLI", require_stream=True) is True
-    assert reg.can_convert_full("GEMINI_CLI", "CLAUDE", require_stream=True) is True
+    assert reg.can_convert_full("openai:cli", "openai:chat", require_stream=True) is True
+    assert reg.can_convert_full("openai:cli", "claude:cli", require_stream=True) is True
+    assert reg.can_convert_full("gemini:cli", "claude:chat", require_stream=True) is True
 
 
 def test_openai_cli_request_to_claude() -> None:
@@ -48,7 +48,7 @@ def test_openai_cli_request_to_claude() -> None:
         "max_output_tokens": 12,
     }
 
-    claude_req = reg.convert_request(openai_cli_req, "OPENAI_CLI", "CLAUDE")
+    claude_req = reg.convert_request(openai_cli_req, "openai:cli", "claude:chat")
     assert claude_req["model"] == "gpt-4o-mini"
     assert claude_req["stream"] is True
     assert isinstance(claude_req.get("messages"), list)
@@ -69,7 +69,7 @@ def test_claude_response_to_openai_cli() -> None:
         "usage": {"input_tokens": 5, "output_tokens": 7},
     }
 
-    openai_cli_resp = reg.convert_response(claude_resp, "CLAUDE", "OPENAI_CLI")
+    openai_cli_resp = reg.convert_response(claude_resp, "claude:chat", "openai:cli")
     assert openai_cli_resp["object"] == "response"
     assert isinstance(openai_cli_resp.get("output"), list)
     msg = cast(dict[str, Any], openai_cli_resp["output"][0])
@@ -89,10 +89,12 @@ def test_stream_openai_to_openai_cli_delta() -> None:
         "object": "chat.completion.chunk",
         "created": 1,
         "model": "gpt-4o-mini",
-        "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": None}],
+        "choices": [
+            {"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": None}
+        ],
     }
 
-    out_events = reg.convert_stream_chunk(chunk, "OPENAI", "OPENAI_CLI", state=state)
+    out_events = reg.convert_stream_chunk(chunk, "openai:chat", "openai:cli", state=state)
     assert isinstance(out_events, list) and out_events
     assert out_events[0].get("type") == "response.created"
     assert out_events[1].get("type") == "response.output_text.delta"
@@ -109,7 +111,7 @@ def test_stream_openai_cli_to_openai_delta() -> None:
         "response": {"id": "resp_1", "model": "gpt-4o-mini"},
     }
 
-    out_events = reg.convert_stream_chunk(chunk, "OPENAI_CLI", "OPENAI", state=state)
+    out_events = reg.convert_stream_chunk(chunk, "openai:cli", "openai:chat", state=state)
     assert isinstance(out_events, list) and out_events
 
     # 第一个 chunk 先补齐 assistant role
@@ -149,7 +151,7 @@ def test_openai_cli_function_call_to_claude() -> None:
         "stream": True,
     }
 
-    claude_req = reg.convert_request(openai_cli_req, "OPENAI_CLI", "CLAUDE")
+    claude_req = reg.convert_request(openai_cli_req, "openai:cli", "claude:chat")
 
     messages = claude_req.get("messages", [])
     assert len(messages) == 3
@@ -203,14 +205,16 @@ def test_openai_cli_reasoning_preserved_in_roundtrip() -> None:
     }
 
     # 转换到 internal 再转回 OPENAI_CLI
-    converted = reg.convert_request(openai_cli_req, "OPENAI_CLI", "OPENAI_CLI")
+    converted = reg.convert_request(openai_cli_req, "openai:cli", "openai:cli")
 
     input_items = converted.get("input", [])
     # 应该有 user message, reasoning, assistant message
     assert len(input_items) >= 2
 
     # 找到 reasoning block
-    reasoning_items = [i for i in input_items if isinstance(i, dict) and i.get("type") == "reasoning"]
+    reasoning_items = [
+        i for i in input_items if isinstance(i, dict) and i.get("type") == "reasoning"
+    ]
     assert len(reasoning_items) == 1
     assert "summary" in reasoning_items[0]
 
@@ -247,7 +251,7 @@ def test_claude_tool_use_to_openai_cli() -> None:
         ],
     }
 
-    openai_cli_req = reg.convert_request(claude_req, "CLAUDE", "OPENAI_CLI")
+    openai_cli_req = reg.convert_request(claude_req, "claude:chat", "openai:cli")
 
     input_items = openai_cli_req.get("input", [])
     assert len(input_items) >= 3
@@ -259,7 +263,9 @@ def test_claude_tool_use_to_openai_cli() -> None:
     assert fc_items[0]["call_id"] == "tool_123"
 
     # 找到 function_call_output
-    fco_items = [i for i in input_items if isinstance(i, dict) and i.get("type") == "function_call_output"]
+    fco_items = [
+        i for i in input_items if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
     assert len(fco_items) == 1
     assert fco_items[0]["call_id"] == "tool_123"
     assert fco_items[0]["output"] == "Hello World"
@@ -281,7 +287,7 @@ def test_stream_openai_cli_in_progress_event() -> None:
         },
     }
 
-    events1 = reg.convert_stream_chunk(created_chunk, "OPENAI_CLI", "CLAUDE", state=state)
+    events1 = reg.convert_stream_chunk(created_chunk, "openai:cli", "claude:chat", state=state)
     assert isinstance(events1, list) and events1
     assert events1[0].get("type") == "message_start"
 
@@ -296,7 +302,7 @@ def test_stream_openai_cli_in_progress_event() -> None:
         },
     }
 
-    events2 = reg.convert_stream_chunk(in_progress_chunk, "OPENAI_CLI", "CLAUDE", state=state)
+    events2 = reg.convert_stream_chunk(in_progress_chunk, "openai:cli", "claude:chat", state=state)
     # response.in_progress 不应产生任何事件
     assert events2 == []
 
@@ -311,7 +317,7 @@ def test_stream_openai_cli_function_call_events() -> None:
         "type": "response.created",
         "response": {"id": "resp_456", "model": "gpt-5"},
     }
-    reg.convert_stream_chunk(created_chunk, "OPENAI_CLI", "CLAUDE", state=state)
+    reg.convert_stream_chunk(created_chunk, "openai:cli", "claude:chat", state=state)
 
     # response.output_item.added (function_call)
     output_item_chunk = {
@@ -323,7 +329,7 @@ def test_stream_openai_cli_function_call_events() -> None:
         },
     }
 
-    events1 = reg.convert_stream_chunk(output_item_chunk, "OPENAI_CLI", "CLAUDE", state=state)
+    events1 = reg.convert_stream_chunk(output_item_chunk, "openai:cli", "claude:chat", state=state)
     assert isinstance(events1, list) and events1
     assert events1[0].get("type") == "content_block_start"
 
@@ -333,7 +339,7 @@ def test_stream_openai_cli_function_call_events() -> None:
         "delta": '{"city":',
     }
 
-    events2 = reg.convert_stream_chunk(args_delta_chunk, "OPENAI_CLI", "CLAUDE", state=state)
+    events2 = reg.convert_stream_chunk(args_delta_chunk, "openai:cli", "claude:chat", state=state)
     assert isinstance(events2, list) and events2
     # ToolCallDeltaEvent 转换为 Claude 的 content_block_delta
     assert events2[0].get("type") == "content_block_delta"
@@ -352,7 +358,7 @@ def test_stream_openai_cli_function_call_events() -> None:
         },
     }
 
-    events3 = reg.convert_stream_chunk(output_done_chunk, "OPENAI_CLI", "CLAUDE", state=state)
+    events3 = reg.convert_stream_chunk(output_done_chunk, "openai:cli", "claude:chat", state=state)
     assert isinstance(events3, list) and events3
     assert events3[0].get("type") == "content_block_stop"
 
@@ -486,7 +492,7 @@ def test_real_claude_cli_stream_response_conversion() -> None:
     # 收集所有转换后的 OpenAI 格式事件
     all_openai_events: list[dict[str, Any]] = []
     for chunk in chunks:
-        events = reg.convert_stream_chunk(chunk, "CLAUDE_CLI", "OPENAI", state=state)
+        events = reg.convert_stream_chunk(chunk, "claude:cli", "openai:chat", state=state)
         all_openai_events.extend(events)
 
     # 验证转换结果
@@ -542,8 +548,16 @@ def test_real_claude_cli_stream_to_openai_cli() -> None:
         },
         {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
         {"type": "ping"},
-        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}},
-        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " World"}},
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": " World"},
+        },
         {"type": "content_block_stop", "index": 0},
         {
             "type": "message_delta",
@@ -555,7 +569,7 @@ def test_real_claude_cli_stream_to_openai_cli() -> None:
 
     all_events: list[dict[str, Any]] = []
     for chunk in chunks:
-        events = reg.convert_stream_chunk(chunk, "CLAUDE_CLI", "OPENAI_CLI", state=state)
+        events = reg.convert_stream_chunk(chunk, "claude:cli", "openai:cli", state=state)
         all_events.extend(events)
 
     # 验证 OpenAI CLI 格式事件
@@ -573,5 +587,7 @@ def test_real_claude_cli_stream_to_openai_cli() -> None:
     assert " World" in deltas
 
     # 应该有 response.completed 或 response.done 事件
-    done_events = [e for e in all_events if e.get("type") in ("response.completed", "response.done")]
+    done_events = [
+        e for e in all_events if e.get("type") in ("response.completed", "response.done")
+    ]
     assert len(done_events) >= 1

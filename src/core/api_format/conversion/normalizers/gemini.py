@@ -63,7 +63,7 @@ from src.core.api_format.conversion.stream_state import StreamState
 
 
 class GeminiNormalizer(FormatNormalizer):
-    FORMAT_ID = "GEMINI"
+    FORMAT_ID = "gemini:chat"
     capabilities = FormatCapabilities(
         supports_stream=True,
         supports_error_conversion=True,

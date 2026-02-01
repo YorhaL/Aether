@@ -12,63 +12,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from starlette.requests import Request
 
-from src.core.api_format.enums import APIFormat, AuthMethod, EndpointType
-from src.core.api_format.metadata import API_FORMAT_DEFINITIONS, ApiFormatDefinition
-
-
-def _extract_api_key_by_definition(
-    headers: dict[str, str],
-    query_params: dict[str, str] | None,
-    definition: ApiFormatDefinition,
-) -> tuple[str | None, str]:
-    """
-    根据格式定义从请求中提取 API Key
-
-    Args:
-        headers: 请求头字典（key 小写）
-        query_params: 查询参数字典（可选）
-        definition: API 格式定义
-
-    Returns:
-        (api_key, auth_method) 元组：
-        - api_key: 提取到的 API Key，或 None
-        - auth_method: 认证方式 ("header" 或 "query")
-    """
-    auth_header = definition.auth_header.lower()
-    auth_type = definition.auth_type
-
-    # Gemini 格式：query 参数优先（与 Google SDK 行为一致）
-    if definition.api_format in (APIFormat.GEMINI, APIFormat.GEMINI_CLI):
-        # 1. 优先检查 ?key= 参数
-        query_key = query_params.get("key") if query_params else None
-        if query_key:
-            return query_key, "query"
-        # 2. 再检查 x-goog-api-key 请求头
-        header_value = headers.get(auth_header)
-        if header_value:
-            return header_value, "header"
-        return None, "header"
-
-    # 其他格式：从 header 提取
-    header_value = headers.get(auth_header)
-    if not header_value:
-        return None, "header"
-
-    if auth_type == "bearer":
-        # Bearer token: "Bearer xxx"
-        if header_value.lower().startswith("bearer "):
-            return header_value[7:].strip(), "header"
-        return None, "header"
-    else:
-        # header 类型: 直接使用值
-        return header_value, "header"
+from src.core.api_format.enums import ApiFamily, AuthMethod, EndpointKind, EndpointType
+from src.core.api_format.signature import EndpointSignature, make_signature_key
 
 
 @dataclass(frozen=True)
 class RequestContext:
     """请求上下文 - 三维度信息"""
 
-    data_format: APIFormat
+    endpoint: EndpointSignature
     endpoint_type: EndpointType
     auth_method: AuthMethod
     credentials: str | None
@@ -99,18 +51,37 @@ def _detect_endpoint_type(path: str) -> EndpointType:
 
 def _detect_data_format(
     path: str, headers: dict[str, str], query_params: dict[str, str] | None
-) -> APIFormat:
+) -> EndpointSignature:
     normalized = path.lower()
+    endpoint_type = _detect_endpoint_type(path)
 
+    # Claude: /v1/messages（chat/cli 共用路径，按认证头区分）
     if normalized.startswith("/v1/messages"):
-        return APIFormat.CLAUDE
-    if normalized.startswith("/v1beta/") or normalized.startswith("/upload/v1beta/"):
-        return APIFormat.GEMINI
-    if normalized.startswith("/v1/chat/completions") or normalized.startswith("/v1/videos"):
-        return APIFormat.OPENAI
+        auth_header = headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            return EndpointSignature(api_family=ApiFamily.CLAUDE, endpoint_kind=EndpointKind.CLI)
+        return EndpointSignature(api_family=ApiFamily.CLAUDE, endpoint_kind=EndpointKind.CHAT)
 
-    api_format, _api_key, _auth_method = detect_format_from_request(headers, query_params)
-    return api_format
+    # OpenAI CLI: /responses
+    if "/responses" in normalized:
+        return EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.CLI)
+
+    # Gemini family
+    if normalized.startswith("/v1beta/") or normalized.startswith("/upload/v1beta/"):
+        kind = EndpointKind.CHAT
+        if endpoint_type == EndpointType.VIDEO:
+            kind = EndpointKind.VIDEO
+        return EndpointSignature(api_family=ApiFamily.GEMINI, endpoint_kind=kind)
+
+    # OpenAI family
+    if normalized.startswith("/v1/videos"):
+        return EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.VIDEO)
+    if normalized.startswith("/v1/chat/completions"):
+        return EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.CHAT)
+
+    # Fallback: 基于认证方式猜测协议族（主要用于 /v1/models）
+    sig, _api_key, _auth_source = detect_format_from_request(headers, query_params)
+    return sig
 
 
 def _detect_auth_method(
@@ -139,7 +110,7 @@ def _detect_auth_method(
 def detect_format_from_request(
     headers: dict[str, str],
     query_params: dict[str, str] | None = None,
-) -> tuple[APIFormat, str | None, str]:
+) -> tuple[EndpointSignature, str | None, str]:
     """
     从请求头检测 API 格式和 API Key
 
@@ -153,36 +124,56 @@ def detect_format_from_request(
         query_params: 查询参数字典（可选）
 
     Returns:
-        (APIFormat, api_key, auth_method) 元组
-        - auth_method: 认证方式 ("header" 或 "query")
+        (endpoint_signature, api_key, auth_source) 元组
+        - endpoint_signature: EndpointSignature(api_family, endpoint_kind)
+        - auth_source: 认证来源 ("header" 或 "query")
     """
     # Claude: x-api-key + anthropic-version (必须同时存在)
-    claude_def = API_FORMAT_DEFINITIONS[APIFormat.CLAUDE]
-    claude_key, claude_auth_method = _extract_api_key_by_definition(
-        headers, query_params, claude_def
-    )
-    if claude_key and headers.get("anthropic-version"):
-        return APIFormat.CLAUDE, claude_key, claude_auth_method
+    if headers.get("x-api-key") and headers.get("anthropic-version"):
+        return (
+            EndpointSignature(api_family=ApiFamily.CLAUDE, endpoint_kind=EndpointKind.CHAT),
+            headers.get("x-api-key"),
+            "header",
+        )
 
-    # Gemini: x-goog-api-key (header 类型) 或 ?key=
-    gemini_def = API_FORMAT_DEFINITIONS[APIFormat.GEMINI]
-    gemini_key, gemini_auth_method = _extract_api_key_by_definition(
-        headers, query_params, gemini_def
-    )
-    if gemini_key:
-        return APIFormat.GEMINI, gemini_key, gemini_auth_method
+    # Gemini: query 参数优先（与 Google SDK 行为一致）
+    query_key = query_params.get("key") if query_params else None
+    if query_key:
+        return (
+            EndpointSignature(api_family=ApiFamily.GEMINI, endpoint_kind=EndpointKind.CHAT),
+            query_key,
+            "query",
+        )
+    x_goog_key = headers.get("x-goog-api-key")
+    if x_goog_key:
+        return (
+            EndpointSignature(api_family=ApiFamily.GEMINI, endpoint_kind=EndpointKind.CHAT),
+            x_goog_key,
+            "header",
+        )
 
     # OpenAI: Authorization: Bearer (默认)
-    # 注意: 如果只有 x-api-key 但没有 anthropic-version，也走 OpenAI 格式
-    openai_def = API_FORMAT_DEFINITIONS[APIFormat.OPENAI]
-    openai_key, openai_auth_method = _extract_api_key_by_definition(
-        headers, query_params, openai_def
+    auth_header = headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return (
+            EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.CHAT),
+            auth_header[7:].strip(),
+            "header",
+        )
+
+    # 兜底：兼容部分客户端用 x-api-key 携带 OpenAI token 的情况
+    if headers.get("x-api-key"):
+        return (
+            EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.CHAT),
+            headers.get("x-api-key"),
+            "header",
+        )
+
+    return (
+        EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.CHAT),
+        None,
+        "header",
     )
-    # 如果 OpenAI 格式没有 key，但有 x-api-key，也用它（兼容）
-    if not openai_key and claude_key:
-        openai_key = claude_key
-        openai_auth_method = claude_auth_method
-    return APIFormat.OPENAI, openai_key, openai_auth_method
 
 
 def detect_format_and_key_from_starlette(
@@ -208,8 +199,7 @@ def detect_format_and_key_from_starlette(
     api_format, api_key, auth_method = detect_format_from_request(headers, query_params)
 
     # 返回小写格式名
-    format_name = api_format.value.lower()
-    return format_name, api_key, auth_method
+    return api_format.key, api_key, auth_method
 
 
 def detect_request_context(request: Request) -> RequestContext:
@@ -227,7 +217,7 @@ def detect_request_context(request: Request) -> RequestContext:
     auth_method, credentials = _detect_auth_method(headers, query_params)
 
     return RequestContext(
-        data_format=data_format,
+        endpoint=data_format,
         endpoint_type=endpoint_type,
         auth_method=auth_method,
         credentials=credentials,
@@ -236,7 +226,7 @@ def detect_request_context(request: Request) -> RequestContext:
 
 def detect_format_from_response(
     response_data: dict,
-) -> APIFormat | None:
+) -> str | None:
     """
     从响应内容检测 API 格式
 
@@ -248,26 +238,26 @@ def detect_format_from_response(
     """
     # Claude: 有 type="message" 或特定的 content 结构
     if response_data.get("type") == "message":
-        return APIFormat.CLAUDE
+        return make_signature_key(ApiFamily.CLAUDE, EndpointKind.CHAT)
     if "content" in response_data and isinstance(response_data["content"], list):
         first_content = response_data["content"][0] if response_data["content"] else {}
         if first_content.get("type") in ("text", "tool_use"):
-            return APIFormat.CLAUDE
+            return make_signature_key(ApiFamily.CLAUDE, EndpointKind.CHAT)
 
     # OpenAI: 有 choices 数组
     if "choices" in response_data:
-        return APIFormat.OPENAI
+        return make_signature_key(ApiFamily.OPENAI, EndpointKind.CHAT)
 
     # Gemini: 有 candidates 数组
     if "candidates" in response_data:
-        return APIFormat.GEMINI
+        return make_signature_key(ApiFamily.GEMINI, EndpointKind.CHAT)
 
     return None
 
 
 def detect_cli_format_from_path(
     path: str,
-    base_format: APIFormat,
+    base_signature: str,
 ) -> bool:
     """
     根据请求路径检测是否为 CLI 模式
@@ -285,7 +275,7 @@ def detect_cli_format_from_path(
         True 如果是 CLI 模式
     """
     # OpenAI CLI 特征: /v1/responses 路径
-    if base_format == APIFormat.OPENAI and "/responses" in path:
+    if str(base_signature).lower().startswith("openai:") and "/responses" in path.lower():
         return True
 
     # 其他 CLI 模式通常由 Adapter 层根据具体业务逻辑判断

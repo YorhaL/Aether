@@ -7,7 +7,6 @@ Claude Messages API Normalizer
 - 可选：Claude error <-> InternalError
 """
 
-
 import json
 from typing import Any
 
@@ -54,7 +53,7 @@ from src.core.api_format.conversion.stream_state import StreamState
 
 
 class ClaudeNormalizer(FormatNormalizer):
-    FORMAT_ID = "CLAUDE"
+    FORMAT_ID = "claude:chat"
     capabilities = FormatCapabilities(
         supports_stream=True,
         supports_error_conversion=True,
@@ -161,7 +160,9 @@ class ClaudeNormalizer(FormatNormalizer):
         # Claude Messages API: messages[] 仅允许 user/assistant，且需要交替；这里做最小修复
         fixed_messages = self._coerce_claude_message_sequence(internal.messages)
 
-        out_messages: list[dict[str, Any]] = [self._internal_message_to_claude(m) for m in fixed_messages]
+        out_messages: list[dict[str, Any]] = [
+            self._internal_message_to_claude(m) for m in fixed_messages
+        ]
 
         result: dict[str, Any] = {
             "model": internal.model,
@@ -285,7 +286,9 @@ class ClaudeNormalizer(FormatNormalizer):
 
         stop_reason = None
         if internal.stop_reason is not None:
-            stop_reason = STOP_REASON_MAPPINGS.get("CLAUDE", {}).get(internal.stop_reason.value, "end_turn")
+            stop_reason = STOP_REASON_MAPPINGS.get("CLAUDE", {}).get(
+                internal.stop_reason.value, "end_turn"
+            )
 
         usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
         if internal.usage:
@@ -353,7 +356,9 @@ class ClaudeNormalizer(FormatNormalizer):
             btype = str(block.get("type") or "unknown")
 
             if btype == "text":
-                events.append(ContentBlockStartEvent(block_index=index, block_type=ContentType.TEXT))
+                events.append(
+                    ContentBlockStartEvent(block_index=index, block_type=ContentType.TEXT)
+                )
                 return events
 
             if btype == "tool_use":
@@ -402,7 +407,9 @@ class ClaudeNormalizer(FormatNormalizer):
                 tool_id = ""
                 if isinstance(mapping, dict):
                     tool_id = str(mapping.get(index) or "")
-                events.append(ToolCallDeltaEvent(block_index=index, tool_id=tool_id, input_delta=str(partial)))
+                events.append(
+                    ToolCallDeltaEvent(block_index=index, tool_id=tool_id, input_delta=str(partial))
+                )
                 return events
 
             return events
@@ -528,7 +535,9 @@ class ClaudeNormalizer(FormatNormalizer):
         if isinstance(event, MessageStopEvent):
             stop_reason = None
             if event.stop_reason is not None:
-                stop_reason = STOP_REASON_MAPPINGS.get("CLAUDE", {}).get(event.stop_reason.value, "end_turn")
+                stop_reason = STOP_REASON_MAPPINGS.get("CLAUDE", {}).get(
+                    event.stop_reason.value, "end_turn"
+                )
 
             msg_delta: dict[str, Any] = {
                 "type": "message_delta",
@@ -592,7 +601,9 @@ class ClaudeNormalizer(FormatNormalizer):
     # Helpers
     # =========================
 
-    def _claude_message_to_internal(self, msg: dict[str, Any]) -> tuple[InternalMessage | None, dict[str, int]]:
+    def _claude_message_to_internal(
+        self, msg: dict[str, Any]
+    ) -> tuple[InternalMessage | None, dict[str, int]]:
         dropped: dict[str, int] = {}
         role_raw = str(msg.get("role") or "unknown")
 
@@ -635,7 +646,9 @@ class ClaudeNormalizer(FormatNormalizer):
             if btype == "text":
                 text = str(block.get("text") or "")
                 if text:
-                    blocks.append(TextBlock(text=text, extra=self._extract_extra(block, {"type", "text"})))
+                    blocks.append(
+                        TextBlock(text=text, extra=self._extract_extra(block, {"type", "text"}))
+                    )
                 continue
 
             if btype == "image":
@@ -645,7 +658,12 @@ class ClaudeNormalizer(FormatNormalizer):
                 if stype == "base64":
                     data = src.get("data")
                     media_type = src.get("media_type")
-                    if isinstance(data, str) and data and isinstance(media_type, str) and media_type:
+                    if (
+                        isinstance(data, str)
+                        and data
+                        and isinstance(media_type, str)
+                        and media_type
+                    ):
                         blocks.append(ImageBlock(data=data, media_type=media_type))
                         continue
                 dropped["claude_image_unsupported"] = dropped.get("claude_image_unsupported", 0) + 1
@@ -663,7 +681,9 @@ class ClaudeNormalizer(FormatNormalizer):
                         tool_id=tool_id,
                         tool_name=tool_name,
                         tool_input=tool_input,
-                        extra={"claude": self._extract_extra(block, {"type", "id", "name", "input"})},
+                        extra={
+                            "claude": self._extract_extra(block, {"type", "id", "name", "input"})
+                        },
                     )
                 )
                 continue
@@ -672,7 +692,9 @@ class ClaudeNormalizer(FormatNormalizer):
                 tool_use_id = str(block.get("tool_use_id") or "")
                 is_error = bool(block.get("is_error") or False)
                 raw_content = block.get("content")
-                blocks.append(self._tool_result_from_claude(tool_use_id, raw_content, is_error, block))
+                blocks.append(
+                    self._tool_result_from_claude(tool_use_id, raw_content, is_error, block)
+                )
                 continue
 
             dropped_key = f"claude_block:{btype}"
@@ -757,7 +779,9 @@ class ClaudeNormalizer(FormatNormalizer):
             texts: list[str] = []
             for item in system_value:
                 if not isinstance(item, dict):
-                    dropped["claude_system_item_non_dict"] = dropped.get("claude_system_item_non_dict", 0) + 1
+                    dropped["claude_system_item_non_dict"] = (
+                        dropped.get("claude_system_item_non_dict", 0) + 1
+                    )
                     continue
                 if item.get("type") == "text":
                     text = item.get("text")
@@ -792,8 +816,14 @@ class ClaudeNormalizer(FormatNormalizer):
                 ToolDefinition(
                     name=name,
                     description=tool.get("description"),
-                    parameters=tool.get("input_schema") if isinstance(tool.get("input_schema"), dict) else None,
-                    extra={"claude": self._extract_extra(tool, {"name", "description", "input_schema"})},
+                    parameters=(
+                        tool.get("input_schema")
+                        if isinstance(tool.get("input_schema"), dict)
+                        else None
+                    ),
+                    extra={
+                        "claude": self._extract_extra(tool, {"name", "description", "input_schema"})
+                    },
                 )
             )
         return out or None
@@ -813,7 +843,9 @@ class ClaudeNormalizer(FormatNormalizer):
             return ToolChoice(type=ToolChoiceType.REQUIRED, extra={"claude": tool_choice})
         if ctype in ("tool_use", "tool"):
             name = str(tool_choice.get("name") or "")
-            return ToolChoice(type=ToolChoiceType.TOOL, tool_name=name, extra={"claude": tool_choice})
+            return ToolChoice(
+                type=ToolChoiceType.TOOL, tool_name=name, extra={"claude": tool_choice}
+            )
 
         return ToolChoice(type=ToolChoiceType.AUTO, extra={"claude": tool_choice})
 
@@ -855,7 +887,11 @@ class ClaudeNormalizer(FormatNormalizer):
                     blocks.append(
                         {
                             "type": "image",
-                            "source": {"type": "base64", "media_type": b.media_type, "data": b.data},
+                            "source": {
+                                "type": "base64",
+                                "media_type": b.media_type,
+                                "data": b.data,
+                            },
                         }
                     )
                 elif b.url:
@@ -901,7 +937,9 @@ class ClaudeNormalizer(FormatNormalizer):
 
         return {"role": role, "content": blocks}
 
-    def _coerce_claude_message_sequence(self, messages: list[InternalMessage]) -> list[InternalMessage]:
+    def _coerce_claude_message_sequence(
+        self, messages: list[InternalMessage]
+    ) -> list[InternalMessage]:
         normalized: list[InternalMessage] = []
         for m in messages:
             role = m.role
@@ -940,7 +978,9 @@ class ClaudeNormalizer(FormatNormalizer):
                     continue
 
         if "total_tokens" not in fields:
-            fields["total_tokens"] = int(fields.get("input_tokens", 0) + fields.get("output_tokens", 0))
+            fields["total_tokens"] = int(
+                fields.get("input_tokens", 0) + fields.get("output_tokens", 0)
+            )
 
         return UsageInfo(
             input_tokens=int(fields.get("input_tokens", 0)),

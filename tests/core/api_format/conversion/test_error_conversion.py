@@ -34,7 +34,7 @@ def test_error_conversion_openai_to_claude() -> None:
         "error": {"message": "bad request", "type": "invalid_request_error", "code": "bad_request"}
     }
 
-    out = reg.convert_error_response(openai_error, "OPENAI", "CLAUDE")
+    out = reg.convert_error_response(openai_error, "openai:chat", "claude:chat")
     assert out.get("type") == "error"
     assert isinstance(out.get("error"), dict)
     assert out["error"]["message"] == "bad request"
@@ -44,7 +44,7 @@ def test_error_conversion_claude_to_openai() -> None:
     reg = _make_registry()
 
     claude_error = {"type": "error", "error": {"type": "invalid_request_error", "message": "nope"}}
-    out = reg.convert_error_response(claude_error, "CLAUDE", "OPENAI")
+    out = reg.convert_error_response(claude_error, "claude:chat", "openai:chat")
     assert isinstance(out.get("error"), dict)
     assert out["error"]["message"] == "nope"
 
@@ -63,7 +63,7 @@ def test_error_event_stream_openai_to_claude_via_registry() -> None:
 
     # OpenAI 流式错误块
     chunk = {"error": {"message": "bad", "type": "invalid_request_error"}}
-    out = reg.convert_stream_chunk(chunk, "OPENAI", "CLAUDE", state=StreamState())
+    out = reg.convert_stream_chunk(chunk, "openai:chat", "claude:chat", state=StreamState())
     assert isinstance(out, list) and out
     evt0 = cast(dict[str, Any], out[0])
     assert evt0.get("type") == "error"

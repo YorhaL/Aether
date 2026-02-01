@@ -10,7 +10,6 @@
 - 兼容优先：UnknownBlock 在内部保留，但默认在输出阶段丢弃（可观测、可随时调整策略）
 """
 
-
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -293,4 +292,3 @@ __all__ = [
     "InternalError",
     "FormatCapabilities",
 ]
-

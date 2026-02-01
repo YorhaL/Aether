@@ -103,14 +103,17 @@ def test_gemini_request_parts_image_tool_and_unknown_drop() -> None:
             },
             {
                 "role": "model",
-                "parts": [
-                    {"function_call": {"name": "get_weather", "args": {"city": "SF"}}}
-                ],
+                "parts": [{"function_call": {"name": "get_weather", "args": {"city": "SF"}}}],
             },
             {
                 "role": "user",
                 "parts": [
-                    {"function_response": {"name": "call_1", "response": {"result": {"temp_c": 20}}}}
+                    {
+                        "function_response": {
+                            "name": "call_1",
+                            "response": {"result": {"temp_c": 20}},
+                        }
+                    }
                 ],
             },
         ]
@@ -194,16 +197,10 @@ def test_gemini_stream_chunk_and_event_roundtrip_basic() -> None:
 
     chunks = [
         {
-            "candidates": [
-                {"content": {"parts": [{"text": "Hel"}], "role": "model"}, "index": 0}
-            ],
+            "candidates": [{"content": {"parts": [{"text": "Hel"}], "role": "model"}, "index": 0}],
             "modelVersion": "gemini-1.5",
         },
-        {
-            "candidates": [
-                {"content": {"parts": [{"text": "lo"}], "role": "model"}, "index": 0}
-            ]
-        },
+        {"candidates": [{"content": {"parts": [{"text": "lo"}], "role": "model"}, "index": 0}]},
         {
             "candidates": [
                 {
@@ -226,7 +223,11 @@ def test_gemini_stream_chunk_and_event_roundtrip_basic() -> None:
                     "index": 0,
                 }
             ],
-            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 2, "totalTokenCount": 3},
+            "usageMetadata": {
+                "promptTokenCount": 1,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 3,
+            },
             "modelVersion": "gemini-1.5",
         },
     ]
@@ -237,8 +238,13 @@ def test_gemini_stream_chunk_and_event_roundtrip_basic() -> None:
 
     assert any(isinstance(e, MessageStartEvent) for e in events)
     assert [e.text_delta for e in events if isinstance(e, ContentDeltaEvent)] == ["Hel", "lo"]
-    assert any(isinstance(e, ToolCallDeltaEvent) and json.loads(e.input_delta) == {"city": "SF"} for e in events)
-    assert any(isinstance(e, MessageStopEvent) and e.stop_reason == StopReason.END_TURN for e in events)
+    assert any(
+        isinstance(e, ToolCallDeltaEvent) and json.loads(e.input_delta) == {"city": "SF"}
+        for e in events
+    )
+    assert any(
+        isinstance(e, MessageStopEvent) and e.stop_reason == StopReason.END_TURN for e in events
+    )
 
     state2 = StreamState()
     out_chunks: list[dict[str, Any]] = []
@@ -253,7 +259,9 @@ def test_gemini_stream_chunk_and_event_roundtrip_basic() -> None:
         if c["candidates"][0]["content"]["parts"]
         and "functionCall" in c["candidates"][0]["content"]["parts"][0]
     )
-    assert tool_chunk["candidates"][0]["content"]["parts"][0]["functionCall"]["name"] == "get_weather"
+    assert (
+        tool_chunk["candidates"][0]["content"]["parts"][0]["functionCall"]["name"] == "get_weather"
+    )
 
     assert out_chunks[-1]["candidates"][0]["finishReason"] == "STOP"
 

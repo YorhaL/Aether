@@ -18,7 +18,6 @@ from src.core.api_format.conversion.normalizers.openai import OpenAINormalizer
 from src.core.api_format.conversion.registry import FormatConversionRegistry
 from src.core.api_format.conversion.stream_state import StreamState
 
-
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden_data"
 INPUT_DIR = GOLDEN_DIR / "inputs"
 EXPECTED_DIR = GOLDEN_DIR / "expected"
@@ -53,12 +52,12 @@ def _make_registry() -> FormatConversionRegistry:
 
 def test_golden_requests() -> None:
     reg = _make_registry()
-    formats = ["OPENAI", "CLAUDE", "GEMINI"]
+    formats = ["openai:chat", "claude:chat", "gemini:chat"]
 
     inputs = {
-        "OPENAI": _load_json(INPUT_DIR / "request_openai.json"),
-        "CLAUDE": _load_json(INPUT_DIR / "request_claude.json"),
-        "GEMINI": _load_json(INPUT_DIR / "request_gemini.json"),
+        "openai:chat": _load_json(INPUT_DIR / "request_openai.json"),
+        "claude:chat": _load_json(INPUT_DIR / "request_claude.json"),
+        "gemini:chat": _load_json(INPUT_DIR / "request_gemini.json"),
     }
 
     for source in formats:
@@ -72,12 +71,12 @@ def test_golden_requests() -> None:
 
 def test_golden_responses() -> None:
     reg = _make_registry()
-    formats = ["OPENAI", "CLAUDE", "GEMINI"]
+    formats = ["openai:chat", "claude:chat", "gemini:chat"]
 
     inputs = {
-        "OPENAI": _load_json(INPUT_DIR / "response_openai.json"),
-        "CLAUDE": _load_json(INPUT_DIR / "response_claude.json"),
-        "GEMINI": _load_json(INPUT_DIR / "response_gemini.json"),
+        "openai:chat": _load_json(INPUT_DIR / "response_openai.json"),
+        "claude:chat": _load_json(INPUT_DIR / "response_claude.json"),
+        "gemini:chat": _load_json(INPUT_DIR / "response_gemini.json"),
     }
 
     for source in formats:
@@ -91,12 +90,12 @@ def test_golden_responses() -> None:
 
 def test_golden_streams() -> None:
     reg = _make_registry()
-    formats = ["OPENAI", "CLAUDE", "GEMINI"]
+    formats = ["openai:chat", "claude:chat", "gemini:chat"]
 
     inputs: dict[str, list[dict[str, Any]]] = {
-        "OPENAI": _load_json(INPUT_DIR / "stream_openai.json"),
-        "CLAUDE": _load_json(INPUT_DIR / "stream_claude.json"),
-        "GEMINI": _load_json(INPUT_DIR / "stream_gemini.json"),
+        "openai:chat": _load_json(INPUT_DIR / "stream_openai.json"),
+        "claude:chat": _load_json(INPUT_DIR / "stream_claude.json"),
+        "gemini:chat": _load_json(INPUT_DIR / "stream_gemini.json"),
     }
 
     for source in formats:
@@ -106,7 +105,7 @@ def test_golden_streams() -> None:
             expected = _load_json(EXPECTED_DIR / f"stream_{source}_to_{target}.json")
 
             state = StreamState()
-            if source == "GEMINI":
+            if source == "gemini:chat":
                 state.message_id = "gemini_1"
 
             out: list[dict[str, Any]] = []

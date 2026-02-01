@@ -7,13 +7,11 @@ GEMINI_CLI 的请求/响应 body 与 GEMINI 一致（Google Gemini API），差�
 如需 CLI 特殊处理，可覆盖 request_from_internal / request_to_internal 等方法。
 """
 
-
 from src.core.api_format.conversion.normalizers.gemini import GeminiNormalizer
 
 
 class GeminiCliNormalizer(GeminiNormalizer):
-    FORMAT_ID = "GEMINI_CLI"
+    FORMAT_ID = "gemini:cli"
 
 
 __all__ = ["GeminiCliNormalizer"]
-

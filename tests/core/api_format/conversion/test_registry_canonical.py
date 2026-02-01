@@ -37,9 +37,9 @@ def _first_openai_choice_message(resp: dict[str, Any]) -> dict[str, Any]:
 
 def test_registry_canonical_can_convert_full_stream() -> None:
     reg = _make_registry()
-    assert reg.can_convert_full("OPENAI", "CLAUDE", require_stream=True) is True
-    assert reg.can_convert_full("OPENAI", "GEMINI", require_stream=True) is True
-    assert reg.can_convert_full("CLAUDE", "GEMINI", require_stream=True) is True
+    assert reg.can_convert_full("openai:chat", "claude:chat", require_stream=True) is True
+    assert reg.can_convert_full("openai:chat", "gemini:chat", require_stream=True) is True
+    assert reg.can_convert_full("claude:chat", "gemini:chat", require_stream=True) is True
 
 
 def test_registry_canonical_request_openai_to_claude() -> None:
@@ -57,7 +57,7 @@ def test_registry_canonical_request_openai_to_claude() -> None:
         "stream": True,
     }
 
-    claude_req = reg.convert_request(openai_req, "OPENAI", "CLAUDE")
+    claude_req = reg.convert_request(openai_req, "openai:chat", "claude:chat")
     assert claude_req["model"] == "gpt-4o-mini"
     assert claude_req["system"] == "sys\n\ndev"
     assert claude_req["stream"] is True
@@ -79,7 +79,7 @@ def test_registry_canonical_response_claude_to_openai() -> None:
         "usage": {"input_tokens": 5, "output_tokens": 7},
     }
 
-    openai_resp = reg.convert_response(claude_resp, "CLAUDE", "OPENAI")
+    openai_resp = reg.convert_response(claude_resp, "claude:chat", "openai:chat")
     assert openai_resp["object"] == "chat.completion"
     msg = _first_openai_choice_message(openai_resp)
     assert msg["role"] == "assistant"
@@ -94,11 +94,13 @@ def test_registry_canonical_stream_openai_to_claude() -> None:
         "object": "chat.completion.chunk",
         "created": 1,
         "model": "gpt-4o-mini",
-        "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": None}],
+        "choices": [
+            {"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": None}
+        ],
     }
 
     state = StreamState()
-    out_events = reg.convert_stream_chunk(chunk, "OPENAI", "CLAUDE", state=state)
+    out_events = reg.convert_stream_chunk(chunk, "openai:chat", "claude:chat", state=state)
     assert isinstance(out_events, list) and out_events
 
     types = [cast(dict[str, Any], e).get("type") for e in cast(list[dict[str, Any]], out_events)]

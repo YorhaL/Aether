@@ -10,7 +10,6 @@ OpenAI CLI / Responses Normalizer (OPENAI_CLI)
 - 未识别的字段会进入 extra/raw，未知内容块保留在 internal，但默认输出阶段会丢弃。
 """
 
-
 import json
 import time
 from typing import Any
@@ -56,7 +55,7 @@ from src.core.api_format.conversion.stream_state import StreamState
 
 
 class OpenAICliNormalizer(FormatNormalizer):
-    FORMAT_ID = "OPENAI_CLI"
+    FORMAT_ID = "openai:cli"
     capabilities = FormatCapabilities(
         supports_stream=True,
         supports_error_conversion=True,
@@ -96,9 +95,7 @@ class OpenAICliNormalizer(FormatNormalizer):
         tools = self._tools_to_internal(request.get("tools"))
         tool_choice = self._tool_choice_to_internal(request.get("tool_choice"))
 
-        max_tokens = self._optional_int(
-            request.get("max_output_tokens", request.get("max_tokens"))
-        )
+        max_tokens = self._optional_int(request.get("max_output_tokens", request.get("max_tokens")))
 
         internal = InternalRequest(
             model=model,
@@ -275,7 +272,9 @@ class OpenAICliNormalizer(FormatNormalizer):
             if delta_text:
                 if not ss.get("text_block_started"):
                     ss["text_block_started"] = True
-                    events.append(ContentBlockStartEvent(block_index=0, block_type=ContentType.TEXT))
+                    events.append(
+                        ContentBlockStartEvent(block_index=0, block_type=ContentType.TEXT)
+                    )
                 events.append(ContentDeltaEvent(block_index=0, text_delta=delta_text))
             return events
 
@@ -331,11 +330,16 @@ class OpenAICliNormalizer(FormatNormalizer):
                         ss["tool_block_started"] = True
                         ss["current_tool_id"] = item.get("call_id") or item.get("id") or ""
                         ss["current_tool_name"] = item.get("name") or ""
-                        events.append(ContentBlockStartEvent(
-                            block_index=ss.get("block_index", 0),
-                            block_type=ContentType.TOOL_USE,
-                            extra={"tool_id": ss["current_tool_id"], "tool_name": ss["current_tool_name"]},
-                        ))
+                        events.append(
+                            ContentBlockStartEvent(
+                                block_index=ss.get("block_index", 0),
+                                block_type=ContentType.TOOL_USE,
+                                extra={
+                                    "tool_id": ss["current_tool_id"],
+                                    "tool_name": ss["current_tool_name"],
+                                },
+                            )
+                        )
                         ss["block_index"] = ss.get("block_index", 0) + 1
                 # message 输出项
                 elif item_type == "message":
@@ -357,11 +361,13 @@ class OpenAICliNormalizer(FormatNormalizer):
         if etype == "response.function_call_arguments.delta":
             delta = chunk.get("delta") or ""
             if delta:
-                events.append(ToolCallDeltaEvent(
-                    block_index=ss.get("block_index", 1) - 1,
-                    tool_id=ss.get("current_tool_id", ""),
-                    input_delta=delta,
-                ))
+                events.append(
+                    ToolCallDeltaEvent(
+                        block_index=ss.get("block_index", 1) - 1,
+                        tool_id=ss.get("current_tool_id", ""),
+                        input_delta=delta,
+                    )
+                )
             return events
 
         # response.function_call_arguments.done：工具调用参数完成
@@ -505,7 +511,9 @@ class OpenAICliNormalizer(FormatNormalizer):
             return resp_inner
         return response
 
-    def _extract_output_text_blocks(self, payload: dict[str, Any]) -> tuple[list[ContentBlock], dict[str, Any]]:
+    def _extract_output_text_blocks(
+        self, payload: dict[str, Any]
+    ) -> tuple[list[ContentBlock], dict[str, Any]]:
         text_parts: list[str] = []
 
         output = payload.get("output")
@@ -520,11 +528,15 @@ class OpenAICliNormalizer(FormatNormalizer):
                             if not isinstance(part, dict):
                                 continue
                             ptype = str(part.get("type") or "")
-                            if ptype in ("output_text", "text") and isinstance(part.get("text"), str):
+                            if ptype in ("output_text", "text") and isinstance(
+                                part.get("text"), str
+                            ):
                                 text_parts.append(part.get("text") or "")
                     continue
 
-                if item.get("type") in ("output_text", "text") and isinstance(item.get("text"), str):
+                if item.get("type") in ("output_text", "text") and isinstance(
+                    item.get("text"), str
+                ):
                     text_parts.append(item.get("text") or "")
 
         # 兼容：部分实现可能直接给 output_text
@@ -572,7 +584,12 @@ class OpenAICliNormalizer(FormatNormalizer):
             input_data = input_data.get("messages")
 
         if not isinstance(input_data, list):
-            return [InternalMessage(role=Role.USER, content=[UnknownBlock(raw_type="input", payload={"input": input_data})])]
+            return [
+                InternalMessage(
+                    role=Role.USER,
+                    content=[UnknownBlock(raw_type="input", payload={"input": input_data})],
+                )
+            ]
 
         messages: list[InternalMessage] = []
         for item in input_data:
@@ -585,7 +602,13 @@ class OpenAICliNormalizer(FormatNormalizer):
             if item_type == "message" or item.get("role"):
                 role = self._role_from_value(item.get("role"))
                 blocks = self._responses_content_to_blocks(item.get("content"))
-                messages.append(InternalMessage(role=role, content=blocks, extra=self._extract_extra(item, {"type", "role", "content"})))
+                messages.append(
+                    InternalMessage(
+                        role=role,
+                        content=blocks,
+                        extra=self._extract_extra(item, {"type", "role", "content"}),
+                    )
+                )
                 continue
 
             # function_call -> assistant 消息 + ToolUseBlock
@@ -594,14 +617,22 @@ class OpenAICliNormalizer(FormatNormalizer):
                 tool_name = str(item.get("name") or "")
                 args_raw = item.get("arguments") or "{}"
                 try:
-                    tool_input = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw if isinstance(args_raw, dict) else {})
+                    tool_input = (
+                        json.loads(args_raw)
+                        if isinstance(args_raw, str)
+                        else (args_raw if isinstance(args_raw, dict) else {})
+                    )
                 except (json.JSONDecodeError, TypeError):
                     tool_input = {"_raw": args_raw}
                 tool_block = ToolUseBlock(
                     tool_id=tool_id,
                     tool_name=tool_name,
                     tool_input=tool_input,
-                    extra={"openai_cli": self._extract_extra(item, {"type", "call_id", "id", "name", "arguments"})},
+                    extra={
+                        "openai_cli": self._extract_extra(
+                            item, {"type", "call_id", "id", "name", "arguments"}
+                        )
+                    },
                 )
                 messages.append(InternalMessage(role=Role.ASSISTANT, content=[tool_block]))
                 continue
@@ -616,7 +647,9 @@ class OpenAICliNormalizer(FormatNormalizer):
                     tool_use_id=tool_use_id,
                     output=output,
                     content_text=content_text,
-                    extra={"openai_cli": self._extract_extra(item, {"type", "call_id", "id", "output"})},
+                    extra={
+                        "openai_cli": self._extract_extra(item, {"type", "call_id", "id", "output"})
+                    },
                 )
                 messages.append(InternalMessage(role=Role.TOOL, content=[result_block]))
                 continue
@@ -640,24 +673,30 @@ class OpenAICliNormalizer(FormatNormalizer):
                 reasoning_blocks: list[ContentBlock] = []
                 if summary_parts:
                     # 保留 reasoning 的 summary 作为 UnknownBlock，便于输出时决策
-                    reasoning_blocks.append(UnknownBlock(
-                        raw_type="reasoning",
-                        payload={"summary_text": "\n".join(summary_parts), "original": item},
-                    ))
+                    reasoning_blocks.append(
+                        UnknownBlock(
+                            raw_type="reasoning",
+                            payload={"summary_text": "\n".join(summary_parts), "original": item},
+                        )
+                    )
                 else:
                     reasoning_blocks.append(UnknownBlock(raw_type="reasoning", payload=item))
-                messages.append(InternalMessage(
-                    role=Role.ASSISTANT,
-                    content=reasoning_blocks,
-                    extra={"openai_cli": {"type": "reasoning"}},
-                ))
+                messages.append(
+                    InternalMessage(
+                        role=Role.ASSISTANT,
+                        content=reasoning_blocks,
+                        extra={"openai_cli": {"type": "reasoning"}},
+                    )
+                )
                 continue
 
             # 其他未知类型 -> 保留为 UnknownBlock
-            messages.append(InternalMessage(
-                role=Role.UNKNOWN,
-                content=[UnknownBlock(raw_type=item_type or "unknown", payload=item)],
-            ))
+            messages.append(
+                InternalMessage(
+                    role=Role.UNKNOWN,
+                    content=[UnknownBlock(raw_type=item_type or "unknown", payload=item)],
+                )
+            )
 
         return messages
 
@@ -695,20 +734,32 @@ class OpenAICliNormalizer(FormatNormalizer):
             # ToolUseBlock -> function_call
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
-                    out.append({
-                        "type": "function_call",
-                        "call_id": block.tool_id,
-                        "name": block.tool_name,
-                        "arguments": json.dumps(block.tool_input, ensure_ascii=False) if block.tool_input else "{}",
-                    })
+                    out.append(
+                        {
+                            "type": "function_call",
+                            "call_id": block.tool_id,
+                            "name": block.tool_name,
+                            "arguments": (
+                                json.dumps(block.tool_input, ensure_ascii=False)
+                                if block.tool_input
+                                else "{}"
+                            ),
+                        }
+                    )
                     continue
 
                 if isinstance(block, ToolResultBlock):
-                    out.append({
-                        "type": "function_call_output",
-                        "call_id": block.tool_use_id,
-                        "output": block.content_text if block.content_text is not None else block.output,
-                    })
+                    out.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": block.tool_use_id,
+                            "output": (
+                                block.content_text
+                                if block.content_text is not None
+                                else block.output
+                            ),
+                        }
+                    )
                     continue
 
                 # reasoning（UnknownBlock with raw_type="reasoning"）
@@ -720,10 +771,16 @@ class OpenAICliNormalizer(FormatNormalizer):
                         out.append(original)
                     else:
                         summary_text = payload.get("summary_text", "")
-                        out.append({
-                            "type": "reasoning",
-                            "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
-                        })
+                        out.append(
+                            {
+                                "type": "reasoning",
+                                "summary": (
+                                    [{"type": "summary_text", "text": summary_text}]
+                                    if summary_text
+                                    else []
+                                ),
+                            }
+                        )
                     continue
 
             # 普通 message（TextBlock）
@@ -763,8 +820,15 @@ class OpenAICliNormalizer(FormatNormalizer):
                     ToolDefinition(
                         name=name,
                         description=fn.get("description"),
-                        parameters=fn.get("parameters") if isinstance(fn.get("parameters"), dict) else None,
-                        extra={"openai_tool": self._extract_extra(tool, {"type", "function"}), "openai_function": self._extract_extra(fn, {"name", "description", "parameters"})},
+                        parameters=(
+                            fn.get("parameters") if isinstance(fn.get("parameters"), dict) else None
+                        ),
+                        extra={
+                            "openai_tool": self._extract_extra(tool, {"type", "function"}),
+                            "openai_function": self._extract_extra(
+                                fn, {"name", "description", "parameters"}
+                            ),
+                        },
                     )
                 )
                 continue
@@ -776,8 +840,16 @@ class OpenAICliNormalizer(FormatNormalizer):
                     ToolDefinition(
                         name=name,
                         description=tool.get("description"),
-                        parameters=tool.get("parameters") if isinstance(tool.get("parameters"), dict) else None,
-                        extra={"openai_cli": self._extract_extra(tool, {"name", "description", "parameters"})},
+                        parameters=(
+                            tool.get("parameters")
+                            if isinstance(tool.get("parameters"), dict)
+                            else None
+                        ),
+                        extra={
+                            "openai_cli": self._extract_extra(
+                                tool, {"name", "description", "parameters"}
+                            )
+                        },
                     )
                 )
         return out or None
@@ -787,16 +859,24 @@ class OpenAICliNormalizer(FormatNormalizer):
             return None
         if isinstance(tool_choice, str):
             if tool_choice == "none":
-                return ToolChoice(type=ToolChoiceType.NONE, extra={"openai_cli": {"tool_choice": tool_choice}})
+                return ToolChoice(
+                    type=ToolChoiceType.NONE, extra={"openai_cli": {"tool_choice": tool_choice}}
+                )
             if tool_choice == "auto":
-                return ToolChoice(type=ToolChoiceType.AUTO, extra={"openai_cli": {"tool_choice": tool_choice}})
+                return ToolChoice(
+                    type=ToolChoiceType.AUTO, extra={"openai_cli": {"tool_choice": tool_choice}}
+                )
             return ToolChoice(type=ToolChoiceType.AUTO, extra={"raw": tool_choice})
 
         if isinstance(tool_choice, dict):
             # OpenAI 兼容结构：{"type":"function","function":{"name":"..."}}
-            if tool_choice.get("type") == "function" and isinstance(tool_choice.get("function"), dict):
+            if tool_choice.get("type") == "function" and isinstance(
+                tool_choice.get("function"), dict
+            ):
                 name = str(tool_choice["function"].get("name") or "")
-                return ToolChoice(type=ToolChoiceType.TOOL, tool_name=name, extra={"openai_cli": tool_choice})
+                return ToolChoice(
+                    type=ToolChoiceType.TOOL, tool_name=name, extra={"openai_cli": tool_choice}
+                )
             return ToolChoice(type=ToolChoiceType.AUTO, extra={"openai_cli": tool_choice})
 
         return ToolChoice(type=ToolChoiceType.AUTO, extra={"raw": tool_choice})

@@ -6,43 +6,34 @@ API 格式工具函数
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from src.core.api_format.enums import APIFormat
-
-
-def is_cli_format(format_id: str | APIFormat | None) -> bool:
+def is_cli_format(format_id: str | None) -> bool:
     """
     判断是否为 CLI 透传格式
 
-    CLI 格式以 _CLI 结尾，表示该入口更偏向“CLI 兼容层”（鉴权/UA/路径差异等）。
-    是否参与格式转换由转换层决定；当前项目已支持 CLI 格式参与转换。
+    新模式下使用 endpoint signature：`family:kind`，CLI 的 kind 为 `cli`。
 
     Args:
-        format_id: 格式标识符（字符串或 APIFormat 枚举）
+        format_id: endpoint signature key（如 "openai:cli"）
 
     Returns:
         True 如果是 CLI 格式
 
     Examples:
-        >>> is_cli_format("CLAUDE_CLI")
+        >>> is_cli_format("claude:cli")
         True
-        >>> is_cli_format("CLAUDE")
+        >>> is_cli_format("claude:chat")
         False
-        >>> is_cli_format(APIFormat.OPENAI_CLI)
-        True
     """
     if format_id is None:
         return False
-    if hasattr(format_id, "value"):
-        format_id = format_id.value
-    return str(format_id).upper().endswith("_CLI")
+    text = str(format_id).strip()
+    return text.lower().endswith(":cli")
 
 
-def get_base_format(format_id: str | APIFormat | None) -> str | None:
+def get_base_format(format_id: str | None) -> str | None:
     """
-    获取基础格式（去除 _CLI 后缀）
+    获取基础格式（CLI -> CHAT）
 
     Args:
         format_id: 格式标识符
@@ -51,41 +42,55 @@ def get_base_format(format_id: str | APIFormat | None) -> str | None:
         基础格式字符串，或 None
 
     Examples:
-        >>> get_base_format("CLAUDE_CLI")
-        "CLAUDE"
-        >>> get_base_format("OPENAI")
-        "OPENAI"
+        >>> get_base_format("claude:cli")
+        "claude:chat"
+        >>> get_base_format("openai:chat")
+        "openai:chat"
     """
     if format_id is None:
         return None
-    if hasattr(format_id, "value"):
-        format_id = format_id.value
-    format_str = str(format_id).upper()
-    if format_str.endswith("_CLI"):
-        return format_str[:-4]
-    return format_str
+    text = str(format_id).strip()
+    if not text:
+        return None
+
+    from src.core.api_format.enums import EndpointKind
+    from src.core.api_format.signature import make_signature_key, parse_signature_key
+
+    try:
+        sig = parse_signature_key(text)
+    except Exception:
+        return None
+    if sig.endpoint_kind == EndpointKind.CLI:
+        return make_signature_key(sig.api_family, EndpointKind.CHAT)
+    return make_signature_key(sig.api_family, sig.endpoint_kind)
 
 
-def normalize_format(format_id: str | APIFormat | None) -> str | None:
+def normalize_format(format_id: str | None) -> str | None:
     """
-    规范化格式标识符
+    规范化 endpoint signature key（canonical: 全小写 `family:kind`）。
 
     Args:
-        format_id: 格式标识符（可能是字符串、枚举或 None）
+        format_id: endpoint signature key
 
     Returns:
-        大写的格式字符串，或 None
+        canonical signature key，或 None
     """
     if format_id is None:
         return None
-    if hasattr(format_id, "value"):
-        return str(format_id.value).upper()
-    return str(format_id).upper()
+    text = str(format_id).strip()
+    if not text:
+        return None
+    from src.core.api_format.signature import normalize_signature_key
+
+    try:
+        return normalize_signature_key(text)
+    except Exception:
+        return None
 
 
 def is_same_format(
-    format1: str | APIFormat | None,
-    format2: str | APIFormat | None,
+    format1: str | None,
+    format2: str | None,
 ) -> bool:
     """
     判断两个格式是否相同
@@ -95,14 +100,13 @@ def is_same_format(
     return normalize_format(format1) == normalize_format(format2)
 
 
-def is_convertible_format(format_id: str | APIFormat | None) -> bool:
+def is_convertible_format(format_id: str | None) -> bool:
     """
     判断是否为可转换格式
 
     .. deprecated::
         此函数语义已退化（对非 None 输入总返回 True）。
         真正的可转换性应通过 format_conversion_registry.can_convert_*() 查询。
-        保留此函数仅为向后兼容，不建议新代码使用。
     """
     if format_id is None:
         return False

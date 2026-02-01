@@ -39,7 +39,6 @@ from src.core.api_format.conversion.internal import (
 )
 from src.core.api_format.conversion.stream_state import StreamState
 
-
 # ============================================================================
 # Enum 类型测试
 # ============================================================================
@@ -302,7 +301,9 @@ class TestInternalMessage:
             role=Role.ASSISTANT,
             content=[
                 TextBlock(text="Let me check the weather"),
-                ToolUseBlock(tool_id="t1", tool_name="get_weather", tool_input={"city": "Shanghai"}),
+                ToolUseBlock(
+                    tool_id="t1", tool_name="get_weather", tool_input={"city": "Shanghai"}
+                ),
             ],
         )
         assert msg.role == Role.ASSISTANT

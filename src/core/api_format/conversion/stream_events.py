@@ -4,7 +4,6 @@
 用于把 OpenAI/Claude/Gemini 的流式协议映射为统一事件序列，再由目标格式 Normalizer 输出。
 """
 
-
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
