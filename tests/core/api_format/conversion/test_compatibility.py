@@ -20,7 +20,7 @@ def test_same_format_is_compatible() -> None:
         "claude:chat",
         endpoint_format_acceptance_config=None,
         is_stream=False,
-        global_conversion_enabled=False,
+        effective_conversion_enabled=False,
         registry=MagicMock(),
     )
     assert ok is True
@@ -37,7 +37,7 @@ def test_cli_format_convertible_when_converter_supports_full() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=registry,
     )
     assert ok is True
@@ -52,7 +52,7 @@ def test_global_switch_disabled_blocks_conversion() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=False,
+        effective_conversion_enabled=False,
         registry=MagicMock(),
     )
     assert ok is False
@@ -66,7 +66,7 @@ def test_endpoint_config_none_blocks_conversion() -> None:
         "openai:chat",
         endpoint_format_acceptance_config=None,
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is False
@@ -80,7 +80,7 @@ def test_endpoint_disabled_blocks_conversion() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": False},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is False
@@ -94,7 +94,7 @@ def test_accept_formats_allows_only_whitelist() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True, "accept_formats": ["openai:chat"]},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is False
@@ -108,7 +108,7 @@ def test_reject_formats_blocks_blacklist() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True, "reject_formats": ["claude:chat"]},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is False
@@ -122,7 +122,7 @@ def test_stream_conversion_disabled_blocks_stream() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True, "stream_conversion": False},
         is_stream=True,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is False
@@ -139,7 +139,7 @@ def test_converter_support_required() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=registry,
     )
     assert ok is False
@@ -156,7 +156,7 @@ def test_conversion_allowed_when_converter_supports_full() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True, "accept_formats": ["claude:chat"]},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=registry,
     )
     assert ok is True
@@ -174,7 +174,7 @@ def test_claude_cli_to_claude_no_conversion_needed() -> None:
         "claude:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is True
@@ -189,7 +189,7 @@ def test_claude_to_claude_cli_no_conversion_needed() -> None:
         "claude:cli",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is True
@@ -204,7 +204,7 @@ def test_gemini_cli_to_gemini_no_conversion_needed() -> None:
         "gemini:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is True
@@ -219,7 +219,7 @@ def test_claude_cli_to_claude_blocked_when_global_switch_disabled() -> None:
         "claude:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=False,
+        effective_conversion_enabled=False,
         registry=MagicMock(),
     )
     assert ok is False
@@ -233,7 +233,7 @@ def test_claude_cli_to_claude_blocked_when_endpoint_not_configured() -> None:
         "claude:chat",
         endpoint_format_acceptance_config=None,
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=MagicMock(),
     )
     assert ok is False
@@ -250,7 +250,7 @@ def test_openai_cli_to_openai_needs_conversion() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True},  # 同族转换也需要端点配置
         is_stream=False,
-        global_conversion_enabled=True,  # 同族转换也需要全局开关
+        effective_conversion_enabled=True,  # 同族转换也需要全局开关
         registry=registry,
     )
     assert ok is True
@@ -268,7 +268,7 @@ def test_openai_to_openai_cli_needs_conversion() -> None:
         "openai:cli",
         endpoint_format_acceptance_config={"enabled": True},  # 同族转换也需要端点配置
         is_stream=False,
-        global_conversion_enabled=True,  # 同族转换也需要全局开关
+        effective_conversion_enabled=True,  # 同族转换也需要全局开关
         registry=registry,
     )
     assert ok is True
@@ -286,7 +286,7 @@ def test_openai_cli_to_openai_stream_needs_conversion() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True},  # 同族转换也需要端点配置
         is_stream=True,
-        global_conversion_enabled=True,  # 同族转换也需要全局开关
+        effective_conversion_enabled=True,  # 同族转换也需要全局开关
         registry=registry,
     )
     assert ok is True
@@ -304,7 +304,7 @@ def test_openai_cli_to_openai_fails_without_converter() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=registry,
     )
     assert ok is False
@@ -322,7 +322,7 @@ def test_openai_cli_to_openai_blocked_when_global_switch_disabled() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": True},
         is_stream=False,
-        global_conversion_enabled=False,  # 全局开关关闭
+        effective_conversion_enabled=False,  # 全局开关关闭
         registry=registry,
     )
     assert ok is False
@@ -340,7 +340,7 @@ def test_openai_cli_to_openai_blocked_when_endpoint_disabled() -> None:
         "openai:chat",
         endpoint_format_acceptance_config={"enabled": False},  # 端点开关关闭
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=registry,
     )
     assert ok is False
@@ -358,7 +358,7 @@ def test_openai_cli_to_openai_blocked_when_endpoint_not_configured() -> None:
         "openai:chat",
         endpoint_format_acceptance_config=None,  # 无端点配置
         is_stream=False,
-        global_conversion_enabled=True,
+        effective_conversion_enabled=True,
         registry=registry,
     )
     assert ok is False

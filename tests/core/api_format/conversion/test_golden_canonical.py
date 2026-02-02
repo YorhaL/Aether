@@ -42,6 +42,11 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _sanitize_format(fmt: str) -> str:
+    """Replace ':' with '_' for Windows-compatible filenames."""
+    return fmt.replace(":", "_")
+
+
 def _make_registry() -> FormatConversionRegistry:
     reg = FormatConversionRegistry()
     reg.register(OpenAINormalizer())
@@ -64,7 +69,8 @@ def test_golden_requests() -> None:
         for target in formats:
             if source == target:
                 continue
-            expected = _load_json(EXPECTED_DIR / f"request_{source}_to_{target}.json")
+            fname = f"request_{_sanitize_format(source)}_to_{_sanitize_format(target)}.json"
+            expected = _load_json(EXPECTED_DIR / fname)
             actual = reg.convert_request(inputs[source], source, target)
             assert _scrub(actual) == expected
 
@@ -83,7 +89,8 @@ def test_golden_responses() -> None:
         for target in formats:
             if source == target:
                 continue
-            expected = _load_json(EXPECTED_DIR / f"response_{source}_to_{target}.json")
+            fname = f"response_{_sanitize_format(source)}_to_{_sanitize_format(target)}.json"
+            expected = _load_json(EXPECTED_DIR / fname)
             actual = reg.convert_response(inputs[source], source, target)
             assert _scrub(actual) == expected
 
@@ -102,7 +109,8 @@ def test_golden_streams() -> None:
         for target in formats:
             if source == target:
                 continue
-            expected = _load_json(EXPECTED_DIR / f"stream_{source}_to_{target}.json")
+            fname = f"stream_{_sanitize_format(source)}_to_{_sanitize_format(target)}.json"
+            expected = _load_json(EXPECTED_DIR / fname)
 
             state = StreamState()
             if source == "gemini:chat":
