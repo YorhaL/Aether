@@ -472,4 +472,6 @@ class ModelService:
             global_model_display_name=(
                 model.global_model.display_name if model.global_model else None
             ),
+            # 有效配置（合并 Model 和 GlobalModel 的 config）
+            effective_config=model.get_effective_config(),
         )

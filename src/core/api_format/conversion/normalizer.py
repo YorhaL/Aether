@@ -102,8 +102,15 @@ class FormatNormalizer(ABC):
         """将视频任务响应转换为内部表示"""
         raise NotImplementedError(f"{self.__class__.__name__} does not support video conversion")
 
-    def video_task_from_internal(self, internal: InternalVideoTask) -> dict[str, Any]:
-        """将内部视频任务转换为格式特定响应"""
+    def video_task_from_internal(
+        self, internal: InternalVideoTask, *, base_url: str | None = None
+    ) -> dict[str, Any]:
+        """将内部视频任务转换为格式特定响应
+
+        Args:
+            internal: 内部视频任务表示
+            base_url: 可选的基础 URL，用于构建完整的下载链接
+        """
         raise NotImplementedError(f"{self.__class__.__name__} does not support video conversion")
 
     def video_poll_to_internal(self, response: dict[str, Any]) -> InternalVideoPollResult:

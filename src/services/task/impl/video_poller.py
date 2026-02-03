@@ -255,6 +255,8 @@ class VideoTaskPollerAdapter:
                 task.progress_percent = 100
                 if result.video_urls:
                     task.video_urls = result.video_urls
+                if result.video_duration_seconds is not None:
+                    task.video_duration_seconds = result.video_duration_seconds
                 self._attach_poll_raw_response(task, result)
             elif result.status == VideoStatus.FAILED:
                 task.status = VideoStatus.FAILED.value
@@ -376,6 +378,8 @@ class VideoTaskPollerAdapter:
                 task.progress_percent = 100
                 if result.video_urls:
                     task.video_urls = result.video_urls
+                if result.video_duration_seconds is not None:
+                    task.video_duration_seconds = result.video_duration_seconds
                 self._attach_poll_raw_response(task, result)
             elif result.status == VideoStatus.FAILED:
                 task.status = VideoStatus.FAILED.value

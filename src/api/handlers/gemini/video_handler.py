@@ -75,6 +75,17 @@ class GeminiVeoHandler(VideoHandlerBase):
         )
         self._normalizer = GeminiNormalizer()
 
+    @staticmethod
+    def _get_request_base_url(http_request: Request) -> str:
+        """从 HTTP 请求中获取基础 URL（协议 + 主机）"""
+        # 优先使用 X-Forwarded-Proto 和 X-Forwarded-Host（代理场景）
+        proto = http_request.headers.get("x-forwarded-proto") or http_request.url.scheme
+        host = http_request.headers.get("x-forwarded-host") or http_request.headers.get("host")
+        if host:
+            return f"{proto}://{host}"
+        # 回退到 request.url
+        return f"{http_request.url.scheme}://{http_request.url.netloc}"
+
     async def handle_create_task(
         self,
         *,
@@ -259,7 +270,8 @@ class GeminiVeoHandler(VideoHandlerBase):
             created_at=task.created_at,
             original_request=internal_request,
         )
-        response_body = self._normalizer.video_task_from_internal(internal_task)
+        base_url = self._get_request_base_url(http_request)
+        response_body = self._normalizer.video_task_from_internal(internal_task, base_url=base_url)
 
         # 提交成功后立即结算 Usage（费用暂时为 0，轮询完成后更新）
         response_time_ms = int((time.time() - self.start_time) * 1000)
@@ -313,7 +325,8 @@ class GeminiVeoHandler(VideoHandlerBase):
 
         # 直接从数据库返回任务状态（后台轮询服务会持续更新状态）
         internal_task = self._task_to_internal(task)
-        response_body = self._normalizer.video_task_from_internal(internal_task)
+        base_url = self._get_request_base_url(http_request)
+        response_body = self._normalizer.video_task_from_internal(internal_task, base_url=base_url)
         return JSONResponse(response_body)
 
     async def handle_list_tasks(
@@ -331,8 +344,10 @@ class GeminiVeoHandler(VideoHandlerBase):
             .limit(100)
             .all()
         )
+        base_url = self._get_request_base_url(http_request)
         items = [
-            self._normalizer.video_task_from_internal(self._task_to_internal(t)) for t in tasks
+            self._normalizer.video_task_from_internal(self._task_to_internal(t), base_url=base_url)
+            for t in tasks
         ]
         return JSONResponse({"operations": items})
 

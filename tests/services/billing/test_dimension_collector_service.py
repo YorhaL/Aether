@@ -34,7 +34,7 @@ class TestDimensionCollectorRuntime:
             ),
         ]
         dims = runtime.collect(
-            collectors=collectors,
+            collectors=collectors,  # type: ignore[arg-type]
             inp=DimensionCollectInput(
                 response={"usageMetadata": {"promptTokenCount": 123}},
             ),
@@ -57,7 +57,7 @@ class TestDimensionCollectorRuntime:
             )
         ]
         dims = runtime.collect(
-            collectors=collectors,
+            collectors=collectors,  # type: ignore[arg-type]
             inp=DimensionCollectInput(metadata={"result": {"file_size_bytes": 1048576}}),
         )
         assert abs(dims["file_size_mb"] - 1.0) < 1e-9
@@ -98,7 +98,7 @@ class TestDimensionCollectorRuntime:
             ),
         ]
         dims = runtime.collect(
-            collectors=collectors,
+            collectors=collectors,  # type: ignore[arg-type]
             inp=DimensionCollectInput(
                 request={"usage": {"input_tokens": 100, "cache_read_tokens": 20}}
             ),
@@ -110,52 +110,13 @@ class TestDimensionCollectorRuntime:
 
 class TestDimensionCollectorService:
     def test_video_fallback_merges_base_collectors(self) -> None:
+        from src.services.billing.cache import BillingCache
+
+        BillingCache.invalidate_all()
+
+        # code-only: openai:video should fall back to openai:chat video collectors shipped in code
         db = MagicMock()
-
-        video_collectors = [
-            DimensionCollector(
-                api_format="openai:video",
-                task_type="video",
-                dimension_name="duration_seconds",
-                source_type="metadata",
-                source_path="task.duration_seconds",
-                value_type="int",
-                priority=0,
-                is_enabled=True,
-            )
-        ]
-        base_collectors = [
-            # Should be kept (dimension not present in video_collectors)
-            DimensionCollector(
-                api_format="openai:chat",
-                task_type="video",
-                dimension_name="resolution",
-                source_type="metadata",
-                source_path="task.resolution",
-                value_type="string",
-                priority=0,
-                is_enabled=True,
-            ),
-            # Should be ignored (dimension already present in video_collectors)
-            DimensionCollector(
-                api_format="openai:chat",
-                task_type="video",
-                dimension_name="duration_seconds",
-                source_type="metadata",
-                source_path="task.duration_seconds",
-                value_type="int",
-                priority=0,
-                is_enabled=True,
-            ),
-        ]
-
-        q1 = MagicMock()
-        q1.filter.return_value.all.return_value = video_collectors
-        q2 = MagicMock()
-        q2.filter.return_value.all.return_value = base_collectors
-        db.query.side_effect = [q1, q2]
-
         svc = DimensionCollectorService(db)
         result = svc.list_enabled_collectors(api_format="openai:video", task_type="video")
 
-        assert [c.dimension_name for c in result] == ["duration_seconds", "resolution"]
+        assert "video_size_bytes" in [c.dimension_name for c in result]

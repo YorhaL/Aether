@@ -1,6 +1,7 @@
 """缓存装饰器工具"""
 
 import functools
+import hashlib
 import json
 from collections.abc import Callable
 from typing import Any
@@ -24,7 +25,22 @@ def _is_api_context(obj: Any) -> bool:
     return hasattr(obj, "user") and hasattr(obj, "db")
 
 
-def cache_result(key_prefix: str, ttl: int = 60, user_specific: bool = True) -> Callable:
+def _hash_vary(vary: dict[str, Any]) -> str:
+    """Build a short stable hash for cache key variations."""
+    try:
+        raw = json.dumps(vary, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        raw = str(vary)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def cache_result(
+    key_prefix: str,
+    ttl: int = 60,
+    user_specific: bool = True,
+    *,
+    vary_by: list[str] | None = None,
+) -> Callable:
     """
     缓存函数结果的装饰器
 
@@ -68,13 +84,22 @@ def cache_result(key_prefix: str, ttl: int = 60, user_specific: bool = True) -> 
                 else:
                     cache_key = f"{key_prefix}:global"
 
-                # 如果有额外的参数（如 days），添加到键中
-                # 从 adapter_self 获取（dataclass 属性）
+                # If there are extra parameters, include them into the key.
+                # - When vary_by is provided: hash the selected attributes to keep key short.
+                # - Otherwise keep backward-compatible "days/limit" suffix behavior.
                 if adapter_self and hasattr(adapter_self, "__dict__"):
-                    for attr_name in ["days", "limit"]:
-                        if hasattr(adapter_self, attr_name):
-                            attr_value = getattr(adapter_self, attr_name)
-                            cache_key += f":{attr_name}:{attr_value}"
+                    if vary_by:
+                        vary: dict[str, Any] = {}
+                        for attr_name in vary_by:
+                            if hasattr(adapter_self, attr_name):
+                                vary[attr_name] = getattr(adapter_self, attr_name)
+                        if vary:
+                            cache_key += f":v:{_hash_vary(vary)}"
+                    else:
+                        for attr_name in ["days", "limit"]:
+                            if hasattr(adapter_self, attr_name):
+                                attr_value = getattr(adapter_self, attr_name)
+                                cache_key += f":{attr_name}:{attr_value}"
 
                 # 尝试从缓存获取
                 cached = await redis_client.get(cache_key)

@@ -74,6 +74,7 @@ class InternalVideoPollResult:
     error_code: str | None = None
     error_message: str | None = None
     raw_response: dict[str, Any] | None = None
+    video_duration_seconds: float | None = None  # 实际视频时长
 
 
 __all__ = [

@@ -5,6 +5,8 @@ API密钥统计同步服务
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -39,7 +41,7 @@ class SyncStatsService:
             else:
                 # 分页处理，避免一次加载所有数据
                 offset = 0
-                api_keys = []
+                api_keys: list[ApiKey] = []
                 while True:
                     batch = db.query(ApiKey).offset(offset).limit(SyncStatsService.BATCH_SIZE).all()
                     if not batch:
@@ -47,28 +49,53 @@ class SyncStatsService:
                     api_keys.extend(batch)
                     offset += SyncStatsService.BATCH_SIZE
 
+            # Pre-aggregate Usage stats in ONE query to avoid per-key N+1 scans.
+            # This is critical for large datasets (DB CPU killer otherwise).
+            usage_stats_map: dict[str, dict[str, Any]] = {}
+            if not api_key_id:
+                rows = (
+                    db.query(
+                        Usage.api_key_id,
+                        func.count(Usage.id).label("requests"),
+                        func.sum(Usage.total_cost_usd).label("cost"),
+                        func.max(Usage.created_at).label("last_used"),
+                    )
+                    .filter(Usage.api_key_id.isnot(None))
+                    .group_by(Usage.api_key_id)
+                    .all()
+                )
+                usage_stats_map = {
+                    str(r.api_key_id): {
+                        "requests": int(r.requests or 0),
+                        "cost": float(r.cost or 0),
+                        "last_used": r.last_used,
+                    }
+                    for r in rows
+                    if r.api_key_id is not None
+                }
+
             for api_key in api_keys:
                 try:
-                    # 计算实际的使用统计
-                    stats = (
-                        db.query(
-                            func.count(Usage.id).label("requests"),
-                            func.sum(Usage.total_cost_usd).label("cost"),
+                    if api_key_id:
+                        # 单 key 路径：直接查（数据量小）
+                        stats = (
+                            db.query(
+                                func.count(Usage.id).label("requests"),
+                                func.sum(Usage.total_cost_usd).label("cost"),
+                                func.max(Usage.created_at).label("last_used"),
+                            )
+                            .filter(Usage.api_key_id == api_key.id)
+                            .first()
                         )
-                        .filter(Usage.api_key_id == api_key.id)
-                        .first()
-                    )
-
-                    actual_requests = stats.requests or 0
-                    actual_cost = float(stats.cost or 0)
-
-                    # 获取最后使用时间
-                    last_usage = (
-                        db.query(Usage.created_at)
-                        .filter(Usage.api_key_id == api_key.id)
-                        .order_by(Usage.created_at.desc())
-                        .first()
-                    )
+                        actual_requests = int(stats.requests or 0) if stats else 0
+                        actual_cost = float(stats.cost or 0) if stats else 0.0
+                        last_used_at = stats.last_used if stats else None
+                    else:
+                        # 批量路径：使用预聚合结果
+                        s = usage_stats_map.get(str(api_key.id)) or {}
+                        actual_requests = int(s.get("requests") or 0)
+                        actual_cost = float(s.get("cost") or 0.0)
+                        last_used_at = s.get("last_used")
 
                     # 检查是否需要更新
                     needs_update = False
@@ -86,8 +113,8 @@ class SyncStatsService:
                         api_key.total_cost_usd = actual_cost
                         needs_update = True
 
-                    if last_usage and api_key.last_used_at != last_usage[0]:
-                        api_key.last_used_at = last_usage[0]
+                    if last_used_at and api_key.last_used_at != last_used_at:
+                        api_key.last_used_at = last_used_at
                         needs_update = True
 
                     result["synced"] += 1

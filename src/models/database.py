@@ -666,7 +666,7 @@ class Provider(Base):
     # 格式转换时是否保持优先级（默认 False）
     # - False: 需要格式转换时，该提供商的候选会被降级到不需要转换的候选之后
     # - True: 即使需要格式转换，也保持原优先级排名
-    # 注意：如果全局配置 KEEP_PRIORITY_ON_CONVERSION=true，此字段被忽略（所有提供商都保持优先级）
+    # 注意：如果系统配置 keep_priority_on_conversion=true，此字段被忽略（所有提供商都保持优先级）
     keep_priority_on_conversion = Column(Boolean, default=False, nullable=False)
 
     # 是否允许格式转换（默认 True）
@@ -1037,6 +1037,32 @@ class Model(Base):
 
     def get_effective_supports_image_generation(self) -> bool:
         return self._get_effective_capability("supports_image_generation", False)
+
+    def get_effective_config(self) -> dict | None:
+        """获取有效的 config（合并 Model 和 GlobalModel 的 config）
+
+        合并策略：
+        - GlobalModel.config 作为基础
+        - Model.config 覆盖 GlobalModel.config
+        - 深度合并 billing 子字段
+        """
+        global_config = {}
+        if self.global_model and self.global_model.config:
+            global_config = dict(self.global_model.config)
+
+        if not self.config:
+            return global_config if global_config else None
+
+        # 深度合并 config
+        result = dict(global_config)
+        for key, value in self.config.items():
+            if key == "billing" and isinstance(value, dict) and isinstance(result.get(key), dict):
+                # 深度合并 billing
+                result[key] = {**result[key], **value}
+            else:
+                result[key] = value
+
+        return result if result else None
 
     def select_provider_model_name(
         self, affinity_key: str | None = None, api_format: str | None = None
@@ -1429,6 +1455,7 @@ class VideoTask(Base):
     video_urls = Column(JSON)
     thumbnail_url = Column(String(2000))
     video_size_bytes = Column(BigInteger)
+    video_duration_seconds = Column(Float)  # 实际视频时长（秒）
     video_expires_at = Column(DateTime(timezone=True))
 
     # 存储 (可选)

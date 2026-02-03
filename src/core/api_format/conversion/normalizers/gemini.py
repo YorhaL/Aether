@@ -872,7 +872,9 @@ class GeminiNormalizer(FormatNormalizer):
             extra={"metadata": metadata},
         )
 
-    def video_task_from_internal(self, internal: InternalVideoTask) -> dict[str, Any]:
+    def video_task_from_internal(
+        self, internal: InternalVideoTask, *, base_url: str | None = None
+    ) -> dict[str, Any]:
         # 从 external_id 中提取 model 名称，用于构建 operation name
         # external_id 格式: models/{model}/operations/{gemini_id}
         model_name = "unknown"
@@ -889,7 +891,9 @@ class GeminiNormalizer(FormatNormalizer):
             # 使用我们的内部 task_id 构建下载 URL，不暴露真实的 Gemini file_id
             # 使用 aev_ 前缀标识这是视频任务的下载链接
             # 格式：/v1beta/files/aev_{task_id}:download?alt=media
-            proxy_download_url = f"/v1beta/files/aev_{internal.id}:download?alt=media"
+            download_path = f"/v1beta/files/aev_{internal.id}:download?alt=media"
+            # 如果提供了 base_url，返回完整 URL；否则返回相对路径
+            proxy_download_url = f"{base_url}{download_path}" if base_url else download_path
             return {
                 "name": operation_name,
                 "done": True,
@@ -938,12 +942,15 @@ class GeminiNormalizer(FormatNormalizer):
                 if isinstance(s, dict) and s.get("video", {}).get("uri")
             ]
             video_url = video_urls[0] if video_urls else None
+            # 提取实际视频时长
+            video_duration = self._extract_gemini_video_duration(response, samples)
             return InternalVideoPollResult(
                 status=VideoStatus.COMPLETED,
                 progress_percent=100,
                 video_url=video_url,
                 video_urls=video_urls,
                 raw_response=response,
+                video_duration_seconds=video_duration,
             )
 
         return InternalVideoPollResult(
@@ -951,6 +958,41 @@ class GeminiNormalizer(FormatNormalizer):
             progress_percent=50,
             raw_response=response,
         )
+
+    def _extract_gemini_video_duration(
+        self, response: dict[str, Any], samples: list[dict[str, Any]]
+    ) -> float | None:
+        """从 Gemini 响应中提取实际视频时长"""
+        # 尝试从 samples 中获取时长
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            video = sample.get("video", {})
+            if isinstance(video, dict):
+                # 尝试多种字段名
+                for field in ["durationSeconds", "duration_seconds", "duration"]:
+                    val = video.get(field)
+                    if val is not None:
+                        try:
+                            # duration 可能是 "5s" 格式
+                            if isinstance(val, str) and val.endswith("s"):
+                                return float(val[:-1])
+                            return float(val)
+                        except (ValueError, TypeError):
+                            continue
+        # 尝试从 response.metadata 获取
+        metadata = response.get("metadata", {})
+        if isinstance(metadata, dict):
+            for field in ["durationSeconds", "duration_seconds", "duration"]:
+                val = metadata.get(field)
+                if val is not None:
+                    try:
+                        if isinstance(val, str) and val.endswith("s"):
+                            return float(val[:-1])
+                        return float(val)
+                    except (ValueError, TypeError):
+                        continue
+        return None
 
     # =========================
     # Helpers

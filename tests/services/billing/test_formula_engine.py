@@ -54,7 +54,7 @@ class TestFormulaEngine:
         )
         assert result.status == "complete"
         assert result.missing_required == []
-        assert abs(result.cost - 0.25) < 1e-9
+        assert abs(float(result.cost) - 0.25) < 1e-9
 
     def test_required_dimension_missing_non_strict(self) -> None:
         engine = FormulaEngine()
@@ -72,7 +72,7 @@ class TestFormulaEngine:
             strict_mode=False,
         )
         assert result.status == "incomplete"
-        assert result.cost == 0.0
+        assert float(result.cost) == 0.0
         assert result.missing_required == ["duration_seconds"]
 
     def test_required_dimension_missing_strict_raises(self) -> None:
@@ -127,7 +127,7 @@ class TestFormulaEngine:
             },
         )
         assert result.status == "complete"
-        assert result.cost == 0.0
+        assert float(result.cost) == 0.0
 
     def test_tiered_mapping(self) -> None:
         engine = FormulaEngine()
@@ -148,7 +148,7 @@ class TestFormulaEngine:
             },
         )
         assert result.status == "complete"
-        assert result.cost == 3.0
+        assert float(result.cost) == 3.0
 
         result = engine.evaluate(
             expression="input_price",
@@ -166,4 +166,4 @@ class TestFormulaEngine:
             },
         )
         assert result.status == "complete"
-        assert result.cost == 1.5
+        assert float(result.cost) == 1.5

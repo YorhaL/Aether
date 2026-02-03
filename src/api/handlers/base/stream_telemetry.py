@@ -100,10 +100,7 @@ class StreamTelemetryRecorder:
                     return
                 actual_request_body = ctx.provider_request_body or original_request_body
                 response_body = None
-                if (
-                    not isinstance(writer, QueueTelemetryWriter)
-                    or config.usage_queue_include_bodies
-                ):
+                if not isinstance(writer, QueueTelemetryWriter) or writer.include_bodies:
                     response_body = ctx.build_response_body(response_time_ms)
 
                 try:
@@ -403,10 +400,25 @@ class StreamTelemetryRecorder:
         self, bg_db: Session, ctx: StreamContext, response_time_ms: int
     ) -> TelemetryWriter | None:
         if config.usage_queue_enabled and self.user_id and self.api_key_id:
+            from src.services.system.config import SystemConfigService
+
+            # Queue payload detail follows system config request_record_level.
+            log_level = SystemConfigService.get_request_record_level(bg_db).value
+            sensitive_headers = SystemConfigService.get_sensitive_headers(bg_db) or []
+            max_request_body_size = int(
+                SystemConfigService.get_config(bg_db, "max_request_body_size", 5242880) or 0
+            )
+            max_response_body_size = int(
+                SystemConfigService.get_config(bg_db, "max_response_body_size", 5242880) or 0
+            )
             return QueueTelemetryWriter(
                 request_id=self.request_id,
                 user_id=self.user_id,
                 api_key_id=self.api_key_id,
+                log_level=log_level,
+                sensitive_headers=sensitive_headers,
+                max_request_body_size=max_request_body_size,
+                max_response_body_size=max_response_body_size,
             )
         db_writer = self._build_db_writer(bg_db)
         if db_writer is None:

@@ -111,26 +111,26 @@
             <div class="grid grid-cols-2 gap-3">
               <div class="space-y-1.5">
                 <Label
-                  for="model-name"
+                  for="model-display-name"
                   class="text-xs"
-                >模型名称 *</Label>
+                >名称 *</Label>
                 <Input
-                  id="model-name"
-                  v-model="form.name"
-                  placeholder="claude-3-5-sonnet-20241022"
-                  :disabled="isEditMode"
+                  id="model-display-name"
+                  v-model="form.display_name"
+                  placeholder="Claude 3.5 Sonnet"
                   required
                 />
               </div>
               <div class="space-y-1.5">
                 <Label
-                  for="model-display-name"
+                  for="model-name"
                   class="text-xs"
-                >显示名称 *</Label>
+                >模型ID *</Label>
                 <Input
-                  id="model-display-name"
-                  v-model="form.display_name"
-                  placeholder="Claude 3.5 Sonnet"
+                  id="model-name"
+                  v-model="form.name"
+                  placeholder="claude-3-5-sonnet-20241022"
+                  :disabled="isEditMode"
                   required
                 />
               </div>
@@ -147,105 +147,6 @@
                 @update:model-value="(v) => setConfigField('description', v || undefined)"
               />
             </div>
-            <div class="grid grid-cols-3 gap-3">
-              <div class="space-y-1.5">
-                <Label
-                  for="model-family"
-                  class="text-xs"
-                >模型系列</Label>
-                <Input
-                  id="model-family"
-                  :model-value="form.config?.family || ''"
-                  placeholder="如 GPT-4、Claude 3"
-                  @update:model-value="(v) => setConfigField('family', v || undefined)"
-                />
-              </div>
-              <div class="space-y-1.5">
-                <Label
-                  for="model-context-limit"
-                  class="text-xs"
-                >上下文限制</Label>
-                <Input
-                  id="model-context-limit"
-                  type="number"
-                  :model-value="form.config?.context_limit ?? ''"
-                  placeholder="如 128000"
-                  @update:model-value="(v) => setConfigField('context_limit', v ? Number(v) : undefined)"
-                />
-              </div>
-              <div class="space-y-1.5">
-                <Label
-                  for="model-output-limit"
-                  class="text-xs"
-                >输出限制</Label>
-                <Input
-                  id="model-output-limit"
-                  type="number"
-                  :model-value="form.config?.output_limit ?? ''"
-                  placeholder="如 8192"
-                  @update:model-value="(v) => setConfigField('output_limit', v ? Number(v) : undefined)"
-                />
-              </div>
-            </div>
-          </section>
-
-          <!-- 能力配置 -->
-          <section class="space-y-2">
-            <h4 class="font-medium text-sm">
-              默认能力
-            </h4>
-            <div class="flex flex-wrap gap-2">
-              <label class="flex items-center gap-2 px-2.5 py-1 rounded-md border bg-muted/30 cursor-pointer text-sm">
-                <input
-                  type="checkbox"
-                  :checked="form.config?.streaming !== false"
-                  class="rounded"
-                  @change="setConfigField('streaming', ($event.target as HTMLInputElement).checked)"
-                >
-                <Zap class="w-3.5 h-3.5 text-muted-foreground" />
-                <span>流式</span>
-              </label>
-              <label class="flex items-center gap-2 px-2.5 py-1 rounded-md border bg-muted/30 cursor-pointer text-sm">
-                <input
-                  type="checkbox"
-                  :checked="form.config?.vision === true"
-                  class="rounded"
-                  @change="setConfigField('vision', ($event.target as HTMLInputElement).checked)"
-                >
-                <Eye class="w-3.5 h-3.5 text-muted-foreground" />
-                <span>视觉</span>
-              </label>
-              <label class="flex items-center gap-2 px-2.5 py-1 rounded-md border bg-muted/30 cursor-pointer text-sm">
-                <input
-                  type="checkbox"
-                  :checked="form.config?.function_calling === true"
-                  class="rounded"
-                  @change="setConfigField('function_calling', ($event.target as HTMLInputElement).checked)"
-                >
-                <Wrench class="w-3.5 h-3.5 text-muted-foreground" />
-                <span>工具</span>
-              </label>
-              <label class="flex items-center gap-2 px-2.5 py-1 rounded-md border bg-muted/30 cursor-pointer text-sm">
-                <input
-                  type="checkbox"
-                  :checked="form.config?.extended_thinking === true"
-                  class="rounded"
-                  @change="setConfigField('extended_thinking', ($event.target as HTMLInputElement).checked)"
-                >
-                <Brain class="w-3.5 h-3.5 text-muted-foreground" />
-                <span>思考</span>
-              </label>
-              <label class="flex items-center gap-2 px-2.5 py-1 rounded-md border bg-muted/30 cursor-pointer text-sm">
-                <input
-                  type="checkbox"
-                  :checked="form.config?.image_generation === true"
-                  class="rounded"
-                  @change="setConfigField('image_generation', ($event.target as HTMLInputElement).checked)"
-                >
-                <Image class="w-3.5 h-3.5 text-muted-foreground" />
-                <span>生图</span>
-              </label>
-            </div>
           </section>
 
           <!-- Key 能力配置 -->
@@ -254,7 +155,7 @@
             class="space-y-2"
           >
             <h4 class="font-medium text-sm">
-              Key 能力支持
+              模型偏好
             </h4>
             <div class="flex flex-wrap gap-2">
               <label
@@ -296,6 +197,94 @@
               />
               <span class="text-xs text-muted-foreground">可与 Token 计费叠加</span>
             </div>
+
+            <!-- 视频计费（分辨率 × 时长） -->
+            <div class="pt-3 border-t space-y-2">
+              <div class="text-sm font-medium">视频计费（分辨率 × 时长）</div>
+
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  class="h-7 text-xs"
+                  @click="fillVideoResolutionPricePreset('common')"
+                >
+                  通用
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  class="h-7 text-xs"
+                  @click="fillVideoResolutionPricePreset('sora')"
+                >
+                  Sora
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  class="h-7 text-xs"
+                  @click="fillVideoResolutionPricePreset('veo')"
+                >
+                  Veo
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  class="h-7 text-xs"
+                  @click="addVideoResolutionPriceRow"
+                >
+                  <Plus class="w-3.5 h-3.5 mr-0.5" />
+                  自定义
+                </Button>
+              </div>
+
+              <div
+                v-if="videoResolutionPrices.length > 0"
+                class="rounded-lg border border-border overflow-hidden"
+              >
+                <div class="grid grid-cols-[1fr_1fr_32px] gap-0 text-xs text-muted-foreground bg-muted/50 px-3 py-1.5 border-b border-border">
+                  <span>分辨率</span>
+                  <span>单价（$/秒）</span>
+                  <span></span>
+                </div>
+                <div class="divide-y divide-border">
+                  <div
+                    v-for="(row, idx) in videoResolutionPrices"
+                    :key="idx"
+                    class="grid grid-cols-[1fr_1fr_32px] gap-2 items-center px-3 py-1.5"
+                  >
+                    <Input
+                      v-model="row.resolution"
+                      class="h-7 text-sm"
+                      placeholder="如 720p"
+                    />
+                    <Input
+                      :model-value="row.price_per_second ?? ''"
+                      type="number"
+                      step="0.0001"
+                      min="0"
+                      class="h-7 text-sm"
+                      placeholder="0"
+                      @update:model-value="(v) => row.price_per_second = parseNumberInput(v, { allowFloat: true })"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="h-7 w-7"
+                      title="删除"
+                      @click="removeVideoResolutionPriceRow(idx)"
+                    >
+                      <Trash2 class="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </section>
         </form>
       </div>
@@ -332,15 +321,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import {
-  Eye, Wrench, Brain, Zap, Image, Loader2, Layers, SquarePen,
-  Search, ChevronRight
+  Loader2, Layers, SquarePen,
+  Search, ChevronRight, Plus, Trash2
 } from 'lucide-vue-next'
 import { Dialog, Button, Input, Label } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
-import { parseNumberInput } from '@/utils/form'
+import { parseNumberInput, sortResolutionEntries } from '@/utils/form'
 import { log } from '@/utils/logger'
 import TieredPricingEditor from './TieredPricingEditor.vue'
 import {
@@ -455,6 +444,31 @@ function toggleProvider(providerId: string) {
 // 阶梯计费配置
 const tieredPricing = ref<TieredPricingConfig | null>(null)
 
+type VideoResolutionPriceRow = { resolution: string; price_per_second: number | undefined }
+
+const videoResolutionPrices = ref<VideoResolutionPriceRow[]>([])
+
+const VIDEO_RESOLUTION_PRICE_PRESETS: Record<
+  'common' | 'sora' | 'veo',
+  VideoResolutionPriceRow[]
+> = {
+  common: [
+    { resolution: '480p', price_per_second: 0 },
+    { resolution: '720p', price_per_second: 0 },
+    { resolution: '1080p', price_per_second: 0 },
+    { resolution: '4k', price_per_second: 0 },
+  ],
+  sora: [
+    { resolution: '720x1080', price_per_second: 0 },
+    { resolution: '1024x1792', price_per_second: 0 },
+  ],
+  veo: [
+    { resolution: '720p', price_per_second: 0 },
+    { resolution: '1080p', price_per_second: 0 },
+    { resolution: '4k', price_per_second: 0 },
+  ],
+}
+
 interface FormData {
   name: string
   display_name: string
@@ -489,29 +503,137 @@ function setConfigField(key: string, value: any) {
   }
 }
 
-// Key 能力选项
-const availableCapabilities = ref<CapabilityDefinition[]>([])
+function getNested(obj: any, path: string): any {
+  if (!obj || typeof obj !== 'object') return undefined
+  const parts = path.split('.').filter(Boolean)
+  let cur: any = obj
+  for (const p of parts) {
+    if (!cur || typeof cur !== 'object') return undefined
+    cur = cur[p]
+  }
+  return cur
+}
 
-// 加载模型列表
-async function loadModels() {
-  if (allModelsCache.value.length > 0) return
-  loading.value = true
-  try {
-    // 只加载一次全部模型，过滤在 computed 中完成
-    allModelsCache.value = await getModelsDevList(false)
-  } catch (err) {
-    log.error('Failed to load models:', err)
-  } finally {
-    loading.value = false
+function setNested(obj: any, path: string, value: any) {
+  if (!obj || typeof obj !== 'object') return
+  const parts = path.split('.').filter(Boolean)
+  if (parts.length === 0) return
+  let cur: any = obj
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i]
+    if (!cur[p] || typeof cur[p] !== 'object') {
+      cur[p] = {}
+    }
+    cur = cur[p]
+  }
+  cur[parts[parts.length - 1]] = value
+}
+
+function deleteNested(obj: any, path: string) {
+  if (!obj || typeof obj !== 'object') return
+  const parts = path.split('.').filter(Boolean)
+  if (parts.length === 0) return
+  let cur: any = obj
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i]
+    if (!cur[p] || typeof cur[p] !== 'object') return
+    cur = cur[p]
+  }
+  delete cur[parts[parts.length - 1]]
+}
+
+function pruneEmptyBillingConfig() {
+  const cfg = form.value.config
+  if (!cfg || typeof cfg !== 'object') return
+  const billing = cfg.billing
+  if (!billing || typeof billing !== 'object') return
+  const video = billing.video
+  if (video && typeof video === 'object' && Object.keys(video).length === 0) {
+    delete billing.video
+  }
+  if (Object.keys(billing).length === 0) {
+    delete cfg.billing
   }
 }
 
-// 打开对话框时加载数据
-watch(() => props.open, (isOpen) => {
-  if (isOpen && !props.model) {
-    loadModels()
+/**
+ * Normalize resolution key:
+ * - lowercase, remove spaces, × → x
+ * - For WxH format, sort dimensions so smaller comes first (720x1080 = 1080x720)
+ */
+function normalizeResolutionKey(raw: string): string {
+  let k = (raw || '').trim().toLowerCase().replace(/\s+/g, '').replace(/×/g, 'x')
+  // Check if it's WxH format (e.g., 1080x720)
+  const match = k.match(/^(\d+)x(\d+)$/)
+  if (match) {
+    const a = parseInt(match[1], 10)
+    const b = parseInt(match[2], 10)
+    // Sort: smaller dimension first
+    k = a <= b ? `${a}x${b}` : `${b}x${a}`
   }
-})
+  return k
+}
+
+function loadVideoPricingFromConfig() {
+  const cfg = form.value.config || {}
+  const raw = getNested(cfg, 'billing.video.price_per_second_by_resolution')
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    // 按分辨率从低到高排序
+    const sortedEntries = sortResolutionEntries(Object.entries(raw))
+    videoResolutionPrices.value = sortedEntries.map(([k, v]) => ({
+      resolution: String(k),
+      price_per_second: typeof v === 'number' ? v : undefined,
+    }))
+  } else {
+    videoResolutionPrices.value = []
+  }
+}
+
+function applyVideoPricingToConfig() {
+  if (!form.value.config) {
+    form.value.config = {}
+  }
+  const cfg = form.value.config
+
+  // Clean legacy keys
+  deleteNested(cfg, 'billing.video.price_per_second')
+  deleteNested(cfg, 'billing.video.resolution_multipliers')
+
+  // resolution/size prices (normalized: 1080x720 → 720x1080)
+  const map: Record<string, number> = {}
+  for (const row of videoResolutionPrices.value) {
+    const k = normalizeResolutionKey(row.resolution || '')
+    const v = row.price_per_second
+    if (!k) continue
+    if (typeof v !== 'number' || Number.isNaN(v)) continue
+    map[k] = v
+  }
+  if (Object.keys(map).length > 0) {
+    setNested(cfg, 'billing.video.price_per_second_by_resolution', map)
+  } else {
+    deleteNested(cfg, 'billing.video.price_per_second_by_resolution')
+  }
+
+  pruneEmptyBillingConfig()
+}
+
+function addVideoResolutionPriceRow() {
+  videoResolutionPrices.value.push({ resolution: '', price_per_second: undefined })
+}
+
+function removeVideoResolutionPriceRow(idx: number) {
+  videoResolutionPrices.value.splice(idx, 1)
+}
+
+function fillVideoResolutionPricePreset(preset: 'common' | 'sora' | 'veo') {
+  videoResolutionPrices.value = VIDEO_RESOLUTION_PRICE_PRESETS[preset].map(r => ({
+    resolution: r.resolution,
+    price_per_second: r.price_per_second,
+  }))
+}
+
+// Key 能力选项
+const availableCapabilities = ref<CapabilityDefinition[]>([])
 
 // 加载可用能力列表
 async function loadCapabilities() {
@@ -537,6 +659,27 @@ function toggleCapability(capName: string) {
 
 onMounted(() => {
   loadCapabilities()
+})
+
+// 加载模型列表
+async function loadModels() {
+  if (allModelsCache.value.length > 0) return
+  loading.value = true
+  try {
+    // 只加载一次全部模型，过滤在 computed 中完成
+    allModelsCache.value = await getModelsDevList(false)
+  } catch (err) {
+    log.error('Failed to load models:', err)
+  } finally {
+    loading.value = false
+  }
+}
+
+// 打开对话框时加载数据
+watch(() => props.open, (isOpen) => {
+  if (isOpen && !props.model) {
+    loadModels()
+  }
 })
 
 // 选择模型并填充表单
@@ -565,6 +708,7 @@ function selectModel(model: ModelsDevModelItem) {
   if (model.inputModalities?.length) config.input_modalities = model.inputModalities
   if (model.outputModalities?.length) config.output_modalities = model.outputModalities
   form.value.config = config
+  loadVideoPricingFromConfig()
 
   if (model.inputPrice !== undefined || model.outputPrice !== undefined) {
     tieredPricing.value = {
@@ -596,6 +740,7 @@ function handleLogoError(event: Event) {
 function resetForm() {
   form.value = defaultForm()
   tieredPricing.value = null
+  videoResolutionPrices.value = []
   searchQuery.value = ''
   selectedModel.value = null
   expandedProvider.value = null
@@ -621,6 +766,7 @@ function loadModelData() {
   tieredPricing.value = props.model.default_tiered_pricing
     ? JSON.parse(JSON.stringify(props.model.default_tiered_pricing))
     : null
+  loadVideoPricingFromConfig()
 }
 
 // 使用 useFormDialog 统一处理对话框逻辑
@@ -635,7 +781,7 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
 
 async function handleSubmit() {
   if (!form.value.name || !form.value.display_name) {
-    showError('请填写模型名称和显示名称')
+    showError('请填写模型ID和名称')
     return
   }
 
@@ -646,6 +792,9 @@ async function handleSubmit() {
 
   const finalTiers = tieredPricingEditorRef.value?.getFinalTiers()
   const finalTieredPricing = finalTiers ? { tiers: finalTiers } : tieredPricing.value
+
+  // Apply billing (video) pricing into config before cleaning/submitting.
+  applyVideoPricingToConfig()
 
   // 清理空的 config
   const cleanConfig = form.value.config && Object.keys(form.value.config).length > 0

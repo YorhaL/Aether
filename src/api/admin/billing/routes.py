@@ -23,6 +23,7 @@ from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.database import get_db
 from src.models.database import BillingRule, DimensionCollector
 from src.services.billing.formula_engine import SafeExpressionEvaluator, UnsafeExpressionError
+from src.services.billing.presets import BillingPresetService, PresetApplyMode, list_preset_packs
 
 router = APIRouter(prefix="/api/admin/billing", tags=["Admin - Billing"])
 pipeline = ApiRequestPipeline()
@@ -125,6 +126,30 @@ class DimensionCollectorResponse(BaseModel):
             created_at=c.created_at,
             updated_at=c.updated_at,
         )
+
+
+class BillingPresetInfoResponse(BaseModel):
+    name: str
+    version: str
+    description: str
+    collector_count: int
+
+
+class ApplyBillingPresetRequest(BaseModel):
+    preset: str = Field(..., min_length=1, max_length=100)
+    mode: PresetApplyMode = "merge"
+
+
+@router.get("/presets")
+async def list_billing_presets(request: Request, db: Session = Depends(get_db)) -> Any:
+    adapter = BillingPresetListAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.post("/presets/apply")
+async def apply_billing_preset(request: Request, db: Session = Depends(get_db)) -> Any:
+    adapter = BillingPresetApplyAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
 @router.get("/rules")
@@ -525,3 +550,38 @@ def _validate_dimension_collector_request(
             raise InvalidRequestException(
                 "default_value already exists for this (api_format, task_type, dimension_name)"
             )
+
+
+@dataclass
+class BillingPresetListAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        items = []
+        for p in list_preset_packs():
+            items.append(
+                BillingPresetInfoResponse(
+                    name=p.name,
+                    version=p.version,
+                    description=p.description,
+                    collector_count=len(p.collectors or []),
+                ).model_dump()
+            )
+        return {"items": items}
+
+
+class BillingPresetApplyAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        payload = context.ensure_json_body()
+        try:
+            req = ApplyBillingPresetRequest.model_validate(payload)
+        except Exception as exc:
+            raise InvalidRequestException(f"Invalid request body: {exc}")
+
+        result = BillingPresetService.apply_preset(
+            context.db,
+            preset_name=req.preset,
+            mode=req.mode,
+        )
+        if result.errors:
+            # still return counts; caller can display partial results
+            return {"ok": False, **result.to_dict()}
+        return {"ok": True, **result.to_dict()}

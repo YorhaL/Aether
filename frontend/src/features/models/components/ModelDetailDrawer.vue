@@ -139,100 +139,6 @@
                 </div>
               </div>
 
-              <!-- 模型能力 -->
-              <div class="space-y-3">
-                <h4 class="font-semibold text-sm">
-                  模型能力
-                </h4>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div class="flex items-center gap-2 p-3 rounded-lg border">
-                    <Zap class="w-5 h-5 text-muted-foreground" />
-                    <div class="flex-1">
-                      <p class="text-sm font-medium">
-                        Streaming
-                      </p>
-                      <p class="text-xs text-muted-foreground">
-                        流式输出
-                      </p>
-                    </div>
-                    <Badge
-                      :variant="model.config?.streaming !== false ? 'default' : 'secondary'"
-                      class="text-xs"
-                    >
-                      {{ model.config?.streaming !== false ? '支持' : '不支持' }}
-                    </Badge>
-                  </div>
-                  <div class="flex items-center gap-2 p-3 rounded-lg border">
-                    <Image class="w-5 h-5 text-muted-foreground" />
-                    <div class="flex-1">
-                      <p class="text-sm font-medium">
-                        Image Generation
-                      </p>
-                      <p class="text-xs text-muted-foreground">
-                        图像生成
-                      </p>
-                    </div>
-                    <Badge
-                      :variant="model.config?.image_generation === true ? 'default' : 'secondary'"
-                      class="text-xs"
-                    >
-                      {{ model.config?.image_generation === true ? '支持' : '不支持' }}
-                    </Badge>
-                  </div>
-                  <div class="flex items-center gap-2 p-3 rounded-lg border">
-                    <Eye class="w-5 h-5 text-muted-foreground" />
-                    <div class="flex-1">
-                      <p class="text-sm font-medium">
-                        Vision
-                      </p>
-                      <p class="text-xs text-muted-foreground">
-                        视觉理解
-                      </p>
-                    </div>
-                    <Badge
-                      :variant="model.config?.vision === true ? 'default' : 'secondary'"
-                      class="text-xs"
-                    >
-                      {{ model.config?.vision === true ? '支持' : '不支持' }}
-                    </Badge>
-                  </div>
-                  <div class="flex items-center gap-2 p-3 rounded-lg border">
-                    <Wrench class="w-5 h-5 text-muted-foreground" />
-                    <div class="flex-1">
-                      <p class="text-sm font-medium">
-                        Tool Use
-                      </p>
-                      <p class="text-xs text-muted-foreground">
-                        工具调用
-                      </p>
-                    </div>
-                    <Badge
-                      :variant="model.config?.function_calling === true ? 'default' : 'secondary'"
-                      class="text-xs"
-                    >
-                      {{ model.config?.function_calling === true ? '支持' : '不支持' }}
-                    </Badge>
-                  </div>
-                  <div class="flex items-center gap-2 p-3 rounded-lg border">
-                    <Brain class="w-5 h-5 text-muted-foreground" />
-                    <div class="flex-1">
-                      <p class="text-sm font-medium">
-                        Extended Thinking
-                      </p>
-                      <p class="text-xs text-muted-foreground">
-                        深度思考
-                      </p>
-                    </div>
-                    <Badge
-                      :variant="model.config?.extended_thinking === true ? 'default' : 'secondary'"
-                      class="text-xs"
-                    >
-                      {{ model.config?.extended_thinking === true ? '支持' : '不支持' }}
-                    </Badge>
-                  </div>
-                </div>
-              </div>
-
               <!-- 模型偏好 -->
               <div
                 v-if="model.supported_capabilities && model.supported_capabilities.length > 0"
@@ -306,6 +212,44 @@
                   >
                     <Label class="text-xs text-muted-foreground whitespace-nowrap">按次计费</Label>
                     <span class="text-sm font-mono">${{ model.default_price_per_request.toFixed(3) }}/次</span>
+                  </div>
+                  <!-- 视频分辨率计费 -->
+                  <div
+                    v-if="hasVideoPricing"
+                    class="space-y-2"
+                  >
+                    <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Video class="w-4 h-4" />
+                      <span>视频分辨率计费 ({{ videoPricingEntries.length }} 种)</span>
+                    </div>
+                    <div class="border rounded-lg overflow-hidden">
+                      <Table>
+                        <TableHeader>
+                          <TableRow class="bg-muted/30">
+                            <TableHead class="text-xs h-9">
+                              分辨率
+                            </TableHead>
+                            <TableHead class="text-xs h-9 text-right">
+                              单价 ($/秒)
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          <TableRow
+                            v-for="[res, price] in videoPricingEntries"
+                            :key="res"
+                            class="text-xs"
+                          >
+                            <TableCell class="py-2">
+                              {{ res }}
+                            </TableCell>
+                            <TableCell class="py-2 text-right font-mono">
+                              ${{ (price as number).toFixed(4) }}
+                            </TableCell>
+                          </TableRow>
+                        </TableBody>
+                      </Table>
+                    </div>
                   </div>
                 </div>
 
@@ -389,6 +333,44 @@
                     <Label class="text-xs text-muted-foreground whitespace-nowrap">按次计费</Label>
                     <span class="text-sm font-mono">${{ model.default_price_per_request.toFixed(3) }}/次</span>
                   </div>
+                  <!-- 视频分辨率计费（多阶梯时也显示） -->
+                  <div
+                    v-if="hasVideoPricing"
+                    class="space-y-2"
+                  >
+                    <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Video class="w-4 h-4" />
+                      <span>视频分辨率计费 ({{ videoPricingEntries.length }} 种)</span>
+                    </div>
+                    <div class="border rounded-lg overflow-hidden">
+                      <Table>
+                        <TableHeader>
+                          <TableRow class="bg-muted/30">
+                            <TableHead class="text-xs h-9">
+                              分辨率
+                            </TableHead>
+                            <TableHead class="text-xs h-9 text-right">
+                              单价 ($/秒)
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          <TableRow
+                            v-for="[res, price] in videoPricingEntries"
+                            :key="res"
+                            class="text-xs"
+                          >
+                            <TableCell class="py-2">
+                              {{ res }}
+                            </TableCell>
+                            <TableCell class="py-2 text-right font-mono">
+                              ${{ (price as number).toFixed(4) }}
+                            </TableCell>
+                          </TableRow>
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -454,20 +436,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import {
   X,
-  Eye,
-  Wrench,
-  Brain,
-  Zap,
-  Image,
   Building2,
   Edit,
   Power,
   Copy,
   Layers,
-  BarChart3
+  BarChart3,
+  Video
 } from 'lucide-vue-next'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import { useClipboard } from '@/composables/useClipboard'
@@ -483,6 +461,7 @@ import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import RoutingTab from './RoutingTab.vue'
 import ModelMappingsTab from './ModelMappingsTab.vue'
+import { sortResolutionEntries } from '@/utils/form'
 
 // 使用外部类型定义
 import type { GlobalModelResponse } from '@/api/global-models'
@@ -569,6 +548,19 @@ function getCapabilityDisplayName(capName: string): string {
   const cap = props.capabilities?.find(c => c.name === capName)
   return cap?.display_name || capName
 }
+
+// 检测是否有视频分辨率计费配置
+const hasVideoPricing = computed(() => {
+  const priceByResolution = props.model?.config?.billing?.video?.price_per_second_by_resolution
+  return priceByResolution && typeof priceByResolution === 'object' && Object.keys(priceByResolution).length > 0
+})
+
+// 获取视频分辨率计费条目（按分辨率从低到高排序）
+const videoPricingEntries = computed(() => {
+  const priceByResolution = props.model?.config?.billing?.video?.price_per_second_by_resolution
+  if (!priceByResolution || typeof priceByResolution !== 'object') return []
+  return sortResolutionEntries(Object.entries(priceByResolution))
+})
 
 const detailTab = ref('basic')
 

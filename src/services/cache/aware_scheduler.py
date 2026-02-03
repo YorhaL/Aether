@@ -721,18 +721,11 @@ class CacheAwareScheduler:
             return [], global_model_id
 
         # 2. 构建候选列表（传入 is_stream 和 capability_requirements 用于过滤）
-        from src.config.settings import config
         from src.services.system.config import SystemConfigService
 
-        # 格式转换总开关（环境变量）：关闭时禁止任何跨格式候选进入队列
-        master_conversion_enabled = bool(config.format_conversion_enabled)
-
-        # 全局覆盖开关（数据库）：开启时强制允许所有提供商的格式转换（跳过端点格式接受策略）
+        # 格式转换总开关（数据库配置）：关闭时禁止任何跨格式候选进入队列
         global_conversion_enabled = SystemConfigService.is_format_conversion_enabled(db)
 
-        # 如果环境变量明确禁用，则全局覆盖也视为关闭（并最终禁止跨格式转换）
-        if not master_conversion_enabled:
-            global_conversion_enabled = False
         candidates = await self._build_candidates(
             db=db,
             providers=providers,
@@ -744,11 +737,10 @@ class CacheAwareScheduler:
             is_stream=is_stream,
             capability_requirements=capability_requirements,
             global_conversion_enabled=global_conversion_enabled,
-            master_conversion_enabled=master_conversion_enabled,
         )
 
         # 3. 应用优先级模式排序
-        candidates = self._apply_priority_mode_sort(candidates, affinity_key, target_format)
+        candidates = self._apply_priority_mode_sort(candidates, db, affinity_key, target_format)
 
         # 更新指标
         self._metrics["total_candidates"] += len(candidates)
@@ -765,6 +757,7 @@ class CacheAwareScheduler:
             if affinity_key and candidates:
                 candidates = await self._apply_cache_affinity(
                     candidates=candidates,
+                    db=db,
                     affinity_key=affinity_key,
                     api_format=target_format,
                     global_model_id=global_model_id,
@@ -1068,8 +1061,7 @@ class CacheAwareScheduler:
         max_candidates: int | None = None,
         is_stream: bool = False,
         capability_requirements: dict[str, bool] | None = None,
-        global_conversion_enabled: bool = False,
-        master_conversion_enabled: bool = True,
+        global_conversion_enabled: bool = True,
     ) -> list[ProviderCandidate]:
         """
         构建候选列表
@@ -1086,8 +1078,7 @@ class CacheAwareScheduler:
             max_candidates: 最大候选数
             is_stream: 是否是流式请求，如果为 True 则过滤不支持流式的 Provider
             capability_requirements: 能力需求（可选）
-            global_conversion_enabled: 全局覆盖开关（DB），开启时跳过端点格式接受策略检查
-            master_conversion_enabled: 总开关（ENV），关闭时禁止任何跨格式转换
+            global_conversion_enabled: 格式转换总开关（数据库配置），关闭时禁止任何跨格式转换
 
         Returns:
             候选列表
@@ -1179,12 +1170,11 @@ class CacheAwareScheduler:
 
                 # 计算格式转换开关状态（三层优先级）
                 #
-                # 1) 总开关（ENV）关闭 -> 禁止任何跨格式转换
-                # 2) 全局覆盖（DB）开启 -> 强制允许（跳过端点检查）
+                # 1) 全局开关（数据库配置）关闭 -> 禁止任何跨格式转换
+                # 2) 全局开关开启 -> 允许跨格式转换
                 # 3) 提供商覆盖（Provider.enable_format_conversion）开启 -> 强制允许（跳过端点检查）
                 # 4) 否则 -> 由端点配置 format_acceptance_config 决定是否允许
                 provider_allows_conversion = getattr(provider, "enable_format_conversion", True)
-                effective_conversion_enabled = bool(master_conversion_enabled)
                 skip_endpoint_check = global_conversion_enabled or provider_allows_conversion
 
                 is_compatible, needs_conversion, _compat_reason = is_format_compatible(
@@ -1192,16 +1182,15 @@ class CacheAwareScheduler:
                     endpoint_format_str,
                     getattr(endpoint, "format_acceptance_config", None),
                     is_stream,
-                    effective_conversion_enabled,
+                    global_conversion_enabled,
                     skip_endpoint_check=skip_endpoint_check,
                 )
                 logger.debug(
                     "[Scheduler] Format compatibility: client={}, endpoint={}, compatible={}, "
-                    "master={}, global={}, provider={}, skip_endpoint={}, reason={}",
+                    "global={}, provider={}, skip_endpoint={}, reason={}",
                     client_format_str,
                     endpoint_format_str,
                     is_compatible,
-                    master_conversion_enabled,
                     global_conversion_enabled,
                     provider_allows_conversion,
                     skip_endpoint_check,
@@ -1302,6 +1291,7 @@ class CacheAwareScheduler:
     async def _apply_cache_affinity(
         self,
         candidates: list[ProviderCandidate],
+        db: Session,
         affinity_key: str,
         api_format: str,
         global_model_id: str,
@@ -1334,9 +1324,9 @@ class CacheAwareScheduler:
                 return candidates
 
             # 判断候选是否应该被降级（用于分组）
-            from src.config.settings import config
+            from src.services.system.config import SystemConfigService
 
-            global_keep_priority = config.keep_priority_on_conversion
+            global_keep_priority = SystemConfigService.is_keep_priority_on_conversion(db)
 
             def should_demote(c: ProviderCandidate) -> bool:
                 """判断候选是否应该被降级"""
@@ -1467,13 +1457,14 @@ class CacheAwareScheduler:
     def _apply_priority_mode_sort(
         self,
         candidates: list[ProviderCandidate],
+        db: Session,
         affinity_key: str | None = None,
         api_format: str | None = None,
     ) -> list[ProviderCandidate]:
         """
         根据优先级模式对候选列表排序（数字越小越优先）
 
-        排序规则（受 KEEP_PRIORITY_ON_CONVERSION 配置影响）：
+        排序规则（受 keep_priority_on_conversion 配置影响）：
         1. 如果全局配置 keep_priority_on_conversion=True，所有候选保持原优先级
         2. 否则，按 needs_conversion 和 provider.keep_priority_on_conversion 分组：
            - 保持优先级的候选（exact 或 provider.keep_priority_on_conversion=True）按原优先级排序
@@ -1485,10 +1476,10 @@ class CacheAwareScheduler:
         if not candidates:
             return candidates
 
-        from src.config.settings import config
+        from src.services.system.config import SystemConfigService
 
         # 全局配置：如果开启，所有候选保持原优先级
-        global_keep_priority = config.keep_priority_on_conversion
+        global_keep_priority = SystemConfigService.is_keep_priority_on_conversion(db)
 
         if global_keep_priority:
             # 全局开启：不分组，直接按优先级模式排序

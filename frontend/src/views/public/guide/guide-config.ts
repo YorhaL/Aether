@@ -111,7 +111,7 @@ export const coreConcepts = [
 // API 格式说明
 export const apiFormats = [
   {
-    name: 'OpenAI',
+    name: 'OpenAI Chat',
     endpoint: '/v1/chat/completions',
     auth: 'Authorization: Bearer xxx',
     clients: ['OpenAI SDK', 'Cursor', 'LangChain', '大部分开源工具']
@@ -123,7 +123,7 @@ export const apiFormats = [
     clients: ['Codex CLI']
   },
   {
-    name: 'Claude',
+    name: 'Claude Chat',
     endpoint: '/v1/messages',
     auth: 'x-api-key: xxx',
     clients: ['Anthropic SDK']
@@ -135,7 +135,7 @@ export const apiFormats = [
     clients: ['Claude Code']
   },
   {
-    name: 'Gemini',
+    name: 'Gemini Chat',
     endpoint: '/v1beta/models/{model}:generateContent',
     auth: 'x-goog-api-key: xxx',
     clients: ['Gemini SDK', 'Gemini CLI']

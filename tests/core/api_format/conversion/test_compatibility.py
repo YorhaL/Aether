@@ -46,7 +46,7 @@ def test_cli_format_convertible_when_converter_supports_full() -> None:
 
 
 def test_global_switch_disabled_blocks_conversion() -> None:
-    """全局开关关闭时（环境变量 FORMAT_CONVERSION_ENABLED=false）阻止转换"""
+    """全局开关关闭时阻止转换"""
     ok, needs_conv, reason = is_format_compatible(
         "claude:chat",
         "openai:chat",
@@ -57,7 +57,7 @@ def test_global_switch_disabled_blocks_conversion() -> None:
     )
     assert ok is False
     assert needs_conv is False
-    assert reason and ("全局" in reason or "FORMAT_CONVERSION_ENABLED" in reason)
+    assert reason and "格式转换已禁用" in reason
 
 
 def test_endpoint_config_none_blocks_conversion() -> None:
@@ -223,7 +223,7 @@ def test_claude_cli_to_claude_blocked_when_global_switch_disabled() -> None:
         registry=MagicMock(),
     )
     assert ok is False
-    assert reason and ("全局" in reason or "FORMAT_CONVERSION_ENABLED" in reason)
+    assert reason and "格式转换已禁用" in reason
 
 
 def test_claude_cli_to_claude_blocked_when_endpoint_not_configured() -> None:
@@ -313,7 +313,7 @@ def test_openai_cli_to_openai_fails_without_converter() -> None:
 
 
 def test_openai_cli_to_openai_blocked_when_global_switch_disabled() -> None:
-    """同族转换（OPENAI/OPENAI_CLI）也受全局开关限制（环境变量 FORMAT_CONVERSION_ENABLED=false）"""
+    """同族转换（OPENAI/OPENAI_CLI）也受全局开关限制"""
     registry = MagicMock()
     registry.can_convert_full.return_value = True
 
@@ -327,7 +327,7 @@ def test_openai_cli_to_openai_blocked_when_global_switch_disabled() -> None:
     )
     assert ok is False
     assert needs_conv is False
-    assert reason and ("全局" in reason or "FORMAT_CONVERSION_ENABLED" in reason)
+    assert reason and "格式转换已禁用" in reason
 
 
 def test_openai_cli_to_openai_blocked_when_endpoint_disabled() -> None:

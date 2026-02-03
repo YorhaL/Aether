@@ -396,7 +396,9 @@ class OpenAINormalizer(FormatNormalizer):
             # OpenAI streaming may send a final "usage-only" chunk when
             # stream_options.include_usage=true, where `choices` is empty but `usage` exists.
             usage_info = self._openai_usage_to_internal(chunk.get("usage"))
-            if usage_info is not None and (usage_info.total_tokens or usage_info.input_tokens or usage_info.output_tokens):
+            if usage_info is not None and (
+                usage_info.total_tokens or usage_info.input_tokens or usage_info.output_tokens
+            ):
                 # For cross-format targets (e.g. Gemini), emitting usage as a late MessageStopEvent
                 # allows the target normalizer to surface usage metadata even if the stop chunk
                 # didn't carry it.
@@ -730,7 +732,9 @@ class OpenAINormalizer(FormatNormalizer):
             },
         )
 
-    def video_task_from_internal(self, internal: InternalVideoTask) -> dict[str, Any]:
+    def video_task_from_internal(
+        self, internal: InternalVideoTask, *, base_url: str | None = None
+    ) -> dict[str, Any]:
         status_map = {
             VideoStatus.PENDING: "queued",
             VideoStatus.SUBMITTED: "queued",
@@ -797,6 +801,8 @@ class OpenAINormalizer(FormatNormalizer):
                     error_message="Upstream response missing video url",
                     raw_response=response,
                 )
+            # 提取实际视频时长（尝试多种字段名）
+            video_duration = self._extract_video_duration(response)
             return InternalVideoPollResult(
                 status=VideoStatus.COMPLETED,
                 progress_percent=100,
@@ -805,6 +811,7 @@ class OpenAINormalizer(FormatNormalizer):
                     datetime.fromtimestamp(expires_at, tz=timezone.utc) if expires_at else None
                 ),
                 raw_response=response,
+                video_duration_seconds=video_duration,
             )
         if status == "failed":
             error = response.get("error") or {}
@@ -820,6 +827,36 @@ class OpenAINormalizer(FormatNormalizer):
             progress_percent=int(response.get("progress") or 0),
             raw_response=response,
         )
+
+    def _extract_video_duration(self, response: dict[str, Any]) -> float | None:
+        """从响应中提取实际视频时长"""
+        # 尝试多种可能的字段名
+        duration_fields = [
+            "duration_seconds",
+            "duration",
+            "video_duration",
+            "video_duration_seconds",
+            "length",
+            "length_seconds",
+        ]
+        for field in duration_fields:
+            val = response.get(field)
+            if val is not None:
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    continue
+        # 尝试从嵌套的 metadata 中获取
+        metadata = response.get("metadata") or response.get("video_metadata") or {}
+        if isinstance(metadata, dict):
+            for field in duration_fields:
+                val = metadata.get(field)
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        continue
+        return None
 
     # =========================
     # Helpers

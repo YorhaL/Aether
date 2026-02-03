@@ -479,13 +479,11 @@ class EndpointHealthService:
         fam, kind = normalized.split(":", 1)
         fam_label = {"claude": "Claude", "openai": "OpenAI", "gemini": "Gemini"}.get(fam, fam)
         kind_label = {
-            "chat": "",
+            "chat": "Chat",
             "cli": "CLI",
             "video": "Video",
             "image": "Image",
         }.get(kind, kind)
-        if not kind_label:
-            return fam_label
         return f"{fam_label} {kind_label}"
 
     @staticmethod

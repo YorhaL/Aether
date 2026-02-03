@@ -24,40 +24,6 @@
               />
             </div>
 
-            <div class="hidden sm:block h-4 w-px bg-border" />
-
-            <!-- 能力筛选 -->
-            <div class="flex items-center border rounded-md border-border/60 h-8 overflow-hidden">
-              <button
-                class="px-2.5 h-full text-xs transition-colors"
-                :class="capabilityFilters.vision ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                title="Vision"
-                @click="capabilityFilters.vision = !capabilityFilters.vision"
-              >
-                <Eye class="w-3.5 h-3.5" />
-              </button>
-              <div class="w-px h-4 bg-border/60" />
-              <button
-                class="px-2.5 h-full text-xs transition-colors"
-                :class="capabilityFilters.toolUse ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                title="Tool Use"
-                @click="capabilityFilters.toolUse = !capabilityFilters.toolUse"
-              >
-                <Wrench class="w-3.5 h-3.5" />
-              </button>
-              <div class="w-px h-4 bg-border/60" />
-              <button
-                class="px-2.5 h-full text-xs transition-colors"
-                :class="capabilityFilters.extendedThinking ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                title="Extended Thinking"
-                @click="capabilityFilters.extendedThinking = !capabilityFilters.extendedThinking"
-              >
-                <Brain class="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            <div class="hidden sm:block h-4 w-px bg-border" />
-
             <!-- 刷新按钮 -->
             <RefreshButton
               :loading="loading"
@@ -77,9 +43,6 @@
               <TableHead class="w-[120px] h-12 font-semibold">
                 模型偏好
               </TableHead>
-              <TableHead class="w-[100px] h-12 font-semibold">
-                能力
-              </TableHead>
               <TableHead class="w-[140px] h-12 font-semibold text-center">
                 价格 ($/M)
               </TableHead>
@@ -91,7 +54,7 @@
           <TableBody>
             <TableRow v-if="loading">
               <TableCell
-                colspan="5"
+                colspan="4"
                 class="text-center py-12"
               >
                 <Loader2 class="w-6 h-6 animate-spin mx-auto" />
@@ -99,7 +62,7 @@
             </TableRow>
             <TableRow v-else-if="filteredModels.length === 0">
               <TableCell
-                colspan="5"
+                colspan="4"
                 class="text-center py-12 text-muted-foreground"
               >
                 没有找到匹配的模型
@@ -160,25 +123,6 @@
                       v-else
                       class="text-muted-foreground text-xs"
                     >-</span>
-                  </div>
-                </TableCell>
-                <TableCell class="py-4">
-                  <div class="flex gap-1.5">
-                    <Eye
-                      v-if="model.config?.vision === true"
-                      class="w-4 h-4 text-muted-foreground"
-                      title="Vision"
-                    />
-                    <Wrench
-                      v-if="model.config?.function_calling === true"
-                      class="w-4 h-4 text-muted-foreground"
-                      title="Tool Use"
-                    />
-                    <Brain
-                      v-if="model.config?.extended_thinking === true"
-                      class="w-4 h-4 text-muted-foreground"
-                      title="Extended Thinking"
-                    />
                   </div>
                 </TableCell>
                 <TableCell class="py-4 text-center">
@@ -250,23 +194,7 @@
               </Badge>
             </div>
 
-            <!-- 第二行：能力图标 -->
-            <div class="flex gap-1.5">
-              <Eye
-                v-if="model.config?.vision === true"
-                class="w-4 h-4 text-muted-foreground"
-              />
-              <Wrench
-                v-if="model.config?.function_calling === true"
-                class="w-4 h-4 text-muted-foreground"
-              />
-              <Brain
-                v-if="model.config?.extended_thinking === true"
-                class="w-4 h-4 text-muted-foreground"
-              />
-            </div>
-
-            <!-- 第三行：价格 -->
+            <!-- 第二行：价格 -->
             <div
               v-if="getFirstTierPrice(model, 'input') || getFirstTierPrice(model, 'output')"
               class="text-xs text-muted-foreground font-mono"

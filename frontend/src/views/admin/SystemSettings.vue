@@ -210,10 +210,10 @@
         </div>
       </CardSection>
 
-      <!-- 日志记录配置 -->
+      <!-- 请求记录配置 -->
       <CardSection
-        title="日志记录"
-        description="控制请求日志的记录方式和内容"
+        title="请求记录"
+        description="控制请求/响应详情的入库方式和内容"
       >
         <template #actions>
           <Button
@@ -233,7 +233,7 @@
               记录详细程度
             </Label>
             <Select
-              v-model="systemConfig.request_log_level"
+              v-model="systemConfig.request_record_level"
               v-model:open="logLevelSelectOpen"
             >
               <SelectTrigger
@@ -317,10 +317,10 @@
         </div>
       </CardSection>
 
-      <!-- 日志清理策略 -->
+      <!-- 请求记录清理策略 -->
       <CardSection
-        title="日志清理策略"
-        description="配置日志的分级保留和自动清理"
+        title="请求记录清理策略"
+        description="配置请求记录的分级保留和自动清理"
       >
         <template #actions>
           <div class="flex items-center gap-4">
@@ -357,7 +357,7 @@
               for="detail-log-retention-days"
               class="block text-sm font-medium"
             >
-              详细日志保留天数
+              详细记录保留天数
             </Label>
             <Input
               id="detail-log-retention-days"
@@ -376,7 +376,7 @@
               for="compressed-log-retention-days"
               class="block text-sm font-medium"
             >
-              压缩日志保留天数
+              压缩记录保留天数
             </Label>
             <Input
               id="compressed-log-retention-days"
@@ -414,7 +414,7 @@
               for="log-retention-days"
               class="block text-sm font-medium"
             >
-              完整日志保留天数
+              完整记录保留天数
             </Label>
             <Input
               id="log-retention-days"
@@ -909,12 +909,12 @@ interface SystemConfig {
   auto_delete_expired_keys: boolean
   // 格式转换
   enable_format_conversion: boolean
-  // 日志记录
-  request_log_level: string
+  // 请求记录
+  request_record_level: string
   max_request_body_size: number
   max_response_body_size: number
   sensitive_headers: string[]
-  // 日志清理
+  // 请求记录清理
   enable_auto_cleanup: boolean
   detail_log_retention_days: number
   compressed_log_retention_days: number
@@ -965,12 +965,12 @@ const systemConfig = ref<SystemConfig>({
   auto_delete_expired_keys: false,
   // 格式转换
   enable_format_conversion: false,
-  // 日志记录
-  request_log_level: 'basic',
+  // 请求记录
+  request_record_level: 'basic',
   max_request_body_size: 1048576,
   max_response_body_size: 1048576,
   sensitive_headers: ['authorization', 'x-api-key', 'api-key', 'cookie', 'set-cookie'],
-  // 日志清理
+  // 请求记录清理
   enable_auto_cleanup: true,
   detail_log_retention_days: 7,
   compressed_log_retention_days: 90,
@@ -1000,7 +1000,7 @@ const hasBasicConfigChanges = computed(() => {
 const hasLogConfigChanges = computed(() => {
   if (!originalConfig.value) return false
   return (
-    systemConfig.value.request_log_level !== originalConfig.value.request_log_level ||
+    systemConfig.value.request_record_level !== originalConfig.value.request_record_level ||
     systemConfig.value.max_request_body_size !== originalConfig.value.max_request_body_size ||
     systemConfig.value.max_response_body_size !== originalConfig.value.max_response_body_size ||
     JSON.stringify(systemConfig.value.sensitive_headers) !== JSON.stringify(originalConfig.value.sensitive_headers)
@@ -1072,12 +1072,12 @@ async function loadSystemConfig() {
       'auto_delete_expired_keys',
       // 格式转换
       'enable_format_conversion',
-      // 日志记录
-      'request_log_level',
+      // 请求记录
+      'request_record_level',
       'max_request_body_size',
       'max_response_body_size',
       'sensitive_headers',
-      // 日志清理
+      // 请求记录清理
       'enable_auto_cleanup',
       'detail_log_retention_days',
       'compressed_log_retention_days',
@@ -1165,8 +1165,8 @@ async function saveLogConfig() {
   try {
     const configItems = [
       {
-        key: 'request_log_level',
-        value: systemConfig.value.request_log_level,
+        key: 'request_record_level',
+        value: systemConfig.value.request_record_level,
         description: '请求记录级别'
       },
       {
@@ -1193,15 +1193,15 @@ async function saveLogConfig() {
     )
     // 更新原始值
     if (originalConfig.value) {
-      originalConfig.value.request_log_level = systemConfig.value.request_log_level
+      originalConfig.value.request_record_level = systemConfig.value.request_record_level
       originalConfig.value.max_request_body_size = systemConfig.value.max_request_body_size
       originalConfig.value.max_response_body_size = systemConfig.value.max_response_body_size
       originalConfig.value.sensitive_headers = [...systemConfig.value.sensitive_headers]
     }
-    success('日志配置已保存')
+    success('请求记录配置已保存')
   } catch (err) {
     error('保存配置失败')
-    log.error('保存日志配置失败:', err)
+    log.error('保存请求记录配置失败:', err)
   } finally {
     logConfigLoading.value = false
   }
@@ -1250,12 +1250,12 @@ async function saveCleanupConfig() {
       {
         key: 'detail_log_retention_days',
         value: systemConfig.value.detail_log_retention_days,
-        description: '详细日志保留天数'
+        description: '详细记录保留天数'
       },
       {
         key: 'compressed_log_retention_days',
         value: systemConfig.value.compressed_log_retention_days,
-        description: '压缩日志保留天数'
+        description: '压缩记录保留天数'
       },
       {
         key: 'header_retention_days',
@@ -1265,7 +1265,7 @@ async function saveCleanupConfig() {
       {
         key: 'log_retention_days',
         value: systemConfig.value.log_retention_days,
-        description: '完整日志保留天数'
+        description: '完整记录保留天数'
       },
       {
         key: 'cleanup_batch_size',
@@ -1293,10 +1293,10 @@ async function saveCleanupConfig() {
       originalConfig.value.cleanup_batch_size = systemConfig.value.cleanup_batch_size
       originalConfig.value.audit_log_retention_days = systemConfig.value.audit_log_retention_days
     }
-    success('日志清理配置已保存')
+    success('请求记录清理配置已保存')
   } catch (err) {
     error('保存配置失败')
-    log.error('保存日志清理配置失败:', err)
+    log.error('保存请求记录清理配置失败:', err)
   } finally {
     cleanupConfigLoading.value = false
   }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import ApiRequestPipeline
+from src.config.constants import CacheTTL
+from src.config.settings import config
 from src.database import get_db
 from src.models.database import (
     ApiKey,
@@ -25,9 +27,29 @@ from src.models.database import (
     User,
 )
 from src.services.usage.service import UsageService
+from src.utils.cache_decorator import cache_result
 
 router = APIRouter(prefix="/api/admin/usage", tags=["Admin - Usage"])
 pipeline = ApiRequestPipeline()
+
+
+def _apply_admin_default_range(
+    start_date: datetime | None, end_date: datetime | None
+) -> tuple[datetime | None, datetime | None]:
+    """
+    Apply a default time range for admin usage endpoints to protect DB from unbounded scans.
+
+    Enabled by setting ADMIN_USAGE_DEFAULT_DAYS>0.
+    """
+    if start_date is not None or end_date is not None:
+        return start_date, end_date
+
+    days = int(getattr(config, "admin_usage_default_days", 0) or 0)
+    if days <= 0:
+        return start_date, end_date
+
+    now = datetime.now(timezone.utc)
+    return now - timedelta(days=days), now
 
 
 # ==================== RESTful Routes ====================
@@ -267,9 +289,14 @@ async def get_usage_detail(
 
 class AdminUsageStatsAdapter(AdminApiAdapter):
     def __init__(self, start_date: datetime | None, end_date: datetime | None):
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date, self.end_date = _apply_admin_default_range(start_date, end_date)
 
+    @cache_result(
+        key_prefix="admin:usage:stats",
+        ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
+        user_specific=False,
+        vary_by=["start_date", "end_date"],
+    )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         # Perf: use a single aggregate query (avoid 3 full scans).
         from sqlalchemy import case
@@ -347,10 +374,15 @@ class AdminActivityHeatmapAdapter(AdminApiAdapter):
 
 class AdminUsageByModelAdapter(AdminApiAdapter):
     def __init__(self, start_date: datetime | None, end_date: datetime | None, limit: int):
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date, self.end_date = _apply_admin_default_range(start_date, end_date)
         self.limit = limit
 
+    @cache_result(
+        key_prefix="admin:usage:agg:model",
+        ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
+        user_specific=False,
+        vary_by=["start_date", "end_date", "limit"],
+    )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         query = db.query(
@@ -394,10 +426,15 @@ class AdminUsageByModelAdapter(AdminApiAdapter):
 
 class AdminUsageByUserAdapter(AdminApiAdapter):
     def __init__(self, start_date: datetime | None, end_date: datetime | None, limit: int):
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date, self.end_date = _apply_admin_default_range(start_date, end_date)
         self.limit = limit
 
+    @cache_result(
+        key_prefix="admin:usage:agg:user",
+        ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
+        user_specific=False,
+        vary_by=["start_date", "end_date", "limit"],
+    )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         query = (
@@ -444,10 +481,15 @@ class AdminUsageByUserAdapter(AdminApiAdapter):
 
 class AdminUsageByProviderAdapter(AdminApiAdapter):
     def __init__(self, start_date: datetime | None, end_date: datetime | None, limit: int):
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date, self.end_date = _apply_admin_default_range(start_date, end_date)
         self.limit = limit
 
+    @cache_result(
+        key_prefix="admin:usage:agg:provider",
+        ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
+        user_specific=False,
+        vary_by=["start_date", "end_date", "limit"],
+    )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
 
@@ -558,10 +600,15 @@ class AdminUsageByProviderAdapter(AdminApiAdapter):
 
 class AdminUsageByApiFormatAdapter(AdminApiAdapter):
     def __init__(self, start_date: datetime | None, end_date: datetime | None, limit: int):
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date, self.end_date = _apply_admin_default_range(start_date, end_date)
         self.limit = limit
 
+    @cache_result(
+        key_prefix="admin:usage:agg:api_format",
+        ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
+        user_specific=False,
+        vary_by=["start_date", "end_date", "limit"],
+    )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         query = db.query(
@@ -624,8 +671,7 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
         limit: int,
         offset: int,
     ):
-        self.start_date = start_date
-        self.end_date = end_date
+        self.start_date, self.end_date = _apply_admin_default_range(start_date, end_date)
         self.search = search
         self.user_id = user_id
         self.username = username
@@ -635,6 +681,23 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
         self.limit = limit
         self.offset = offset
 
+    @cache_result(
+        key_prefix="admin:usage:records",
+        ttl=CacheTTL.ADMIN_USAGE_RECORDS,
+        user_specific=False,
+        vary_by=[
+            "start_date",
+            "end_date",
+            "search",
+            "user_id",
+            "username",
+            "model",
+            "provider",
+            "status",
+            "limit",
+            "offset",
+        ],
+    )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         from sqlalchemy import or_
         from sqlalchemy.orm import load_only
@@ -955,7 +1018,11 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
 
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
+        # 先通过主键 id 查找，如果找不到再尝试通过 request_id 查找
         usage_record = db.query(Usage).filter(Usage.id == self.usage_id).first()
+        if not usage_record:
+            # 兼容通过 request_id 查找（用于异步任务等场景）
+            usage_record = db.query(Usage).filter(Usage.request_id == self.usage_id).first()
         if not usage_record:
             raise HTTPException(status_code=404, detail="Usage record not found")
 
@@ -969,6 +1036,9 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
             action="usage_detail",
             usage_id=self.usage_id,
         )
+
+        # 提取视频/图像/音频计费信息
+        video_billing_info = self._extract_video_billing_info(usage_record)
 
         return {
             "id": usage_record.id,
@@ -1022,6 +1092,7 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
             "response_body": usage_record.get_response_body(),
             "metadata": usage_record.request_metadata,
             "tiered_pricing": tiered_pricing_info,
+            "video_billing": video_billing_info,
         }
 
     async def _get_tiered_pricing_info(self, db: Session, usage_record: Any) -> dict | None:
@@ -1076,6 +1147,75 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
             "tiers": tiers,
             "source": pricing_source,  # 定价来源: 'provider' 或 'global'
         }
+
+    def _extract_video_billing_info(self, usage_record: Any) -> dict | None:
+        """
+        从 request_metadata.billing_snapshot 和 dimensions 中提取视频/图像/音频计费信息。
+
+        返回结构:
+        {
+            "task_type": "video" | "image" | "audio",
+            "duration_seconds": 10.5,  # 视频时长（秒）
+            "resolution": "1080p",     # 分辨率
+            "video_price_per_second": 0.1,  # 每秒单价
+            "video_cost": 1.05,        # 视频费用
+            "rule_name": "...",        # 计费规则名称
+            "expression": "...",       # 计费公式
+            "status": "complete",      # 计费状态
+        }
+        """
+        request_type = getattr(usage_record, "request_type", None)
+        if request_type not in {"video", "image", "audio"}:
+            return None
+
+        metadata = getattr(usage_record, "request_metadata", None)
+        if not metadata:
+            return None
+
+        billing_snapshot = metadata.get("billing_snapshot") if isinstance(metadata, dict) else None
+        dimensions = metadata.get("dimensions") if isinstance(metadata, dict) else None
+
+        result: dict = {
+            "task_type": request_type,
+        }
+
+        # 从 billing_snapshot 中提取计费规则信息
+        if billing_snapshot and isinstance(billing_snapshot, dict):
+            result["rule_name"] = billing_snapshot.get("rule_name")
+            result["expression"] = billing_snapshot.get("expression")
+            result["status"] = billing_snapshot.get("status")
+            result["cost"] = billing_snapshot.get("cost")
+
+            # 从 dimensions_used 中提取维度
+            dims_used = billing_snapshot.get("dimensions_used")
+            if dims_used and isinstance(dims_used, dict):
+                if "duration_seconds" in dims_used:
+                    result["duration_seconds"] = dims_used["duration_seconds"]
+                if "video_resolution_key" in dims_used:
+                    result["resolution"] = dims_used["video_resolution_key"]
+                if "video_price_per_second" in dims_used:
+                    result["video_price_per_second"] = dims_used["video_price_per_second"]
+                if "video_cost" in dims_used:
+                    result["video_cost"] = dims_used["video_cost"]
+
+        # 补充从 dimensions 中提取（备用）
+        if dimensions and isinstance(dimensions, dict):
+            if "duration_seconds" not in result and "duration_seconds" in dimensions:
+                result["duration_seconds"] = dimensions["duration_seconds"]
+            if "resolution" not in result and "video_resolution_key" in dimensions:
+                result["resolution"] = dimensions["video_resolution_key"]
+
+        # 如果没有有意义的视频计费信息，返回 None
+        has_video_info = (
+            result.get("duration_seconds")
+            or result.get("resolution")
+            or result.get("video_cost")
+            or result.get("cost")
+        )
+        if not has_video_info:
+            return None
+
+        return result
 
 
 # ==================== 缓存亲和性分析 ====================

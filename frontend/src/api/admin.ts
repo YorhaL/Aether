@@ -616,5 +616,5 @@ export const adminApi = {
   async testLdapConnection(config: LdapConfigUpdateRequest): Promise<LdapTestResponse> {
     const response = await apiClient.post<LdapTestResponse>('/api/admin/ldap/test', config)
     return response.data
-  }
+  },
 }

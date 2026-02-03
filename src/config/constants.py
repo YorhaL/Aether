@@ -28,6 +28,10 @@ class CacheTTL:
     DASHBOARD_STATS = 120  # 2分钟（管理员）
     DASHBOARD_DAILY = 600  # 10分钟（每日统计）
 
+    # Admin usage pages (heavy DB aggregations / list queries)
+    ADMIN_USAGE_AGGREGATION = 30  # 30秒
+    ADMIN_USAGE_RECORDS = 10  # 10秒（列表页短缓存，避免轮询/重复刷新打爆 DB）
+
     # 并发锁 TTL - 防止死锁
     CONCURRENCY_LOCK = 600  # 10分钟
 

@@ -26,58 +26,6 @@
                 />
               </div>
 
-              <div class="hidden sm:block h-4 w-px bg-border" />
-
-              <!-- 能力筛选 -->
-              <div class="flex items-center border rounded-md border-border/60 h-8 overflow-hidden">
-                <button
-                  class="px-2.5 h-full text-xs transition-colors"
-                  :class="capabilityFilters.streaming ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                  title="流式输出"
-                  @click="capabilityFilters.streaming = !capabilityFilters.streaming"
-                >
-                  <Zap class="w-3.5 h-3.5" />
-                </button>
-                <div class="w-px h-4 bg-border/60" />
-                <button
-                  class="px-2.5 h-full text-xs transition-colors"
-                  :class="capabilityFilters.imageGeneration ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                  title="图像生成"
-                  @click="capabilityFilters.imageGeneration = !capabilityFilters.imageGeneration"
-                >
-                  <Image class="w-3.5 h-3.5" />
-                </button>
-                <div class="w-px h-4 bg-border/60" />
-                <button
-                  class="px-2.5 h-full text-xs transition-colors"
-                  :class="capabilityFilters.vision ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                  title="视觉理解"
-                  @click="capabilityFilters.vision = !capabilityFilters.vision"
-                >
-                  <Eye class="w-3.5 h-3.5" />
-                </button>
-                <div class="w-px h-4 bg-border/60" />
-                <button
-                  class="px-2.5 h-full text-xs transition-colors"
-                  :class="capabilityFilters.toolUse ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                  title="工具调用"
-                  @click="capabilityFilters.toolUse = !capabilityFilters.toolUse"
-                >
-                  <Wrench class="w-3.5 h-3.5" />
-                </button>
-                <div class="w-px h-4 bg-border/60" />
-                <button
-                  class="px-2.5 h-full text-xs transition-colors"
-                  :class="capabilityFilters.extendedThinking ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
-                  title="深度思考"
-                  @click="capabilityFilters.extendedThinking = !capabilityFilters.extendedThinking"
-                >
-                  <Brain class="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              <div class="hidden sm:block h-4 w-px bg-border" />
-
               <!-- 操作按钮 -->
               <Button
                 variant="ghost"
@@ -103,7 +51,7 @@
                 模型名称
               </TableHead>
               <TableHead class="w-[140px]">
-                能力/偏好
+                模型偏好
               </TableHead>
               <TableHead class="w-[160px] text-center">
                 价格 ($/M)
@@ -165,45 +113,19 @@
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div class="space-y-1 w-fit">
-                    <div class="flex flex-wrap gap-1">
-                      <Zap
-                        v-if="model.config?.streaming !== false"
-                        class="w-4 h-4 text-muted-foreground"
-                        title="流式输出"
-                      />
-                      <Image
-                        v-if="model.config?.image_generation === true"
-                        class="w-4 h-4 text-muted-foreground"
-                        title="图像生成"
-                      />
-                      <Eye
-                        v-if="model.config?.vision === true"
-                        class="w-4 h-4 text-muted-foreground"
-                        title="视觉理解"
-                      />
-                      <Wrench
-                        v-if="model.config?.function_calling === true"
-                        class="w-4 h-4 text-muted-foreground"
-                        title="工具调用"
-                      />
-                      <Brain
-                        v-if="model.config?.extended_thinking === true"
-                        class="w-4 h-4 text-muted-foreground"
-                        title="深度思考"
-                      />
-                    </div>
+                  <div class="flex flex-wrap gap-0.5">
                     <template v-if="model.supported_capabilities?.length">
-                      <div class="border-t border-border/50" />
-                      <div class="flex flex-wrap gap-0.5">
-                        <span
-                          v-for="capName in model.supported_capabilities"
-                          :key="capName"
-                          class="text-[11px] px-1 py-0.5 rounded bg-muted/60 text-muted-foreground"
-                          :title="getCapabilityDisplayName(capName)"
-                        >{{ getCapabilityShortName(capName) }}</span>
-                      </div>
+                      <span
+                        v-for="capName in model.supported_capabilities"
+                        :key="capName"
+                        class="text-[11px] px-1 py-0.5 rounded bg-muted/60 text-muted-foreground"
+                        :title="getCapabilityDisplayName(capName)"
+                      >{{ getCapabilityShortName(capName) }}</span>
                     </template>
+                    <span
+                      v-else
+                      class="text-muted-foreground text-xs"
+                    >-</span>
                   </div>
                 </TableCell>
                 <TableCell class="text-center">
@@ -227,9 +149,17 @@
                       <span class="text-muted-foreground">按次:</span>
                       <span class="font-mono ml-1">${{ model.default_price_per_request.toFixed(3) }}/次</span>
                     </div>
+                    <!-- 视频费用计费 -->
+                    <div v-if="hasVideoPricing(model)">
+                      <span class="text-muted-foreground">视频:</span>
+                      <span
+                        class="font-mono ml-1"
+                        :title="getVideoPricingTooltip(model)"
+                      >{{ getVideoPricingDisplay(model) }}</span>
+                    </div>
                     <!-- 无计费配置 -->
                     <div
-                      v-if="!getFirstTierPrice(model, 'input') && !getFirstTierPrice(model, 'output') && !model.default_price_per_request"
+                      v-if="!getFirstTierPrice(model, 'input') && !getFirstTierPrice(model, 'output') && !model.default_price_per_request && !hasVideoPricing(model)"
                       class="text-muted-foreground"
                     >
                       -
@@ -358,28 +288,16 @@
               </div>
             </div>
 
-            <!-- 第二行：能力图标 -->
-            <div class="flex flex-wrap gap-1.5">
-              <Zap
-                v-if="model.config?.streaming !== false"
-                class="w-4 h-4 text-muted-foreground"
-              />
-              <Image
-                v-if="model.config?.image_generation === true"
-                class="w-4 h-4 text-muted-foreground"
-              />
-              <Eye
-                v-if="model.config?.vision === true"
-                class="w-4 h-4 text-muted-foreground"
-              />
-              <Wrench
-                v-if="model.config?.function_calling === true"
-                class="w-4 h-4 text-muted-foreground"
-              />
-              <Brain
-                v-if="model.config?.extended_thinking === true"
-                class="w-4 h-4 text-muted-foreground"
-              />
+            <!-- 第二行：模型偏好 -->
+            <div
+              v-if="model.supported_capabilities?.length"
+              class="flex flex-wrap gap-0.5"
+            >
+              <span
+                v-for="capName in model.supported_capabilities"
+                :key="capName"
+                class="text-[11px] px-1 py-0.5 rounded bg-muted/60 text-muted-foreground"
+              >{{ getCapabilityShortName(capName) }}</span>
             </div>
 
             <!-- 第三行：统计信息 -->
@@ -601,6 +519,7 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
 import { useRowClick } from '@/composables/useRowClick'
 import { parseApiError } from '@/utils/errorParser'
+import { sortResolutionEntries } from '@/utils/form'
 import {
   Button,
   Card,
@@ -720,6 +639,43 @@ function getFirstTierPrice(model: GlobalModelResponse, type: 'input' | 'output')
 function hasTieredPricing(model: GlobalModelResponse): boolean {
   const tiered = model.default_tiered_pricing
   return (tiered?.tiers?.length || 0) > 1
+}
+
+// 检测是否有视频分辨率计费配置
+function hasVideoPricing(model: GlobalModelResponse): boolean {
+  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
+  return priceByResolution && typeof priceByResolution === 'object' && Object.keys(priceByResolution).length > 0
+}
+
+// 获取视频分辨率计费的数量
+function getVideoPricingCount(model: GlobalModelResponse): number {
+  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
+  if (!priceByResolution || typeof priceByResolution !== 'object') return 0
+  return Object.keys(priceByResolution).length
+}
+
+// 获取视频计费的显示文本（如：720p $0.1/s [多分辨率]）
+function getVideoPricingDisplay(model: GlobalModelResponse): string {
+  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
+  if (!priceByResolution || typeof priceByResolution !== 'object') return ''
+  const entries = sortResolutionEntries(Object.entries(priceByResolution))
+  if (entries.length === 0) return ''
+  // 获取最低分辨率和价格
+  const [firstRes, firstPrice] = entries[0]
+  const priceStr = `${firstRes} $${(firstPrice as number).toFixed(2)}/s`
+  // 如果有多个分辨率，添加标记
+  if (entries.length > 1) {
+    return `${priceStr} [${entries.length}种]`
+  }
+  return priceStr
+}
+
+// 获取视频计费详情的 tooltip
+function getVideoPricingTooltip(model: GlobalModelResponse): string {
+  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
+  if (!priceByResolution || typeof priceByResolution !== 'object') return ''
+  const entries = sortResolutionEntries(Object.entries(priceByResolution))
+  return entries.map(([res, price]) => `${res}: $${(price as number).toFixed(4)}/s`).join('\n')
 }
 
 // 检测是否有对话框打开（防止误关闭抽屉）

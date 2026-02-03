@@ -211,8 +211,10 @@ class AdminDashboardStatsAdapter(AdminApiAdapter):
         month_start = month_start_local.astimezone(timezone.utc)
 
         # ==================== 使用预聚合数据 ====================
+        # 今日实时数据只查询一次，避免重复扫描 Usage 表
+        today_stats = StatsAggregatorService.get_today_realtime_stats(db)
         # 从 stats_summary + 今日实时数据获取全局统计
-        combined_stats = StatsAggregatorService.get_combined_stats(db)
+        combined_stats = StatsAggregatorService.get_combined_stats(db, today_stats=today_stats)
 
         all_time_requests = combined_stats["total_requests"]
         all_time_success_requests = combined_stats["success_requests"]
@@ -237,7 +239,6 @@ class AdminDashboardStatsAdapter(AdminApiAdapter):
         )
 
         # ==================== 今日实时统计 ====================
-        today_stats = StatsAggregatorService.get_today_realtime_stats(db)
         requests_today = today_stats["total_requests"]
         cost_today = today_stats["total_cost"]
         actual_cost_today = today_stats["actual_total_cost"]
@@ -951,26 +952,9 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
             today_stats = StatsAggregatorService.get_today_realtime_stats(db)
             today_str = today_local.date().isoformat()
             if today_stats["total_requests"] > 0:
-                # 今日平均响应时间需要单独查询
-                today_avg_rt = (
-                    db.query(func.avg(Usage.response_time_ms))
-                    .filter(Usage.created_at >= today, Usage.response_time_ms.isnot(None))
-                    .scalar()
-                    or 0
-                )
-                # 今日 unique_models 和 unique_providers
-                today_unique_models = (
-                    db.query(func.count(func.distinct(Usage.model)))
-                    .filter(Usage.created_at >= today)
-                    .scalar()
-                    or 0
-                )
-                today_unique_providers = (
-                    db.query(func.count(func.distinct(Usage.provider_name)))
-                    .filter(Usage.created_at >= today)
-                    .scalar()
-                    or 0
-                )
+                today_avg_rt_ms = float(today_stats.get("avg_response_time_ms") or 0.0)
+                today_unique_models = int(today_stats.get("unique_models") or 0)
+                today_unique_providers = int(today_stats.get("unique_providers") or 0)
                 # 今日 fallback_count
                 today_fallback_count = (
                     db.query(func.count())
@@ -996,7 +980,7 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
                         + today_stats["cache_read_tokens"]
                     ),
                     "cost": today_stats["total_cost"],
-                    "avg_response_time": float(today_avg_rt) / 1000.0 if today_avg_rt else 0,
+                    "avg_response_time": today_avg_rt_ms / 1000.0 if today_avg_rt_ms else 0,
                     "unique_models": today_unique_models,
                     "unique_providers": today_unique_providers,
                     "fallback_count": today_fallback_count,

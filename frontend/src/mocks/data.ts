@@ -865,12 +865,12 @@ export const MOCK_SYSTEM_CONFIGS = [
 
 export const MOCK_API_FORMATS = {
   formats: [
-    { value: 'claude:chat', label: 'Claude', default_path: '/v1/messages', aliases: [] },
+    { value: 'claude:chat', label: 'Claude Chat', default_path: '/v1/messages', aliases: [] },
     { value: 'claude:cli', label: 'Claude CLI', default_path: '/v1/messages', aliases: [] },
-    { value: 'openai:chat', label: 'OpenAI', default_path: '/v1/chat/completions', aliases: [] },
+    { value: 'openai:chat', label: 'OpenAI Chat', default_path: '/v1/chat/completions', aliases: [] },
     { value: 'openai:cli', label: 'OpenAI CLI', default_path: '/responses', aliases: [] },
     { value: 'openai:video', label: 'OpenAI Video', default_path: '/v1/videos', aliases: [] },
-    { value: 'gemini:chat', label: 'Gemini', default_path: '/v1beta/models/{model}:{action}', aliases: [] },
+    { value: 'gemini:chat', label: 'Gemini Chat', default_path: '/v1beta/models/{model}:{action}', aliases: [] },
     { value: 'gemini:cli', label: 'Gemini CLI', default_path: '/v1beta/models/{model}:{action}', aliases: [] },
     { value: 'gemini:video', label: 'Gemini Video', default_path: '/v1beta/models/{model}:predictLongRunning', aliases: [] }
   ]

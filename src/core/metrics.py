@@ -80,3 +80,28 @@ format_conversion_duration_seconds = Histogram(
     ["direction", "source_format", "target_format"],
     buckets=[0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
 )
+
+# ==================== Billing migration / shadow billing ====================
+
+billing_requests_total = Counter(
+    "billing_requests_total",
+    "Total number of billing calculations",
+    ["engine_mode", "truth_engine"],  # low-cardinality labels
+)
+
+billing_fallback_total = Counter(
+    "billing_fallback_total",
+    "Total number of billing fallbacks to legacy engine",
+)
+
+billing_diff_exceeds_threshold_total = Counter(
+    "billing_diff_exceeds_threshold_total",
+    "Total number of shadow billing diffs exceeding threshold",
+    ["engine_mode"],
+)
+
+billing_invariant_violation_total = Counter(
+    "billing_invariant_violation_total",
+    "Total number of billing invariant violations (sum(breakdown)!=total)",
+    ["engine_mode", "truth_engine"],
+)

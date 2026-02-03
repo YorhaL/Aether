@@ -62,18 +62,15 @@ async def test_queue_writer_publishes_event(monkeypatch):
 
     old_stream_key = config.usage_queue_stream_key
     old_maxlen = config.usage_queue_stream_maxlen
-    old_include_headers = config.usage_queue_include_headers
-    old_include_bodies = config.usage_queue_include_bodies
     try:
         config.usage_queue_stream_key = "usage:events:test"
         config.usage_queue_stream_maxlen = 0
-        config.usage_queue_include_headers = False
-        config.usage_queue_include_bodies = False
 
         writer = QueueTelemetryWriter(
             request_id="req-2",
             user_id="user-1",
             api_key_id="key-1",
+            log_level="basic",
         )
         await writer.record_success(
             provider="test",
@@ -86,8 +83,6 @@ async def test_queue_writer_publishes_event(monkeypatch):
     finally:
         config.usage_queue_stream_key = old_stream_key
         config.usage_queue_stream_maxlen = old_maxlen
-        config.usage_queue_include_headers = old_include_headers
-        config.usage_queue_include_bodies = old_include_bodies
 
     assert dummy.calls
     key, fields, _, _ = dummy.calls[0]
@@ -310,31 +305,28 @@ async def test_queue_writer_include_headers_bodies(monkeypatch):
 
     monkeypatch.setattr("src.services.usage.telemetry_writer.get_redis_client", _get_redis_client)
 
-    old_include_headers = config.usage_queue_include_headers
-    old_include_bodies = config.usage_queue_include_bodies
-    try:
-        config.usage_queue_include_headers = True
-        config.usage_queue_include_bodies = True
-
-        writer = QueueTelemetryWriter(
-            request_id="req-full",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-        await writer.record_success(
-            provider="test",
-            model="model",
-            request_headers={"Authorization": "Bearer xxx"},
-            response_headers={"Content-Type": "application/json"},
-            request_body={"messages": [{"role": "user", "content": "hi"}]},
-            response_body={"choices": [{"message": {"content": "hello"}}]},
-        )
-    finally:
-        config.usage_queue_include_headers = old_include_headers
-        config.usage_queue_include_bodies = old_include_bodies
+    writer = QueueTelemetryWriter(
+        request_id="req-full",
+        user_id="user-1",
+        api_key_id="key-1",
+        log_level="full",
+        sensitive_headers=["authorization"],
+        max_request_body_size=0,
+        max_response_body_size=0,
+    )
+    await writer.record_success(
+        provider="test",
+        model="model",
+        request_headers={"Authorization": "Bearer xxx"},
+        response_headers={"Content-Type": "application/json"},
+        request_body={"messages": [{"role": "user", "content": "hi"}]},
+        response_body={"choices": [{"message": {"content": "hello"}}]},
+    )
 
     event = UsageEvent.from_stream_fields(dummy.calls[0][1])
-    assert event.data["request_headers"]["Authorization"] == "Bearer xxx"
+    # Sensitive header should be masked before going into Redis
+    assert event.data["request_headers"]["Authorization"].startswith("Bear")
+    assert "****" in event.data["request_headers"]["Authorization"]
     assert "request_body" in event.data
     assert "response_body" in event.data
 
@@ -378,31 +370,26 @@ async def test_queue_writer_body_truncation(monkeypatch):
 
     monkeypatch.setattr("src.services.usage.telemetry_writer.get_redis_client", _get_redis_client)
 
-    old_include_bodies = config.usage_queue_include_bodies
-    old_max_bytes = config.usage_queue_body_max_bytes
-    try:
-        config.usage_queue_include_bodies = True
-        config.usage_queue_body_max_bytes = 50
-
-        writer = QueueTelemetryWriter(
-            request_id="req-trunc",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-        long_body = {"content": "x" * 1000}
-        await writer.record_success(
-            provider="test",
-            model="model",
-            request_body=long_body,
-        )
-    finally:
-        config.usage_queue_include_bodies = old_include_bodies
-        config.usage_queue_body_max_bytes = old_max_bytes
+    writer = QueueTelemetryWriter(
+        request_id="req-trunc",
+        user_id="user-1",
+        api_key_id="key-1",
+        log_level="full",
+        max_request_body_size=50,
+        max_response_body_size=0,
+    )
+    long_body = {"content": "x" * 1000}
+    await writer.record_success(
+        provider="test",
+        model="model",
+        request_body=long_body,
+    )
 
     event = UsageEvent.from_stream_fields(dummy.calls[0][1])
-    body_str = event.data["request_body"]
-    assert len(body_str) <= 50
-    assert body_str.endswith("...[truncated]")
+    body = event.data["request_body"]
+    assert isinstance(body, dict)
+    assert body.get("_truncated") is True
+    assert len(body.get("_content") or "") <= 50
 
 
 @pytest.mark.asyncio

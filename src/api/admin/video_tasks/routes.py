@@ -7,18 +7,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import ApiRequestPipeline
 from src.api.dashboard.routes import DashboardAdapter
+from src.clients.http_client import HTTPClientPool
+from src.core.crypto import crypto_service
 from src.core.enums import UserRole
+from src.core.logger import logger
 from src.database import get_db
-from src.models.database import Provider, ProviderEndpoint, User, VideoTask
+from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint, User, VideoTask
 
 router = APIRouter(prefix="/api/admin/video-tasks", tags=["Admin - Video Tasks"])
 pipeline = ApiRequestPipeline()
@@ -117,6 +121,117 @@ async def cancel_video_task(
     """
     adapter = VideoTaskCancelAdapter(task_id=task_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/{task_id}/video")
+async def proxy_video_stream(
+    task_id: str,
+    request: Request,
+    token: str | None = Query(None, description="JWT access token"),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """
+    代理视频流（用于需要认证的视频链接）
+
+    **路径参数**:
+    - `task_id`: 任务 ID
+
+    **查询参数**:
+    - `token`: JWT access token（用于 video 标签请求）
+
+    **返回**:
+    - 视频流
+    """
+    from src.services.auth.service import AuthService
+
+    # 尝试从多个来源获取 token：query param > cookie > header
+    auth_token = token
+    if not auth_token:
+        auth_token = request.cookies.get("access_token")
+    if not auth_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            auth_token = auth_header[7:]
+
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        # 验证 token 并获取 payload
+        payload = await AuthService.verify_token(auth_token, token_type="access")
+        user_id = payload.get("user_id") or payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        # 查询用户
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # 查询任务
+    query = db.query(VideoTask).filter(VideoTask.id == task_id)
+    if user.role != UserRole.ADMIN:
+        query = query.filter(VideoTask.user_id == user.id)
+
+    task = query.first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Video task not found")
+
+    if not task.video_url:
+        raise HTTPException(status_code=404, detail="Video not available")
+
+    # 检查是否需要代理（Google API 链接需要认证）
+    video_url = task.video_url
+    needs_proxy = "generativelanguage.googleapis.com" in video_url
+
+    if not needs_proxy:
+        # 不需要代理，重定向到原始 URL
+        from fastapi.responses import RedirectResponse
+
+        return RedirectResponse(url=video_url)
+
+    # 需要代理：获取 provider key 进行认证
+    if not task.key_id:
+        raise HTTPException(status_code=500, detail="Missing provider key")
+
+    key = db.query(ProviderAPIKey).filter(ProviderAPIKey.id == task.key_id).first()
+    if not key or not key.api_key:
+        raise HTTPException(status_code=500, detail="Provider key not found")
+
+    try:
+        api_key = crypto_service.decrypt(key.api_key)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to decrypt provider key")
+
+    # 构建认证头
+    headers = {"x-goog-api-key": api_key}
+
+    async def stream_video() -> AsyncIterator[bytes]:
+        """流式下载并返回视频"""
+        try:
+            client = await HTTPClientPool.get_default_client_async()
+            async with client.stream("GET", video_url, headers=headers) as response:
+                if response.status_code >= 400:
+                    logger.warning(
+                        "Video proxy failed: task={} status={}", task_id, response.status_code
+                    )
+                    return
+                async for chunk in response.aiter_bytes(chunk_size=65536):
+                    yield chunk
+        except Exception as e:
+            logger.exception("Video proxy error: task={} error={}", task_id, str(e))
+
+    return StreamingResponse(
+        stream_video(),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'inline; filename="video_{task_id}.mp4"',
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
 
 
 # ==================== Adapters ====================
@@ -359,6 +474,7 @@ class VideoTaskDetailAdapter(DashboardAdapter):
             "video_urls": task.video_urls,
             "thumbnail_url": task.thumbnail_url,
             "video_size_bytes": task.video_size_bytes,
+            "video_duration_seconds": task.video_duration_seconds,
             "video_expires_at": (
                 task.video_expires_at.isoformat() if task.video_expires_at else None
             ),

@@ -74,6 +74,7 @@ export interface AsyncTaskDetail extends AsyncTaskItem {
   video_urls: string[] | null
   thumbnail_url: string | null
   video_size_bytes: number | null
+  video_duration_seconds: number | null  // 实际视频时长（秒）
   video_expires_at: string | null
   stored_video_path: string | null
   storage_provider: string | null

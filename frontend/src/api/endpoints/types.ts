@@ -13,23 +13,23 @@ export const API_FORMATS = {
 
 export type APIFormat = typeof API_FORMATS[keyof typeof API_FORMATS]
 
-// API 格式显示名称映射（按品牌分组：API 在前，CLI 在后）
+// API 格式显示名称映射（按品牌分组：Chat 在前，CLI/Video 在后）
 export const API_FORMAT_LABELS: Record<string, string> = {
-  [API_FORMATS.CLAUDE]: 'Claude',
+  [API_FORMATS.CLAUDE]: 'Claude Chat',
   [API_FORMATS.CLAUDE_CLI]: 'Claude CLI',
-  [API_FORMATS.OPENAI]: 'OpenAI',
+  [API_FORMATS.OPENAI]: 'OpenAI Chat',
   [API_FORMATS.OPENAI_CLI]: 'OpenAI CLI',
   [API_FORMATS.OPENAI_VIDEO]: 'OpenAI Video',
-  [API_FORMATS.GEMINI]: 'Gemini',
+  [API_FORMATS.GEMINI]: 'Gemini Chat',
   [API_FORMATS.GEMINI_CLI]: 'Gemini CLI',
   [API_FORMATS.GEMINI_VIDEO]: 'Gemini Video',
   // legacy 兼容（仅用于展示历史数据）
-  CLAUDE: 'Claude',
+  CLAUDE: 'Claude Chat',
   CLAUDE_CLI: 'Claude CLI',
-  OPENAI: 'OpenAI',
+  OPENAI: 'OpenAI Chat',
   OPENAI_CLI: 'OpenAI CLI',
   OPENAI_VIDEO: 'OpenAI Video',
-  GEMINI: 'Gemini',
+  GEMINI: 'Gemini Chat',
   GEMINI_CLI: 'Gemini CLI',
   GEMINI_VIDEO: 'Gemini Video',
 }
@@ -418,6 +418,7 @@ export interface Model {
   global_model_id?: string  // 关联的 GlobalModel ID
   provider_model_name: string  // Provider 侧的主模型名称
   provider_model_mappings?: ProviderModelMapping[] | null  // 模型名称映射列表（带优先级）
+  config?: Record<string, any> | null  // 额外配置（如 billing/video 等）
   // 原始配置值（可能为空，为空时使用 GlobalModel 默认值）
   price_per_request?: number | null  // 按次计费价格
   tiered_pricing?: TieredPricingConfig | null  // 阶梯计费配置
@@ -443,6 +444,8 @@ export interface Model {
   // GlobalModel 信息（从后端 join 获取）
   global_model_name?: string
   global_model_display_name?: string
+  // 有效配置（合并 Model 和 GlobalModel 的 config）
+  effective_config?: Record<string, any> | null
 }
 
 export interface ModelCreate {
@@ -475,6 +478,7 @@ export interface ModelUpdate {
   supports_image_generation?: boolean
   is_active?: boolean
   is_available?: boolean
+  config?: Record<string, any> | null
 }
 
 export interface ModelCapabilities {

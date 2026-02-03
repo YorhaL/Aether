@@ -9,7 +9,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 
 from src.core.logger import logger
@@ -61,12 +61,30 @@ class StatsAggregatorService:
         """计算指定业务日期的统计数据（不写入数据库）"""
         day_start, day_end = _get_business_day_range(date)
 
-        base_query = db.query(Usage).filter(
-            and_(Usage.created_at >= day_start, Usage.created_at < day_end)
+        error_cond = (Usage.status_code >= 400) | (Usage.error_message.isnot(None))
+        aggregated = (
+            db.query(
+                func.count(Usage.id).label("total_requests"),
+                func.sum(case((error_cond, 1), else_=0)).label("error_requests"),
+                func.sum(Usage.input_tokens).label("input_tokens"),
+                func.sum(Usage.output_tokens).label("output_tokens"),
+                func.sum(Usage.cache_creation_input_tokens).label("cache_creation_tokens"),
+                func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
+                func.sum(Usage.total_cost_usd).label("total_cost"),
+                func.sum(Usage.actual_total_cost_usd).label("actual_total_cost"),
+                func.sum(Usage.input_cost_usd).label("input_cost"),
+                func.sum(Usage.output_cost_usd).label("output_cost"),
+                func.sum(Usage.cache_creation_cost_usd).label("cache_creation_cost"),
+                func.sum(Usage.cache_read_cost_usd).label("cache_read_cost"),
+                func.avg(Usage.response_time_ms).label("avg_response_time"),
+                func.count(func.distinct(Usage.model)).label("unique_models"),
+                func.count(func.distinct(Usage.provider_name)).label("unique_providers"),
+            )
+            .filter(and_(Usage.created_at >= day_start, Usage.created_at < day_end))
+            .first()
         )
 
-        total_requests = base_query.count()
-
+        total_requests = int(getattr(aggregated, "total_requests", 0) or 0)
         if total_requests == 0:
             return {
                 "day_start": day_start,
@@ -89,27 +107,7 @@ class StatsAggregatorService:
                 "unique_providers": 0,
             }
 
-        error_requests = base_query.filter(
-            (Usage.status_code >= 400) | (Usage.error_message.isnot(None))
-        ).count()
-
-        aggregated = (
-            db.query(
-                func.sum(Usage.input_tokens).label("input_tokens"),
-                func.sum(Usage.output_tokens).label("output_tokens"),
-                func.sum(Usage.cache_creation_input_tokens).label("cache_creation_tokens"),
-                func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
-                func.sum(Usage.total_cost_usd).label("total_cost"),
-                func.sum(Usage.actual_total_cost_usd).label("actual_total_cost"),
-                func.sum(Usage.input_cost_usd).label("input_cost"),
-                func.sum(Usage.output_cost_usd).label("output_cost"),
-                func.sum(Usage.cache_creation_cost_usd).label("cache_creation_cost"),
-                func.sum(Usage.cache_read_cost_usd).label("cache_read_cost"),
-                func.avg(Usage.response_time_ms).label("avg_response_time"),
-            )
-            .filter(and_(Usage.created_at >= day_start, Usage.created_at < day_end))
-            .first()
-        )
+        error_requests = int(getattr(aggregated, "error_requests", 0) or 0)
 
         # Fallback 统计 (执行候选数 > 1 的请求数)
         fallback_subquery = (
@@ -135,42 +133,25 @@ class StatsAggregatorService:
             or 0
         )
 
-        unique_models = (
-            db.query(func.count(func.distinct(Usage.model)))
-            .filter(and_(Usage.created_at >= day_start, Usage.created_at < day_end))
-            .scalar()
-            or 0
-        )
-        unique_providers = (
-            db.query(func.count(func.distinct(Usage.provider_name)))
-            .filter(and_(Usage.created_at >= day_start, Usage.created_at < day_end))
-            .scalar()
-            or 0
-        )
-
         return {
             "day_start": day_start,
             "total_requests": total_requests,
             "success_requests": total_requests - error_requests,
             "error_requests": error_requests,
-            "input_tokens": int(aggregated.input_tokens or 0) if aggregated else 0,
-            "output_tokens": int(aggregated.output_tokens or 0) if aggregated else 0,
-            "cache_creation_tokens": (
-                int(aggregated.cache_creation_tokens or 0) if aggregated else 0
-            ),
-            "cache_read_tokens": int(aggregated.cache_read_tokens or 0) if aggregated else 0,
-            "total_cost": float(aggregated.total_cost or 0) if aggregated else 0.0,
-            "actual_total_cost": float(aggregated.actual_total_cost or 0) if aggregated else 0.0,
-            "input_cost": float(aggregated.input_cost or 0) if aggregated else 0.0,
-            "output_cost": float(aggregated.output_cost or 0) if aggregated else 0.0,
-            "cache_creation_cost": (
-                float(aggregated.cache_creation_cost or 0) if aggregated else 0.0
-            ),
-            "cache_read_cost": float(aggregated.cache_read_cost or 0) if aggregated else 0.0,
-            "avg_response_time_ms": float(aggregated.avg_response_time or 0) if aggregated else 0.0,
+            "input_tokens": int(getattr(aggregated, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(aggregated, "output_tokens", 0) or 0),
+            "cache_creation_tokens": (int(getattr(aggregated, "cache_creation_tokens", 0) or 0)),
+            "cache_read_tokens": int(getattr(aggregated, "cache_read_tokens", 0) or 0),
+            "total_cost": float(getattr(aggregated, "total_cost", 0) or 0.0),
+            "actual_total_cost": float(getattr(aggregated, "actual_total_cost", 0) or 0.0),
+            "input_cost": float(getattr(aggregated, "input_cost", 0) or 0.0),
+            "output_cost": float(getattr(aggregated, "output_cost", 0) or 0.0),
+            "cache_creation_cost": (float(getattr(aggregated, "cache_creation_cost", 0) or 0.0)),
+            "cache_read_cost": float(getattr(aggregated, "cache_read_cost", 0) or 0.0),
+            "avg_response_time_ms": float(getattr(aggregated, "avg_response_time", 0) or 0.0),
             "fallback_count": fallback_count,
-            "unique_models": unique_models,
-            "unique_providers": unique_providers,
+            "unique_models": int(getattr(aggregated, "unique_models", 0) or 0),
+            "unique_providers": int(getattr(aggregated, "unique_providers", 0) or 0),
         }
 
     @staticmethod
@@ -426,38 +407,11 @@ class StatsAggregatorService:
         else:
             stats = StatsUserDaily(id=str(uuid.uuid4()), user_id=user_id, date=day_start)
 
-        # 用户请求统计
-        base_query = db.query(Usage).filter(
-            and_(
-                Usage.user_id == user_id,
-                Usage.created_at >= day_start,
-                Usage.created_at < day_end,
-            )
-        )
-
-        total_requests = base_query.count()
-
-        if total_requests == 0:
-            stats.total_requests = 0
-            stats.success_requests = 0
-            stats.error_requests = 0
-            stats.input_tokens = 0
-            stats.output_tokens = 0
-            stats.cache_creation_tokens = 0
-            stats.cache_read_tokens = 0
-            stats.total_cost = 0.0
-
-            if not existing:
-                db.add(stats)
-            db.commit()
-            return stats
-
-        error_requests = base_query.filter(
-            (Usage.status_code >= 400) | (Usage.error_message.isnot(None))
-        ).count()
-
+        error_cond = (Usage.status_code >= 400) | (Usage.error_message.isnot(None))
         aggregated = (
             db.query(
+                func.count(Usage.id).label("total_requests"),
+                func.sum(case((error_cond, 1), else_=0)).label("error_requests"),
                 func.sum(Usage.input_tokens).label("input_tokens"),
                 func.sum(Usage.output_tokens).label("output_tokens"),
                 func.sum(Usage.cache_creation_input_tokens).label("cache_creation_tokens"),
@@ -474,14 +428,32 @@ class StatsAggregatorService:
             .first()
         )
 
+        total_requests = int(getattr(aggregated, "total_requests", 0) or 0)
+        if total_requests == 0:
+            stats.total_requests = 0
+            stats.success_requests = 0
+            stats.error_requests = 0
+            stats.input_tokens = 0
+            stats.output_tokens = 0
+            stats.cache_creation_tokens = 0
+            stats.cache_read_tokens = 0
+            stats.total_cost = 0.0
+
+            if not existing:
+                db.add(stats)
+            db.commit()
+            return stats
+
+        error_requests = int(getattr(aggregated, "error_requests", 0) or 0)
+
         stats.total_requests = total_requests
         stats.success_requests = total_requests - error_requests
         stats.error_requests = error_requests
-        stats.input_tokens = int(aggregated.input_tokens or 0)
-        stats.output_tokens = int(aggregated.output_tokens or 0)
-        stats.cache_creation_tokens = int(aggregated.cache_creation_tokens or 0)
-        stats.cache_read_tokens = int(aggregated.cache_read_tokens or 0)
-        stats.total_cost = float(aggregated.total_cost or 0)
+        stats.input_tokens = int(getattr(aggregated, "input_tokens", 0) or 0)
+        stats.output_tokens = int(getattr(aggregated, "output_tokens", 0) or 0)
+        stats.cache_creation_tokens = int(getattr(aggregated, "cache_creation_tokens", 0) or 0)
+        stats.cache_read_tokens = int(getattr(aggregated, "cache_read_tokens", 0) or 0)
+        stats.total_cost = float(getattr(aggregated, "total_cost", 0) or 0.0)
 
         if not existing:
             db.add(stats)
@@ -571,10 +543,26 @@ class StatsAggregatorService:
         # 转换为 UTC 用于查询
         today_utc = today_local.astimezone(timezone.utc)
 
-        base_query = db.query(Usage).filter(Usage.created_at >= today_utc)
+        error_cond = (Usage.status_code >= 400) | (Usage.error_message.isnot(None))
+        aggregated = (
+            db.query(
+                func.count(Usage.id).label("total_requests"),
+                func.sum(case((error_cond, 1), else_=0)).label("error_requests"),
+                func.sum(Usage.input_tokens).label("input_tokens"),
+                func.sum(Usage.output_tokens).label("output_tokens"),
+                func.sum(Usage.cache_creation_input_tokens).label("cache_creation_tokens"),
+                func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
+                func.sum(Usage.total_cost_usd).label("total_cost"),
+                func.sum(Usage.actual_total_cost_usd).label("actual_total_cost"),
+                func.avg(Usage.response_time_ms).label("avg_response_time"),
+                func.count(func.distinct(Usage.model)).label("unique_models"),
+                func.count(func.distinct(Usage.provider_name)).label("unique_providers"),
+            )
+            .filter(Usage.created_at >= today_utc)
+            .first()
+        )
 
-        total_requests = base_query.count()
-
+        total_requests = int(getattr(aggregated, "total_requests", 0) or 0)
         if total_requests == 0:
             return {
                 "total_requests": 0,
@@ -586,42 +574,33 @@ class StatsAggregatorService:
                 "cache_read_tokens": 0,
                 "total_cost": 0.0,
                 "actual_total_cost": 0.0,
+                "avg_response_time_ms": 0.0,
+                "unique_models": 0,
+                "unique_providers": 0,
             }
 
-        error_requests = base_query.filter(
-            (Usage.status_code >= 400) | (Usage.error_message.isnot(None))
-        ).count()
-
-        aggregated = (
-            db.query(
-                func.sum(Usage.input_tokens).label("input_tokens"),
-                func.sum(Usage.output_tokens).label("output_tokens"),
-                func.sum(Usage.cache_creation_input_tokens).label("cache_creation_tokens"),
-                func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
-                func.sum(Usage.total_cost_usd).label("total_cost"),
-                func.sum(Usage.actual_total_cost_usd).label("actual_total_cost"),
-            )
-            .filter(Usage.created_at >= today_utc)
-            .first()
-        )
+        error_requests = int(getattr(aggregated, "error_requests", 0) or 0)
 
         return {
             "total_requests": total_requests,
             "success_requests": total_requests - error_requests,
             "error_requests": error_requests,
-            "input_tokens": int(aggregated.input_tokens or 0),
-            "output_tokens": int(aggregated.output_tokens or 0),
-            "cache_creation_tokens": int(aggregated.cache_creation_tokens or 0),
-            "cache_read_tokens": int(aggregated.cache_read_tokens or 0),
-            "total_cost": float(aggregated.total_cost or 0),
-            "actual_total_cost": float(aggregated.actual_total_cost or 0),
+            "input_tokens": int(getattr(aggregated, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(aggregated, "output_tokens", 0) or 0),
+            "cache_creation_tokens": int(getattr(aggregated, "cache_creation_tokens", 0) or 0),
+            "cache_read_tokens": int(getattr(aggregated, "cache_read_tokens", 0) or 0),
+            "total_cost": float(getattr(aggregated, "total_cost", 0) or 0.0),
+            "actual_total_cost": float(getattr(aggregated, "actual_total_cost", 0) or 0.0),
+            "avg_response_time_ms": float(getattr(aggregated, "avg_response_time", 0) or 0.0),
+            "unique_models": int(getattr(aggregated, "unique_models", 0) or 0),
+            "unique_providers": int(getattr(aggregated, "unique_providers", 0) or 0),
         }
 
     @staticmethod
-    def get_combined_stats(db: Session) -> dict:
+    def get_combined_stats(db: Session, today_stats: dict | None = None) -> dict:
         """获取合并后的统计数据（预聚合 + 今日实时）"""
         summary = db.query(StatsSummary).first()
-        today_stats = StatsAggregatorService.get_today_realtime_stats(db)
+        today_stats = today_stats or StatsAggregatorService.get_today_realtime_stats(db)
 
         if not summary:
             # 如果没有预聚合数据，返回今日数据

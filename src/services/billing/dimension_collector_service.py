@@ -10,22 +10,38 @@ DimensionCollector 运行时维度采集
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from sqlalchemy.orm import Session
 
 from src.core.logger import logger
 from src.models.database import DimensionCollector
+from src.services.billing.cache import BillingCache
 from src.services.billing.formula_engine import (
     ExpressionEvaluationError,
     SafeExpressionEvaluator,
     UnsafeExpressionError,
     extract_variable_names,
 )
+from src.services.billing.presets import CORE_PRESET_PACK
 
 ValueType = Literal["float", "int", "string"]
+
+
+class CollectorLike(Protocol):
+    api_format: str
+    task_type: str
+    dimension_name: str
+    source_type: str
+    source_path: str | None
+    value_type: str
+    transform_expression: str | None
+    default_value: str | None
+    priority: int
+    is_enabled: bool
 
 
 def _normalize_api_format(api_format: str | None) -> str:
@@ -88,6 +104,23 @@ def _type_default(value_type: ValueType) -> Any:
     return "" if value_type == "string" else (0 if value_type == "int" else 0.0)
 
 
+_WXH_PATTERN = re.compile(r"^(\d+)x(\d+)$")
+
+
+def _normalize_resolution_key(raw: str) -> str:
+    """
+    Normalize resolution key:
+    - lowercase, remove spaces, × → x
+    - For WxH format, sort dimensions so smaller comes first (1080x720 → 720x1080)
+    """
+    k = (raw or "").strip().lower().replace(" ", "").replace("×", "x")
+    match = _WXH_PATTERN.match(k)
+    if match:
+        a, b = int(match.group(1)), int(match.group(2))
+        k = f"{a}x{b}" if a <= b else f"{b}x{a}"
+    return k
+
+
 @dataclass(frozen=True)
 class DimensionCollectInput:
     request: dict[str, Any] | None = None
@@ -105,13 +138,13 @@ class DimensionCollectorRuntime:
     def collect(
         self,
         *,
-        collectors: list[DimensionCollector],
+        collectors: list[CollectorLike],
         inp: DimensionCollectInput,
     ) -> dict[str, Any]:
         dims: dict[str, Any] = dict(inp.base_dimensions or {})
 
         # dimension_name -> collectors (priority desc)
-        grouped: dict[str, list[DimensionCollector]] = {}
+        grouped: dict[str, list[CollectorLike]] = {}
         for c in collectors:
             grouped.setdefault(c.dimension_name, []).append(c)
         for name in grouped:
@@ -144,7 +177,7 @@ class DimensionCollectorRuntime:
     def _resolve_dimension(
         self,
         dim_name: str,
-        collectors: list[DimensionCollector],
+        collectors: list[CollectorLike],
         dims: dict[str, Any],
         inp: DimensionCollectInput,
     ) -> Any:
@@ -207,7 +240,7 @@ class DimensionCollectorRuntime:
     def _resolve_computed_dimension(
         self,
         dim_name: str,
-        collectors: list[DimensionCollector],
+        collectors: list[CollectorLike],
         dims: dict[str, Any],
     ) -> Any:
         fallback_default: str | None = None
@@ -245,7 +278,7 @@ class DimensionCollectorRuntime:
 
     def _toposort_computed(
         self,
-        grouped: dict[str, list[DimensionCollector]],
+        grouped: dict[str, list[CollectorLike]],
         computed_only: set[str],
     ) -> list[str]:
         # 建图：dependency -> dim
@@ -300,7 +333,7 @@ class DimensionCollectorRuntime:
 
 
 class DimensionCollectorService:
-    """DB + runtime 的封装：读取 collectors 并执行采集。"""
+    """运行时读取 collectors 并执行采集（code-only）。"""
 
     def __init__(self, db: Session):
         self.db = db
@@ -311,14 +344,67 @@ class DimensionCollectorService:
         *,
         api_format: str | None,
         task_type: str | None,
-    ) -> list[DimensionCollector]:
+    ) -> list[CollectorLike]:
         api = _normalize_api_format(api_format)
         task = _normalize_task_type(task_type)
+        if not api or not task:
+            return []
+
+        # Code-defined collectors cache.
+        cache_key = f"code:{api}:{task}"
+        cached = BillingCache.get_collectors(cache_key)
+        if cached is not None:
+            return cached
+
+        built = self._list_builtin_collectors(api_format=api_format, task_type=task_type)
+        BillingCache.set_collectors(cache_key, built)
+        return built
+
+    def _list_builtin_collectors(
+        self,
+        *,
+        api_format: str | None,
+        task_type: str | None,
+    ) -> list[DimensionCollector]:
+        """
+        Built-in (code) collectors.
+
+        Developers ship a curated set of collectors in code (config-file mode).
+        """
+        api = _normalize_api_format(api_format)
+        task = _normalize_task_type(task_type)
+        if not api or not task:
+            return []
+
+        def _preset_query(api_keys: list[str], task_t: str) -> list[DimensionCollector]:
+            out: list[DimensionCollector] = []
+            allowed = {k for k in api_keys if k}
+            for p in CORE_PRESET_PACK.collectors:
+                if not p.is_enabled:
+                    continue
+                if _normalize_api_format(p.api_format) not in allowed:
+                    continue
+                if _normalize_task_type(p.task_type) != task_t:
+                    continue
+                out.append(
+                    DimensionCollector(
+                        api_format=_normalize_api_format(p.api_format),
+                        task_type=_normalize_task_type(p.task_type),
+                        dimension_name=p.dimension_name,
+                        source_type=p.source_type,
+                        source_path=p.source_path,
+                        value_type=p.value_type,
+                        transform_expression=p.transform_expression,
+                        default_value=p.default_value,
+                        priority=int(p.priority or 0),
+                        is_enabled=True,
+                    )
+                )
+            return out
+
         api_variants = list({api, api.lower()})
 
         if task == "video":
-            # VIDEO → base 回退：优先使用 family:video 专用 collector；
-            # 缺失的维度再回退到 family:chat。
             from src.core.api_format.signature import parse_signature_key
 
             base_api = api
@@ -330,24 +416,8 @@ class DimensionCollectorService:
                 base_api = api
             base_variants = list({base_api, base_api.lower()})
 
-            video_collectors = (
-                self.db.query(DimensionCollector)
-                .filter(
-                    DimensionCollector.api_format.in_(api_variants),
-                    DimensionCollector.task_type == "video",
-                    DimensionCollector.is_enabled == True,  # noqa: E712
-                )
-                .all()
-            )
-            base_collectors = (
-                self.db.query(DimensionCollector)
-                .filter(
-                    DimensionCollector.api_format.in_(base_variants),
-                    DimensionCollector.task_type == "video",
-                    DimensionCollector.is_enabled == True,  # noqa: E712
-                )
-                .all()
-            )
+            video_collectors = _preset_query(api_variants, "video")
+            base_collectors = _preset_query(base_variants, "video")
             video_dims: set[str] = {c.dimension_name for c in video_collectors}
             result: list[DimensionCollector] = list(video_collectors)
             for c in base_collectors:
@@ -356,25 +426,8 @@ class DimensionCollectorService:
             return result
 
         if task == "cli":
-            # CLI → chat：按维度回退（维度存在 cli collector 则用 cli，否则用 chat）
-            cli_collectors = (
-                self.db.query(DimensionCollector)
-                .filter(
-                    DimensionCollector.api_format.in_(api_variants),
-                    DimensionCollector.task_type == "cli",
-                    DimensionCollector.is_enabled == True,  # noqa: E712
-                )
-                .all()
-            )
-            chat_collectors = (
-                self.db.query(DimensionCollector)
-                .filter(
-                    DimensionCollector.api_format.in_(api_variants),
-                    DimensionCollector.task_type == "chat",
-                    DimensionCollector.is_enabled == True,  # noqa: E712
-                )
-                .all()
-            )
+            cli_collectors = _preset_query(api_variants, "cli")
+            chat_collectors = _preset_query(api_variants, "chat")
             cli_dims: set[str] = {c.dimension_name for c in cli_collectors}
             result: list[DimensionCollector] = list(cli_collectors)
             for c in chat_collectors:
@@ -382,15 +435,7 @@ class DimensionCollectorService:
                     result.append(c)
             return result
 
-        return (
-            self.db.query(DimensionCollector)
-            .filter(
-                DimensionCollector.api_format.in_(api_variants),
-                DimensionCollector.task_type == task,
-                DimensionCollector.is_enabled == True,  # noqa: E712
-            )
-            .all()
-        )
+        return _preset_query(api_variants, task)
 
     def collect_dimensions(
         self,
@@ -403,7 +448,7 @@ class DimensionCollectorService:
         base_dimensions: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         collectors = self.list_enabled_collectors(api_format=api_format, task_type=task_type)
-        return self._runtime.collect(
+        dims = self._runtime.collect(
             collectors=collectors,
             inp=DimensionCollectInput(
                 request=request,
@@ -412,3 +457,9 @@ class DimensionCollectorService:
                 base_dimensions=base_dimensions,
             ),
         )
+        # Post-process: normalize video_resolution_key (e.g., 1080x720 → 720x1080)
+        if "video_resolution_key" in dims:
+            raw = dims["video_resolution_key"]
+            if isinstance(raw, str) and raw:
+                dims["video_resolution_key"] = _normalize_resolution_key(raw)
+        return dims

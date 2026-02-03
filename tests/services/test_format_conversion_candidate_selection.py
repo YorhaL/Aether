@@ -54,8 +54,7 @@ async def test_build_candidates_allows_cross_format_when_endpoint_accepts_and_ov
         client_format="claude:chat",
         model_name="dummy-model",
         affinity_key=None,
-        global_conversion_enabled=False,  # DB 全局覆盖关闭
-        master_conversion_enabled=True,  # ENV 总闸开启（默认）
+        global_conversion_enabled=True,  # 全局开关开启
     )
 
     assert len(candidates) == 1
@@ -88,8 +87,7 @@ async def test_build_candidates_blocks_cross_format_when_master_switch_off() -> 
         client_format="claude:chat",
         model_name="dummy-model",
         affinity_key=None,
-        global_conversion_enabled=False,
-        master_conversion_enabled=False,
+        global_conversion_enabled=False,  # 全局开关关闭
     )
 
     assert candidates == []
@@ -118,8 +116,7 @@ async def test_build_candidates_includes_cross_format_when_enabled() -> None:
         client_format="claude:chat",
         model_name="dummy-model",
         affinity_key=None,
-        global_conversion_enabled=True,  # DB 全局覆盖开启：跳过端点检查
-        master_conversion_enabled=True,
+        global_conversion_enabled=True,  # 全局开关开启：跳过端点检查
     )
 
     assert len(candidates) == 1
@@ -157,8 +154,7 @@ async def test_exact_matches_rank_before_convertible() -> None:
         client_format="claude:chat",
         model_name="dummy-model",
         affinity_key=None,
-        global_conversion_enabled=False,
-        master_conversion_enabled=True,
+        global_conversion_enabled=True,  # 全局开关开启
     )
 
     assert len(candidates) == 2

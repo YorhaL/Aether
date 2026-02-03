@@ -1110,7 +1110,7 @@ class ListAvailableModelsAdapter(AuthenticatedApiAdapter):
         from sqlalchemy import or_
 
         from src.api.base.models_service import AccessRestrictions
-        from src.config.settings import config as app_config
+        from src.services.system.config import SystemConfigService
 
         db = context.db
         user = context.user
@@ -1118,8 +1118,8 @@ class ListAvailableModelsAdapter(AuthenticatedApiAdapter):
         # 使用 AccessRestrictions 类来处理限制（与 /v1/models 逻辑一致）
         restrictions = AccessRestrictions.from_api_key_and_user(api_key=None, user=user)
 
-        # 检查全局格式转换开关
-        global_conversion_enabled = app_config.format_conversion_enabled
+        # 检查全局格式转换开关（从数据库配置读取）
+        global_conversion_enabled = SystemConfigService.is_format_conversion_enabled(db)
 
         # 获取所有可用的 Provider ID（考虑格式转换）
         available_provider_ids = self._get_all_available_provider_ids(db, global_conversion_enabled)

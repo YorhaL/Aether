@@ -616,6 +616,9 @@ class ModelResponse(BaseModel):
     global_model_name: str | None = None
     global_model_display_name: str | None = None
 
+    # 有效配置（合并 Model 和 GlobalModel 的 config）
+    effective_config: dict | None = None
+
     model_config = ConfigDict(from_attributes=True)
 
 

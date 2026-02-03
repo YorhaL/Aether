@@ -81,7 +81,7 @@ def is_format_compatible(
     # 2. 格式不同 -> 需要检查格式转换开关
     # 如果总开关为 False，直接拒绝（禁用任何跨格式转换）
     if not effective_conversion_enabled:
-        return False, False, "格式转换已禁用（FORMAT_CONVERSION_ENABLED=false）"
+        return False, False, "格式转换已禁用（enable_format_conversion=false）"
 
     # 3. 如果全局或提供商开关为 ON，跳过端点配置检查
     if not skip_endpoint_check:

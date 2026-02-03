@@ -29,38 +29,38 @@ const providerExamples = [
   {
     name: 'OpenAI',
     url: 'https://api.openai.com',
-    format: 'OpenAI',
+    format: 'OpenAI Chat',
     note: '官方 API，需要国际信用卡或通过代理访问'
   },
   {
     name: 'Anthropic',
     url: 'https://api.anthropic.com',
-    format: 'Claude',
+    format: 'Claude Chat',
     note: '官方 Claude API'
   },
   {
     name: 'Google AI',
     url: 'https://generativelanguage.googleapis.com',
-    format: 'Gemini',
+    format: 'Gemini Chat',
     note: '官方 Gemini API'
   },
   {
     name: 'Azure OpenAI',
     url: 'https://{resource}.openai.azure.com',
-    format: 'OpenAI',
+    format: 'OpenAI Chat',
     note: '需要替换 {resource} 为你的资源名'
   },
   {
     name: 'OpenRouter',
     url: 'https://openrouter.ai/api',
-    format: 'OpenAI',
+    format: 'OpenAI Chat',
     note: '聚合多家供应商的 API 代理'
   },
   {
     name: '自托管 / 其他',
     url: 'https://your-api.com',
-    format: 'OpenAI',
-    note: '大多数 OpenAI 兼容服务选择 OpenAI 格式'
+    format: 'OpenAI Chat',
+    note: '大多数 OpenAI 兼容服务选择 OpenAI Chat 格式'
   }
 ]
 </script>

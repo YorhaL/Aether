@@ -160,24 +160,40 @@
                   <!-- 分隔线 -->
                   <Separator class="mb-4" />
 
-                  <!-- 统一使用阶梯计费展示方式 -->
-                  <!-- 单价信息行 -->
+                  <!-- ========== 1. 费用聚合计算 ========== -->
                   <div class="text-xs text-muted-foreground mb-3 flex items-center gap-2 flex-wrap">
                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground/70">{{ priceSourceLabel }}</span>
                     <span class="text-foreground">|</span>
-                    <span>总输入上下文: <span class="font-mono font-medium text-foreground">{{ formatNumber(totalInputContext) }}</span></span>
-                    <span class="text-muted-foreground/60">(输入 {{ formatNumber(detail.tokens?.input || detail.input_tokens || 0) }} + 缓存创建 {{ formatNumber(detail.cache_creation_input_tokens || 0) }} + 缓存读取 {{ formatNumber(detail.cache_read_input_tokens || 0) }})</span>
-                    <Badge
-                      v-if="displayTiers.length > 1"
-                      variant="outline"
-                      class="text-[10px] px-1.5 py-0 h-4"
-                    >
-                      命中第 {{ currentTierIndex + 1 }} 阶
-                    </Badge>
+                    <span class="font-mono text-foreground">
+                      总费用 = Token费用 <span class="font-medium">${{ tokenCostTotal.toFixed(6) }}</span>
+                      <template v-if="perRequestCost > 0">
+                        + 按次费用 <span class="font-medium">${{ perRequestCost.toFixed(6) }}</span>
+                      </template>
+                      <template v-if="videoCostTotal > 0">
+                        + {{ detail.video_billing?.task_type === 'image' ? '图像' : detail.video_billing?.task_type === 'audio' ? '音频' : '视频' }}费用 <span class="font-medium">${{ videoCostTotal.toFixed(6) }}</span>
+                      </template>
+                    </span>
                   </div>
 
-                  <!-- 统一使用阶梯展示格式 -->
-                  <div class="space-y-2">
+                  <!-- ========== 2. Token分阶段成本 ========== -->
+                  <div
+                    v-if="hasTokenCost"
+                    class="space-y-2 mb-3"
+                  >
+                    <!-- 阶梯标题 -->
+                    <div class="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
+                      <span class="font-medium text-foreground">Token 计费</span>
+                      <span class="text-muted-foreground/60">(输入 {{ formatNumber(detail.tokens?.input || detail.input_tokens || 0) }} + 缓存创建 {{ formatNumber(detail.cache_creation_input_tokens || 0) }} + 缓存读取 {{ formatNumber(detail.cache_read_input_tokens || 0) }})</span>
+                      <Badge
+                        v-if="displayTiers.length > 1"
+                        variant="outline"
+                        class="text-[10px] px-1.5 py-0 h-4"
+                      >
+                        命中第 {{ currentTierIndex + 1 }} 阶
+                      </Badge>
+                    </div>
+
+                    <!-- 阶梯展示 -->
                     <div
                       v-for="(tier, index) in displayTiers"
                       :key="index"
@@ -238,7 +254,7 @@
                             <span class="text-xs font-mono">${{ (detail.cost?.output || detail.output_cost || 0).toFixed(6) }}</span>
                           </div>
                         </div>
-                        <!-- 缓存创建 缓存读取（始终显示） -->
+                        <!-- 缓存创建 缓存读取 -->
                         <div class="flex items-center">
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">缓存创建</span>
@@ -255,27 +271,88 @@
                             <span class="text-xs font-mono">${{ (detail.cache_read_cost || 0).toFixed(6) }}</span>
                           </div>
                         </div>
-                        <!-- 按次计费 -->
-                        <div
-                          v-if="detail.request_cost"
-                          class="flex items-center"
-                        >
-                          <div class="flex items-center flex-1">
-                            <span class="text-xs text-muted-foreground w-[56px]">按次计费</span>
-                            <span class="text-sm font-semibold font-mono flex-1 text-center" />
-                            <span class="text-xs font-mono">${{ detail.request_cost.toFixed(6) }}</span>
-                          </div>
-                          <Separator
-                            orientation="vertical"
-                            class="h-4 mx-4 invisible"
-                          />
-                          <div class="flex items-center flex-1 invisible">
-                            <span class="text-xs text-muted-foreground w-[56px]">占位</span>
-                            <span class="text-sm font-semibold font-mono flex-1 text-center">0</span>
-                            <span class="text-xs font-mono">$0.000000</span>
-                          </div>
-                        </div>
                       </template>
+                    </div>
+                  </div>
+
+                  <!-- ========== 3. 按次计费（独立隔离） ========== -->
+                  <div
+                    v-if="perRequestCost > 0 && !detail.video_billing"
+                    class="rounded-lg p-3 bg-amber-500/5 border border-amber-500/30 mb-3"
+                  >
+                    <div class="flex items-center justify-between text-xs mb-2">
+                      <span class="font-medium text-amber-600 dark:text-amber-400">按次计费</span>
+                      <span
+                        v-if="detail.price_per_request"
+                        class="text-muted-foreground"
+                      >
+                        单价 ${{ detail.price_per_request.toFixed(6) }}/次
+                      </span>
+                    </div>
+                    <div class="flex items-center">
+                      <div class="flex items-center flex-1">
+                        <span class="text-xs text-muted-foreground w-[56px]">请求次数</span>
+                        <span class="text-sm font-semibold font-mono flex-1 text-center">1</span>
+                        <span class="text-xs font-mono font-medium">${{ perRequestCost.toFixed(6) }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- ========== 4. 视频/图像/音频计费（独立隔离，与Token计费风格一致） ========== -->
+                  <div
+                    v-if="detail.video_billing"
+                    class="rounded-lg p-3 space-y-2 bg-primary/5 border border-primary/30"
+                  >
+                    <!-- 标题行（与阶梯标题行风格一致） -->
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2 text-xs">
+                      <div class="flex items-center gap-2">
+                        <span class="font-medium text-primary">
+                          {{ getTaskTypeLabel(detail.video_billing.task_type) }}
+                        </span>
+                        <span
+                          v-if="detail.video_billing.resolution"
+                          class="text-muted-foreground"
+                        >
+                          {{ detail.video_billing.resolution }}
+                        </span>
+                      </div>
+                      <!-- 费用计算公式 -->
+                      <div class="text-muted-foreground flex items-center gap-2 flex-wrap">
+                        <span
+                          v-if="detail.video_billing.duration_seconds && detail.video_billing.video_price_per_second"
+                          class="font-mono"
+                        >
+                          {{ detail.video_billing.duration_seconds.toFixed(1) }}s × ${{ detail.video_billing.video_price_per_second.toFixed(4) }}/s = ${{ videoCostTotal.toFixed(6) }}
+                        </span>
+                        <span
+                          v-else-if="detail.video_billing.video_price_per_second"
+                          class="font-mono"
+                        >
+                          ${{ detail.video_billing.video_price_per_second.toFixed(4) }}/秒
+                        </span>
+                      </div>
+                    </div>
+
+                    <!-- 费用详情（与Token详情行风格一致） -->
+                    <div class="flex items-center">
+                      <div class="flex items-center flex-1">
+                        <span class="text-xs text-muted-foreground w-[56px]">
+                          {{ detail.video_billing.task_type === 'video' ? '时长' : detail.video_billing.task_type === 'audio' ? '时长' : '数量' }}
+                        </span>
+                        <span class="text-sm font-semibold font-mono flex-1 text-center">
+                          {{ detail.video_billing.duration_seconds ? formatDuration(detail.video_billing.duration_seconds) : '1' }}
+                        </span>
+                        <span class="text-xs font-mono">${{ videoCostTotal.toFixed(6) }}</span>
+                      </div>
+                      <Separator
+                        orientation="vertical"
+                        class="h-4 mx-4 invisible"
+                      />
+                      <div class="flex items-center flex-1 invisible">
+                        <span class="text-xs text-muted-foreground w-[56px]">占位</span>
+                        <span class="text-sm font-semibold font-mono flex-1 text-center">0</span>
+                        <span class="text-xs font-mono">$0.000000</span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -698,6 +775,43 @@ const totalInputContext = computed(() => {
   return input + cacheCreation + cacheRead
 })
 
+// Token 费用总计
+const tokenCostTotal = computed(() => {
+  if (!detail.value) return 0
+  const inputCost = detail.value.cost?.input || detail.value.input_cost || 0
+  const outputCost = detail.value.cost?.output || detail.value.output_cost || 0
+  const cacheCreationCost = detail.value.cache_creation_cost || 0
+  const cacheReadCost = detail.value.cache_read_cost || 0
+  return inputCost + outputCost + cacheCreationCost + cacheReadCost
+})
+
+// 按次计费费用（非视频任务时）
+const perRequestCost = computed(() => {
+  if (!detail.value) return 0
+  // 视频任务的 request_cost 实际上是视频费用，不算按次
+  if (detail.value.video_billing) return 0
+  return detail.value.request_cost || 0
+})
+
+// 视频/图像/音频费用
+const videoCostTotal = computed(() => {
+  if (!detail.value?.video_billing) return 0
+  return detail.value.video_billing.video_cost
+    || detail.value.video_billing.cost
+    || detail.value.request_cost
+    || 0
+})
+
+// 是否有 Token 费用（用于决定是否显示 Token 计费区块）
+const hasTokenCost = computed(() => {
+  if (!detail.value) return false
+  const inputTokens = detail.value.tokens?.input || detail.value.input_tokens || 0
+  const outputTokens = detail.value.tokens?.output || detail.value.output_tokens || 0
+  const cacheCreation = detail.value.cache_creation_input_tokens || 0
+  const cacheRead = detail.value.cache_read_input_tokens || 0
+  return (inputTokens + outputTokens + cacheCreation + cacheRead) > 0 || tokenCostTotal.value > 0
+})
+
 const tabs = [
   { name: 'request-headers', label: '请求头' },
   { name: 'request-body', label: '请求体' },
@@ -815,6 +929,35 @@ function formatDateTime(dateStr: string | null | undefined): string {
     minute: '2-digit',
     second: '2-digit'
   })
+}
+
+// 格式化视频/音频时长
+function formatDuration(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`
+  }
+  const mins = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  if (mins < 60) {
+    return `${mins}m ${secs.toFixed(0)}s`
+  }
+  const hours = Math.floor(mins / 60)
+  const remainMins = mins % 60
+  return `${hours}h ${remainMins}m`
+}
+
+// 获取任务类型标签
+function getTaskTypeLabel(taskType: string): string {
+  switch (taskType) {
+    case 'video':
+      return '视频生成'
+    case 'image':
+      return '图像生成'
+    case 'audio':
+      return '音频生成'
+    default:
+      return taskType
+  }
 }
 
 function formatApiFormat(format: string | null | undefined): string {

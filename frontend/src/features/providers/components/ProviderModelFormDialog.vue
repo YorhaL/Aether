@@ -2,7 +2,7 @@
   <Dialog
     :model-value="open"
     :title="isEditing ? '编辑模型配置' : '添加模型'"
-    :description="isEditing ? '修改模型价格和能力配置' : '为此 Provider 添加模型实现'"
+    :description="isEditing ? '修改模型价格配置' : '为此 Provider 添加模型实现'"
     :icon="isEditing ? SquarePen : Layers"
     size="xl"
     @update:model-value="handleClose"
@@ -86,67 +86,97 @@
           />
           <span class="text-xs text-muted-foreground">每次请求固定费用，留空使用全局模型默认值</span>
         </div>
-      </div>
 
-      <!-- 能力配置 -->
-      <div class="space-y-4">
-        <h4 class="font-semibold text-sm border-b pb-2">
-          能力配置
-        </h4>
+        <!-- 视频计费（可选覆盖） -->
+        <div class="pt-3 border-t space-y-2">
+          <div class="text-sm font-medium">视频计费（可选覆盖）</div>
 
-        <div class="grid grid-cols-2 gap-3">
-          <label class="flex items-center gap-2 p-3 rounded-lg border cursor-pointer hover:bg-muted/50">
-            <input
-              v-model="form.supports_streaming"
-              type="checkbox"
-              :indeterminate="form.supports_streaming === undefined"
-              class="rounded"
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-7 text-xs"
+              @click="() => { fillVideoResolutionPricePreset('common'); configTouched = true }"
             >
-            <Zap class="w-4 h-4 text-muted-foreground shrink-0" />
-            <span class="text-sm font-medium">流式输出</span>
-          </label>
-          <label class="flex items-center gap-2 p-3 rounded-lg border cursor-pointer hover:bg-muted/50">
-            <input
-              v-model="form.supports_image_generation"
-              type="checkbox"
-              :indeterminate="form.supports_image_generation === undefined"
-              class="rounded"
+              通用
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-7 text-xs"
+              @click="() => { fillVideoResolutionPricePreset('sora'); configTouched = true }"
             >
-            <Image class="w-4 h-4 text-muted-foreground shrink-0" />
-            <span class="text-sm font-medium">图像生成</span>
-          </label>
-          <label class="flex items-center gap-2 p-3 rounded-lg border cursor-pointer hover:bg-muted/50">
-            <input
-              v-model="form.supports_vision"
-              type="checkbox"
-              :indeterminate="form.supports_vision === undefined"
-              class="rounded"
+              Sora
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-7 text-xs"
+              @click="() => { fillVideoResolutionPricePreset('veo'); configTouched = true }"
             >
-            <Eye class="w-4 h-4 text-muted-foreground shrink-0" />
-            <span class="text-sm font-medium">视觉理解</span>
-          </label>
-          <label class="flex items-center gap-2 p-3 rounded-lg border cursor-pointer hover:bg-muted/50">
-            <input
-              v-model="form.supports_function_calling"
-              type="checkbox"
-              :indeterminate="form.supports_function_calling === undefined"
-              class="rounded"
+              Veo
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-7 text-xs"
+              @click="() => { addVideoResolutionPriceRow(); configTouched = true }"
             >
-            <Wrench class="w-4 h-4 text-muted-foreground shrink-0" />
-            <span class="text-sm font-medium">工具调用</span>
-          </label>
-          <label class="flex items-center gap-2 p-3 rounded-lg border cursor-pointer hover:bg-muted/50">
-            <input
-              v-model="form.supports_extended_thinking"
-              type="checkbox"
-              :indeterminate="form.supports_extended_thinking === undefined"
-              class="rounded"
-            >
-            <Brain class="w-4 h-4 text-muted-foreground shrink-0" />
-            <span class="text-sm font-medium">深度思考</span>
-          </label>
+              <Plus class="w-3.5 h-3.5 mr-0.5" />
+              自定义
+            </Button>
+          </div>
+
+          <div
+            v-if="videoResolutionPrices.length > 0"
+            class="rounded-lg border border-border overflow-hidden"
+          >
+            <div class="grid grid-cols-[1fr_1fr_32px] gap-0 text-xs text-muted-foreground bg-muted/50 px-3 py-1.5 border-b border-border">
+              <span>分辨率</span>
+              <span>单价（$/秒）</span>
+              <span></span>
+            </div>
+            <div class="divide-y divide-border">
+              <div
+                v-for="(row, idx) in videoResolutionPrices"
+                :key="idx"
+                class="grid grid-cols-[1fr_1fr_32px] gap-2 items-center px-3 py-1.5"
+              >
+                <Input
+                  v-model="row.resolution"
+                  class="h-7 text-sm"
+                  placeholder="如 720p"
+                  @update:model-value="() => { configTouched = true }"
+                />
+                <Input
+                  :model-value="row.price_per_second ?? ''"
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  class="h-7 text-sm"
+                  placeholder="0"
+                  @update:model-value="(v) => { row.price_per_second = parseNumberInput(v, { allowFloat: true }); configTouched = true }"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-7"
+                  title="删除"
+                  @click="() => { removeVideoResolutionPriceRow(idx); configTouched = true }"
+                >
+                  <Trash2 class="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
+
     </form>
 
     <template #footer>
@@ -172,7 +202,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { Eye, Wrench, Brain, Zap, Loader2, Image, Layers, SquarePen } from 'lucide-vue-next'
+import { Loader2, Layers, SquarePen, Plus, Trash2 } from 'lucide-vue-next'
 import {
   Dialog,
   Button,
@@ -185,7 +215,7 @@ import {
   SelectItem,
 } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
-import { parseNumberInput } from '@/utils/form'
+import { parseNumberInput, sortResolutionEntries } from '@/utils/form'
 import { createModel, updateModel, getProviderModels } from '@/api/endpoints/models'
 import { listGlobalModels, type GlobalModelResponse } from '@/api/global-models'
 import TieredPricingEditor from '@/features/models/components/TieredPricingEditor.vue'
@@ -240,9 +270,36 @@ const tieredPricingModified = ref(false)
 // 保存原始配置用于比较
 const originalTieredPricing = ref<string>('')
 
+type VideoResolutionPriceRow = { resolution: string; price_per_second: number | undefined }
+
+const configTouched = ref(false)
+const videoResolutionPrices = ref<VideoResolutionPriceRow[]>([])
+
+const VIDEO_RESOLUTION_PRICE_PRESETS: Record<
+  'common' | 'sora' | 'veo',
+  VideoResolutionPriceRow[]
+> = {
+  common: [
+    { resolution: '480p', price_per_second: 0 },
+    { resolution: '720p', price_per_second: 0 },
+    { resolution: '1080p', price_per_second: 0 },
+    { resolution: '4k', price_per_second: 0 },
+  ],
+  sora: [
+    { resolution: '720x1080', price_per_second: 0 },
+    { resolution: '1024x1792', price_per_second: 0 },
+  ],
+  veo: [
+    { resolution: '720p', price_per_second: 0 },
+    { resolution: '1080p', price_per_second: 0 },
+    { resolution: '4k', price_per_second: 0 },
+  ],
+}
+
 const form = ref({
   global_model_id: '',
   price_per_request: undefined as number | undefined,
+  config: {} as Record<string, any>,
   // 能力配置
   supports_vision: undefined as boolean | undefined,
   supports_function_calling: undefined as boolean | undefined,
@@ -258,9 +315,13 @@ watch(() => props.open, async (newOpen) => {
     resetForm()
     if (props.editingModel) {
       // 编辑模式：填充表单
+      // 使用有效配置（合并全局模型的默认值）供用户查看和编辑
+      const effectiveConfig = props.editingModel.effective_config || props.editingModel.config || {}
       form.value = {
         global_model_id: props.editingModel.global_model_id || '',
-        price_per_request: props.editingModel.price_per_request ?? undefined,
+        // 显示有效的按次计费价格（继承自全局模型）
+        price_per_request: props.editingModel.effective_price_per_request ?? props.editingModel.price_per_request ?? undefined,
+        config: effectiveConfig ? JSON.parse(JSON.stringify(effectiveConfig)) : {},
         supports_vision: props.editingModel.supports_vision ?? undefined,
         supports_function_calling: props.editingModel.supports_function_calling ?? undefined,
         supports_streaming: props.editingModel.supports_streaming ?? undefined,
@@ -268,6 +329,8 @@ watch(() => props.open, async (newOpen) => {
         supports_image_generation: props.editingModel.supports_image_generation ?? undefined,
         is_active: props.editingModel.is_active
       }
+      // 从有效配置中加载视频费用
+      loadVideoPricingFromConfig(effectiveConfig)
       // 加载阶梯计费配置：优先使用 Provider 自定义配置，否则使用有效配置（继承自全局模型）
       const pricing = props.editingModel.tiered_pricing || props.editingModel.effective_tiered_pricing
       if (pricing) {
@@ -314,6 +377,7 @@ function resetForm() {
   form.value = {
     global_model_id: '',
     price_per_request: undefined,
+    config: {},
     supports_vision: undefined,
     supports_function_calling: undefined,
     supports_streaming: undefined,
@@ -321,10 +385,147 @@ function resetForm() {
     supports_image_generation: undefined,
     is_active: true
   }
+  configTouched.value = false
+  videoResolutionPrices.value = []
   tieredPricing.value = null
   tieredPricingModified.value = false
   originalTieredPricing.value = ''
   availableGlobalModels.value = []
+}
+
+function getNested(obj: any, path: string): any {
+  if (!obj || typeof obj !== 'object') return undefined
+  const parts = path.split('.').filter(Boolean)
+  let cur: any = obj
+  for (const p of parts) {
+    if (!cur || typeof cur !== 'object') return undefined
+    cur = cur[p]
+  }
+  return cur
+}
+
+function setNested(obj: any, path: string, value: any) {
+  if (!obj || typeof obj !== 'object') return
+  const parts = path.split('.').filter(Boolean)
+  if (parts.length === 0) return
+  let cur: any = obj
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i]
+    if (!cur[p] || typeof cur[p] !== 'object') {
+      cur[p] = {}
+    }
+    cur = cur[p]
+  }
+  cur[parts[parts.length - 1]] = value
+}
+
+function deleteNested(obj: any, path: string) {
+  if (!obj || typeof obj !== 'object') return
+  const parts = path.split('.').filter(Boolean)
+  if (parts.length === 0) return
+  let cur: any = obj
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i]
+    if (!cur[p] || typeof cur[p] !== 'object') return
+    cur = cur[p]
+  }
+  delete cur[parts[parts.length - 1]]
+}
+
+function pruneEmptyBillingConfig(cfg: Record<string, any>) {
+  const billing = cfg.billing
+  if (!billing || typeof billing !== 'object') return
+  const video = billing.video
+  if (video && typeof video === 'object' && Object.keys(video).length === 0) {
+    delete billing.video
+  }
+  if (Object.keys(billing).length === 0) {
+    delete cfg.billing
+  }
+}
+
+/**
+ * Normalize resolution key:
+ * - lowercase, remove spaces, × → x
+ * - For WxH format, sort dimensions so smaller comes first (720x1080 = 1080x720)
+ */
+function normalizeResolutionKey(raw: string): string {
+  let k = (raw || '').trim().toLowerCase().replace(/\s+/g, '').replace(/×/g, 'x')
+  // Check if it's WxH format (e.g., 1080x720)
+  const match = k.match(/^(\d+)x(\d+)$/)
+  if (match) {
+    const a = parseInt(match[1], 10)
+    const b = parseInt(match[2], 10)
+    // Sort: smaller dimension first
+    k = a <= b ? `${a}x${b}` : `${b}x${a}`
+  }
+  return k
+}
+
+function loadVideoPricingFromConfig(cfg: Record<string, any>) {
+  const raw = getNested(cfg, 'billing.video.price_per_second_by_resolution')
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    // 按分辨率从低到高排序
+    const sortedEntries = sortResolutionEntries(Object.entries(raw))
+    videoResolutionPrices.value = sortedEntries.map(([k, v]) => ({
+      resolution: String(k),
+      price_per_second: typeof v === 'number' ? v : undefined,
+    }))
+  } else {
+    videoResolutionPrices.value = []
+  }
+}
+
+function applyVideoPricingToConfig(cfg: Record<string, any>) {
+  // Clean legacy keys
+  deleteNested(cfg, 'billing.video.price_per_second')
+  deleteNested(cfg, 'billing.video.resolution_multipliers')
+
+  // resolution/size prices (normalized: 1080x720 → 720x1080)
+  const map: Record<string, number> = {}
+  for (const row of videoResolutionPrices.value) {
+    const k = normalizeResolutionKey(row.resolution || '')
+    const v = row.price_per_second
+    if (!k) continue
+    if (typeof v !== 'number' || Number.isNaN(v)) continue
+    map[k] = v
+  }
+  if (Object.keys(map).length > 0) {
+    setNested(cfg, 'billing.video.price_per_second_by_resolution', map)
+  } else {
+    deleteNested(cfg, 'billing.video.price_per_second_by_resolution')
+  }
+  pruneEmptyBillingConfig(cfg)
+}
+
+function addVideoResolutionPriceRow() {
+  videoResolutionPrices.value.push({ resolution: '', price_per_second: undefined })
+}
+
+function removeVideoResolutionPriceRow(idx: number) {
+  videoResolutionPrices.value.splice(idx, 1)
+}
+
+function fillVideoResolutionPricePreset(preset: 'common' | 'sora' | 'veo') {
+  videoResolutionPrices.value = VIDEO_RESOLUTION_PRICE_PRESETS[preset].map(r => ({
+    resolution: r.resolution,
+    price_per_second: r.price_per_second,
+  }))
+}
+
+function copyVideoPricingFromSelectedGlobal() {
+  const gm = availableGlobalModels.value.find(m => m.id === form.value.global_model_id)
+  const cfg = gm?.config || {}
+  if (cfg && typeof cfg === 'object') {
+    const raw = getNested(cfg, 'billing.video.price_per_second_by_resolution')
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      videoResolutionPrices.value = Object.entries(raw).map(([k, v]) => ({
+        resolution: String(k),
+        price_per_second: typeof v === 'number' ? v : undefined,
+      }))
+    }
+  }
+  configTouched.value = true
 }
 
 // 加载可用的全局模型（排除已添加的）
@@ -370,12 +571,19 @@ async function handleSubmit() {
     const finalTiers = tieredPricingEditorRef.value?.getFinalTiers()
     const finalTieredPricing = finalTiers ? { tiers: finalTiers } : tieredPricing.value
 
+    // Apply billing (video) pricing into config.
+    applyVideoPricingToConfig(form.value.config)
+    const cleanConfig = form.value.config && Object.keys(form.value.config).length > 0
+      ? form.value.config
+      : undefined
+
     if (isEditing.value && props.editingModel) {
       // 编辑模式
       // 注意：使用 null 而不是 undefined 来显式清空字段（undefined 会被 JSON 序列化忽略）
       await updateModel(props.providerId, props.editingModel.id, {
         tiered_pricing: finalTieredPricing,
         price_per_request: form.value.price_per_request ?? null,
+        config: cleanConfig || null,
         supports_vision: form.value.supports_vision,
         supports_function_calling: form.value.supports_function_calling,
         supports_streaming: form.value.supports_streaming,
@@ -393,6 +601,7 @@ async function handleSubmit() {
         // 只有修改了才提交，否则传 undefined 让后端继承 GlobalModel 配置
         tiered_pricing: tieredPricingModified.value ? finalTieredPricing : undefined,
         price_per_request: form.value.price_per_request,
+        config: configTouched.value ? cleanConfig : undefined,
         supports_vision: form.value.supports_vision,
         supports_function_calling: form.value.supports_function_calling,
         supports_streaming: form.value.supports_streaming,

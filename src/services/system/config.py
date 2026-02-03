@@ -14,9 +14,12 @@ from sqlalchemy.orm import Session
 from src.core.logger import logger
 from src.models.database import Provider, SystemConfig
 
+REQUEST_RECORD_LEVEL_KEY = "request_record_level"
+_LEGACY_REQUEST_LOG_LEVEL_KEY = "request_log_level"
 
-class LogLevel(str, Enum):
-    """日志记录级别"""
+
+class RequestRecordLevel(str, Enum):
+    """请求记录级别（控制请求/响应详情入库）"""
 
     BASIC = "basic"  # 仅记录基本信息（tokens、成本等）
     HEADERS = "headers"  # 记录基本信息+请求/响应头（敏感信息会脱敏）
@@ -71,9 +74,9 @@ class SystemConfigService:
 
     # 默认配置
     DEFAULT_CONFIGS = {
-        "request_log_level": {
-            "value": LogLevel.BASIC.value,
-            "description": "请求记录级别：basic(基本信息), headers(含请求头), full(完整请求响应)",
+        REQUEST_RECORD_LEVEL_KEY: {
+            "value": RequestRecordLevel.BASIC.value,
+            "description": "请求记录级别：basic(基本信息), headers(含请求/响应头), full(完整请求/响应)",
         },
         "max_request_body_size": {
             "value": 5242880,  # 5MB
@@ -136,10 +139,14 @@ class SystemConfigService:
             "value": [],
             "description": "邮箱后缀列表，配合 email_suffix_mode 使用",
         },
-        # 格式转换开关
+        # 格式转换配置
         "enable_format_conversion": {
+            "value": True,
+            "description": "格式转换总开关：开启时允许跨格式转换；关闭时禁止任何跨格式转换",
+        },
+        "keep_priority_on_conversion": {
             "value": False,
-            "description": "全局格式转换开关：开启时强制允许所有提供商的格式转换；关闭时由各提供商自行决定",
+            "description": "格式转换时保持优先级：开启时需要转换的候选保持原优先级；关闭时降级到不需要转换的候选之后",
         },
         "audit_log_retention_days": {
             "value": 30,
@@ -183,6 +190,17 @@ class SystemConfigService:
     @classmethod
     def get_config(cls, db: Session, key: str, default: Any | None = None) -> Any | None:
         """获取系统配置值（带进程内缓存）"""
+        # Backward-compatible alias: request_log_level -> request_record_level
+        if key in {REQUEST_RECORD_LEVEL_KEY, _LEGACY_REQUEST_LOG_LEVEL_KEY}:
+            value = cls._get_request_record_level_raw(db)
+            if value is not None:
+                return value
+            if REQUEST_RECORD_LEVEL_KEY in cls.DEFAULT_CONFIGS:
+                value = cls.DEFAULT_CONFIGS[REQUEST_RECORD_LEVEL_KEY]["value"]
+                _set_cached_config(REQUEST_RECORD_LEVEL_KEY, value)
+                return value
+            return default
+
         # 1. 检查进程内缓存
         hit, cached_value = _get_cached_config(key)
         if hit:
@@ -236,6 +254,44 @@ class SystemConfigService:
         db: Session, key: str, value: Any, description: str | None = None
     ) -> SystemConfig:
         """设置系统配置值"""
+        # Backward-compatible alias: request_log_level -> request_record_level
+        if key in {REQUEST_RECORD_LEVEL_KEY, _LEGACY_REQUEST_LOG_LEVEL_KEY}:
+            config = (
+                db.query(SystemConfig).filter(SystemConfig.key == REQUEST_RECORD_LEVEL_KEY).first()
+            )
+            legacy = (
+                db.query(SystemConfig)
+                .filter(SystemConfig.key == _LEGACY_REQUEST_LOG_LEVEL_KEY)
+                .first()
+            )
+
+            if config:
+                config.value = value
+                if description:
+                    config.description = description
+                # 如果同时存在旧 key，删除它避免混乱
+                if legacy:
+                    db.delete(legacy)
+            elif legacy:
+                # 原地迁移旧 key -> 新 key
+                legacy.key = REQUEST_RECORD_LEVEL_KEY
+                legacy.value = value
+                if description:
+                    legacy.description = description
+                config = legacy
+            else:
+                config = SystemConfig(
+                    key=REQUEST_RECORD_LEVEL_KEY, value=value, description=description
+                )
+                db.add(config)
+
+            db.commit()
+            db.refresh(config)
+
+            invalidate_config_cache(REQUEST_RECORD_LEVEL_KEY)
+            invalidate_config_cache(_LEGACY_REQUEST_LOG_LEVEL_KEY)
+            return config
+
         config = db.query(SystemConfig).filter(SystemConfig.key == key).first()
 
         if config:
@@ -289,10 +345,20 @@ class SystemConfigService:
     def get_all_configs(cls, db: Session) -> list:
         """获取所有系统配置"""
         configs = db.query(SystemConfig).all()
+        by_key = {c.key: c for c in configs}
         result = []
         for config in configs:
+            # Hide legacy key in list; present as canonical key instead.
+            if config.key == _LEGACY_REQUEST_LOG_LEVEL_KEY:
+                if REQUEST_RECORD_LEVEL_KEY in by_key:
+                    continue
+                # Expose as canonical key name
+                config_key = REQUEST_RECORD_LEVEL_KEY
+            else:
+                config_key = config.key
+
             item = {
-                "key": config.key,
+                "key": config_key,
                 "description": config.description,
                 "updated_at": config.updated_at.isoformat(),
             }
@@ -308,6 +374,24 @@ class SystemConfigService:
     @classmethod
     def delete_config(cls, db: Session, key: str) -> bool:
         """删除系统配置"""
+        # Backward-compatible alias: request_log_level -> request_record_level
+        if key in {REQUEST_RECORD_LEVEL_KEY, _LEGACY_REQUEST_LOG_LEVEL_KEY}:
+            configs = (
+                db.query(SystemConfig)
+                .filter(
+                    SystemConfig.key.in_([REQUEST_RECORD_LEVEL_KEY, _LEGACY_REQUEST_LOG_LEVEL_KEY])
+                )
+                .all()
+            )
+            if not configs:
+                return False
+            for c in configs:
+                db.delete(c)
+            db.commit()
+            invalidate_config_cache(REQUEST_RECORD_LEVEL_KEY)
+            invalidate_config_cache(_LEGACY_REQUEST_LOG_LEVEL_KEY)
+            return True
+
         config = db.query(SystemConfig).filter(SystemConfig.key == key).first()
         if config:
             db.delete(config)
@@ -333,24 +417,56 @@ class SystemConfigService:
         logger.info("初始化默认系统配置完成")
 
     @classmethod
-    def get_log_level(cls, db: Session) -> LogLevel:
-        """获取日志记录级别"""
-        level = cls.get_config(db, "request_log_level", LogLevel.BASIC.value)
+    def _get_request_record_level_raw(cls, db: Session) -> Any | None:
+        """Raw value from DB/cache for request record level (supports legacy key)."""
+        hit, cached_value = _get_cached_config(REQUEST_RECORD_LEVEL_KEY)
+        if hit:
+            return cached_value
+
+        config = db.query(SystemConfig).filter(SystemConfig.key == REQUEST_RECORD_LEVEL_KEY).first()
+        if config:
+            _set_cached_config(REQUEST_RECORD_LEVEL_KEY, config.value)
+            return config.value
+
+        hit, cached_value = _get_cached_config(_LEGACY_REQUEST_LOG_LEVEL_KEY)
+        if hit:
+            _set_cached_config(REQUEST_RECORD_LEVEL_KEY, cached_value)
+            return cached_value
+
+        legacy = (
+            db.query(SystemConfig).filter(SystemConfig.key == _LEGACY_REQUEST_LOG_LEVEL_KEY).first()
+        )
+        if legacy:
+            _set_cached_config(_LEGACY_REQUEST_LOG_LEVEL_KEY, legacy.value)
+            _set_cached_config(REQUEST_RECORD_LEVEL_KEY, legacy.value)
+            return legacy.value
+
+        return None
+
+    @classmethod
+    def get_request_record_level(cls, db: Session) -> RequestRecordLevel:
+        """获取请求记录级别（控制请求/响应详情入库）"""
+        level = cls.get_config(db, REQUEST_RECORD_LEVEL_KEY, RequestRecordLevel.BASIC.value)
         if isinstance(level, str):
-            return LogLevel(level)
+            return RequestRecordLevel(level)
         return level
+
+    @classmethod
+    def get_log_level(cls, db: Session) -> RequestRecordLevel:
+        """Deprecated: use get_request_record_level."""
+        return cls.get_request_record_level(db)
 
     @classmethod
     def should_log_headers(cls, db: Session) -> bool:
         """是否应该记录请求头"""
-        log_level = cls.get_log_level(db)
-        return log_level in [LogLevel.HEADERS, LogLevel.FULL]
+        level = cls.get_request_record_level(db)
+        return level in [RequestRecordLevel.HEADERS, RequestRecordLevel.FULL]
 
     @classmethod
     def should_log_body(cls, db: Session) -> bool:
         """是否应该记录请求体和响应体"""
-        log_level = cls.get_log_level(db)
-        return log_level == LogLevel.FULL
+        level = cls.get_request_record_level(db)
+        return level == RequestRecordLevel.FULL
 
     @classmethod
     def should_mask_sensitive_data(cls, db: Session) -> bool:
@@ -367,6 +483,11 @@ class SystemConfigService:
     def is_format_conversion_enabled(cls, db: Session) -> bool:
         """检查全局格式转换是否启用"""
         return bool(cls.get_config(db, "enable_format_conversion", True))
+
+    @classmethod
+    def is_keep_priority_on_conversion(cls, db: Session) -> bool:
+        """检查格式转换时是否保持优先级"""
+        return bool(cls.get_config(db, "keep_priority_on_conversion", False))
 
     @classmethod
     def mask_sensitive_headers(cls, db: Session, headers: dict[str, Any]) -> dict[str, Any]:

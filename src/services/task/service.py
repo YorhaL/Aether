@@ -1041,8 +1041,10 @@ class TaskService:
                             )
                         continue
 
-                    # 2. master switch
-                    if not config.format_conversion_enabled:
+                    # 2. global switch (from database config)
+                    from src.services.system.config import SystemConfigService
+
+                    if not SystemConfigService.is_format_conversion_enabled(self.db):
                         skip_reason = "format_conversion_disabled"
                         candidate_info.update(
                             {

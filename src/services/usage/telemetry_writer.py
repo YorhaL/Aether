@@ -61,10 +61,32 @@ class QueueTelemetryWriter(TelemetryWriter):
         request_id: str,
         user_id: str,
         api_key_id: str,
+        log_level: str = "basic",
+        sensitive_headers: list[str] | None = None,
+        max_request_body_size: int = 0,
+        max_response_body_size: int = 0,
     ) -> None:
         self.request_id = request_id
         self.user_id = user_id
         self.api_key_id = api_key_id
+        self.log_level = (log_level or "basic").strip().lower()
+        self._sensitive_headers = sensitive_headers or [
+            "authorization",
+            "x-api-key",
+            "api-key",
+            "cookie",
+            "set-cookie",
+        ]
+        self._max_request_body_size = int(max_request_body_size or 0)
+        self._max_response_body_size = int(max_response_body_size or 0)
+
+    @property
+    def include_headers(self) -> bool:
+        return self.log_level in {"headers", "full"}
+
+    @property
+    def include_bodies(self) -> bool:
+        return self.log_level == "full"
 
     async def record_success(self, **kwargs: Any) -> None:
         await self._publish_event(UsageEventType.COMPLETED, **kwargs)
@@ -101,20 +123,50 @@ class QueueTelemetryWriter(TelemetryWriter):
             logger.error(f"[usage-queue] XADD failed: {exc}")
             raise
 
-    def _truncate_body(self, value: Any) -> str | None:
-        """将 body 序列化为字符串，超长时截断并添加标记"""
+    def _mask_headers(self, headers: Any) -> Any:
+        """Mask sensitive headers before putting them into Redis."""
+        if not isinstance(headers, dict) or not headers:
+            return headers
+        sensitive = {h.lower() for h in self._sensitive_headers if isinstance(h, str) and h}
+        if not sensitive:
+            return headers
+        out: dict[str, Any] = {}
+        for k, v in headers.items():
+            key = str(k)
+            if key.lower() in sensitive:
+                s = str(v)
+                if len(s) > 8:
+                    out[key] = s[:4] + "****" + s[-4:]
+                else:
+                    out[key] = "****"
+            else:
+                out[key] = v
+        return out
+
+    def _truncate_body(self, value: Any, *, max_size: int, is_request: bool) -> Any:
+        """Best-effort truncate body based on SystemConfigService max_*_body_size."""
         if value is None:
             return None
-        try:
-            raw = json.dumps(value, ensure_ascii=False)
-        except TypeError:
-            raw = str(value)
-        max_bytes = config.usage_queue_body_max_bytes
-        if max_bytes > 0 and len(raw) > max_bytes:
-            # 截断并添加标记，预留 15 字符给标记
-            truncate_at = max(0, max_bytes - 15)
-            raw = raw[:truncate_at] + "...[truncated]"
-        return raw
+        limit = int(max_size or 0)
+        if limit <= 0:
+            return value
+
+        body_str = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+        if len(body_str) <= limit:
+            return value
+
+        # Match SystemConfigService.truncate_body contract.
+        if isinstance(value, (dict, list)):
+            return {
+                "_truncated": True,
+                "_original_size": len(body_str),
+                "_content": body_str[:limit],
+            }
+        kind = "request" if is_request else "response"
+        return (
+            body_str[:limit]
+            + f"\n... (truncated {kind} body, original size: {len(body_str)} bytes)"
+        )
 
     def _build_event_data(self, **kwargs: Any) -> dict[str, Any]:
         # 必需字段
@@ -189,24 +241,36 @@ class QueueTelemetryWriter(TelemetryWriter):
         if kwargs.get("metadata"):
             data["metadata"] = kwargs["metadata"]
 
-        # 可选：Headers
-        if config.usage_queue_include_headers:
+        # Optional: Headers (masked)
+        if self.include_headers:
             if kwargs.get("request_headers"):
-                data["request_headers"] = kwargs["request_headers"]
+                data["request_headers"] = self._mask_headers(kwargs["request_headers"])
             if kwargs.get("provider_request_headers"):
-                data["provider_request_headers"] = kwargs["provider_request_headers"]
+                data["provider_request_headers"] = self._mask_headers(
+                    kwargs["provider_request_headers"]
+                )
             if kwargs.get("response_headers"):
-                data["response_headers"] = kwargs["response_headers"]
+                data["response_headers"] = self._mask_headers(kwargs["response_headers"])
             if kwargs.get("client_response_headers"):
-                data["client_response_headers"] = kwargs["client_response_headers"]
+                data["client_response_headers"] = self._mask_headers(
+                    kwargs["client_response_headers"]
+                )
 
-        # 可选：Bodies
-        if config.usage_queue_include_bodies:
-            request_body = self._truncate_body(kwargs.get("request_body"))
-            response_body = self._truncate_body(kwargs.get("response_body"))
-            if request_body:
+        # Optional: Bodies (truncated)
+        if self.include_bodies:
+            request_body = self._truncate_body(
+                kwargs.get("request_body"),
+                max_size=self._max_request_body_size,
+                is_request=True,
+            )
+            response_body = self._truncate_body(
+                kwargs.get("response_body"),
+                max_size=self._max_response_body_size,
+                is_request=False,
+            )
+            if request_body is not None:
                 data["request_body"] = request_body
-            if response_body:
+            if response_body is not None:
                 data["response_body"] = response_body
 
         return data

@@ -148,21 +148,6 @@ class Config:
         # HTTP_REQUEST_TIMEOUT: 非流式请求整体超时（秒），默认 300 秒
         self.http_request_timeout = float(os.getenv("HTTP_REQUEST_TIMEOUT", "300.0"))
 
-        # 格式转换配置
-        # FORMAT_CONVERSION_ENABLED: 全局格式转换总开关，默认开启
-        # 注意：即使开启，也需要端点配置 format_acceptance_config.enabled=true 才能生效
-        self.format_conversion_enabled = (
-            os.getenv("FORMAT_CONVERSION_ENABLED", "true").lower() == "true"
-        )
-
-        # KEEP_PRIORITY_ON_CONVERSION: 格式转换时是否保持提供商原优先级，默认关闭
-        # - false（默认）: 需要格式转换的候选整体降级到不需要转换的候选之后
-        # - true: 所有提供商保持原优先级，不因格式转换降级
-        # 注意：即使全局关闭，单个提供商也可以通过 keep_priority_on_conversion 字段保持自己的优先级
-        self.keep_priority_on_conversion = (
-            os.getenv("KEEP_PRIORITY_ON_CONVERSION", "false").lower() == "true"
-        )
-
         # HTTP 连接池配置
         # HTTP_MAX_CONNECTIONS: 最大连接数，影响并发能力
         #   - 每个连接占用一个 socket，过多会耗尽系统资源
@@ -192,15 +177,8 @@ class Config:
         # Usage 队列配置（Redis Streams）
         # 默认启用队列模式，通过 Redis Streams 异步写入 DB，提升响应性能
         self.usage_queue_enabled = os.getenv("USAGE_QUEUE_ENABLED", "true").lower() == "true"
-        # 默认传输 headers/bodies，由系统设置（request_log_level）决定最终存储内容
-        self.usage_queue_include_headers = (
-            os.getenv("USAGE_QUEUE_INCLUDE_HEADERS", "true").lower() == "true"
-        )
-        self.usage_queue_include_bodies = (
-            os.getenv("USAGE_QUEUE_INCLUDE_BODIES", "true").lower() == "true"
-        )
-        # 0 表示不截断，由系统设置（max_request/response_body_size）统一控制
-        self.usage_queue_body_max_bytes = int(os.getenv("USAGE_QUEUE_BODY_MAX_BYTES", "0"))
+        # 队列事件是否包含 headers/bodies 由系统配置（request_record_level）决定；
+        # 最终写入 DB 前仍会按 SystemConfigService 做脱敏与截断。
         self.usage_queue_stream_key = os.getenv("USAGE_QUEUE_STREAM_KEY", "usage:events")
         self.usage_queue_stream_group = os.getenv("USAGE_QUEUE_STREAM_GROUP", "usage_consumers")
         self.usage_queue_stream_maxlen = int(os.getenv("USAGE_QUEUE_STREAM_MAXLEN", "200000"))
@@ -215,6 +193,17 @@ class Config:
         self.usage_queue_max_retries = int(os.getenv("USAGE_QUEUE_MAX_RETRIES", "2"))
         self.usage_queue_metrics_interval_seconds = float(
             os.getenv("USAGE_QUEUE_METRICS_INTERVAL_SECONDS", "30")
+        )
+
+        # Admin analytics query defaults (protect DB from unbounded scans)
+        # ADMIN_USAGE_DEFAULT_DAYS:
+        # - 0: keep current behavior (no implicit time filter)
+        # - >0: when admin usage endpoints omit start_date/end_date, default to "last N days"
+        default_admin_usage_default_days = (
+            "0" if self.environment in {"development", "test", "testing"} else "30"
+        )
+        self.admin_usage_default_days = int(
+            os.getenv("ADMIN_USAGE_DEFAULT_DAYS", default_admin_usage_default_days)
         )
 
         # Thinking 整流器配置
@@ -251,6 +240,37 @@ class Config:
         # BILLING_STRICT_MODE: required 维度缺失时是否拒绝请求/标记任务失败（默认 false，缺失则 cost=0 + 标记 incomplete）
         self.billing_require_rule = os.getenv("BILLING_REQUIRE_RULE", "false").lower() == "true"
         self.billing_strict_mode = os.getenv("BILLING_STRICT_MODE", "false").lower() == "true"
+
+        # 计费迁移运行时开关（用于灰度/影子计费/快速止血）
+        # BILLING_ENGINE:
+        # - legacy: 仅旧系统（当前默认）
+        # - shadow: 旧系统为真值 + 新系统影子计算（对账期）
+        # - new_with_fallback: 新系统为真值，差异过大时回退旧系统
+        # - new: 仅新系统
+        # Default to "new" per unified billing architecture.
+        self.billing_engine = os.getenv("BILLING_ENGINE", "new").strip().lower()
+        # 按 provider/model 粒度覆盖（JSON 字符串）
+        # 示例: {"anthropic/*": "shadow", "openai/gpt-4*": "new"}
+        self.billing_engine_overrides = os.getenv("BILLING_ENGINE_OVERRIDES", "{}")
+        # 影子计费差异阈值（美元）
+        self.billing_diff_threshold_usd = float(os.getenv("BILLING_DIFF_THRESHOLD_USD", "0.0001"))
+        # 差异日志级别（DEBUG/INFO/WARNING/ERROR）
+        self.billing_shadow_log_level = os.getenv("BILLING_SHADOW_LOG_LEVEL", "INFO").strip()
+        # 是否启用差异告警（预留扩展）
+        self.billing_diff_alert_enabled = (
+            os.getenv("BILLING_DIFF_ALERT_ENABLED", "false").lower() == "true"
+        )
+
+        # Usage.request_metadata 体积控制（用于降低 DB/CPU/内存压力）
+        # USAGE_METADATA_MAX_BYTES:
+        # - 0: unlimited (backward compatible)
+        # - >0: best-effort prune large keys when metadata JSON exceeds this size
+        default_usage_metadata_max_bytes = (
+            "0" if self.environment in {"development", "test", "testing"} else "65536"
+        )
+        self.usage_metadata_max_bytes = int(
+            os.getenv("USAGE_METADATA_MAX_BYTES", default_usage_metadata_max_bytes)
+        )
 
         # 视频任务轮询配置
         # VIDEO_POLL_INTERVAL_SECONDS: 轮询间隔（秒），默认 10 秒

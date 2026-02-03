@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
+import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy.exc import IntegrityError
@@ -650,8 +651,10 @@ class OpenAIVideoHandler(VideoHandlerBase):
         try:
             # 使用 httpx 的 stream 方法并正确管理上下文
             # 视频下载可能较大，设置 5 分钟超时
-            request = client.build_request("GET", upstream_url, headers=headers)
-            response = await client.send(request, stream=True, timeout=300.0)
+            request = client.build_request(
+                "GET", upstream_url, headers=headers, timeout=httpx.Timeout(300.0)
+            )
+            response = await client.send(request, stream=True)
         except Exception as exc:
             logger.warning(
                 "[VideoDownload] Upstream connection failed task={} url={}: {}",
@@ -723,8 +726,8 @@ class OpenAIVideoHandler(VideoHandlerBase):
         """代理直接的视频 URL（如 CDN URL），保持与官方 API 一致的流式返回行为"""
         client = await HTTPClientPool.get_default_client_async()
         try:
-            request = client.build_request("GET", url)
-            response = await client.send(request, stream=True, timeout=300.0)
+            request = client.build_request("GET", url, timeout=httpx.Timeout(300.0))
+            response = await client.send(request, stream=True)
         except Exception as exc:
             logger.warning(
                 "[VideoDownload] Direct URL connection failed task={} url={}: {}",

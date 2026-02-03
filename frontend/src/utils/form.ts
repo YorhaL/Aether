@@ -130,3 +130,50 @@ export function createNumberInputHandler<T extends Record<string, any>>(
     (obj as any)[field] = parseNumberInput(value, options)
   }
 }
+
+/**
+ * 获取分辨率的排序权重（用于从低到高排序）
+ * 支持的格式：
+ * - NNNp 格式：480p, 720p, 1080p, 2160p
+ * - 4k/8k 格式：4k -> 2160, 8k -> 4320
+ * - WxH 格式：720x1080 -> 按像素总数排序
+ *
+ * @param resolution - 分辨率字符串
+ * @returns 排序权重（数字越大分辨率越高）
+ */
+export function getResolutionSortWeight(resolution: string): number {
+  const normalized = (resolution || '').trim().toLowerCase()
+
+  // 4k/8k 格式
+  if (normalized === '4k') return 2160 * 2160
+  if (normalized === '8k') return 4320 * 4320
+
+  // NNNp 格式（如 480p, 720p, 1080p）
+  const pMatch = normalized.match(/^(\d+)p$/)
+  if (pMatch) {
+    const height = parseInt(pMatch[1], 10)
+    // 假设 16:9 宽高比计算像素数
+    return height * height * (16 / 9)
+  }
+
+  // WxH 格式（如 720x1080, 1024x1792）
+  const wxhMatch = normalized.replace(/×/g, 'x').match(/^(\d+)x(\d+)$/)
+  if (wxhMatch) {
+    const w = parseInt(wxhMatch[1], 10)
+    const h = parseInt(wxhMatch[2], 10)
+    return w * h
+  }
+
+  // 无法识别的格式，放到最后
+  return Infinity
+}
+
+/**
+ * 对分辨率价格条目进行排序（从低分辨率到高分辨率）
+ *
+ * @param entries - 分辨率价格条目数组 [[resolution, price], ...]
+ * @returns 排序后的数组
+ */
+export function sortResolutionEntries<T>(entries: [string, T][]): [string, T][] {
+  return [...entries].sort((a, b) => getResolutionSortWeight(a[0]) - getResolutionSortWeight(b[0]))
+}

@@ -31,6 +31,7 @@ from src.services.billing.models import (
 )
 from src.services.billing.schema import BillingSnapshot, CostResult
 from src.services.billing.service import BillingService
+from src.services.billing.shadow import ShadowBillingService
 from src.services.billing.templates import BILLING_TEMPLATE_REGISTRY, BillingTemplates
 from src.services.billing.usage_mapper import UsageMapper, map_usage, map_usage_from_response
 
@@ -50,6 +51,7 @@ __all__ = [
     "BillingService",
     "BillingSnapshot",
     "CostResult",
+    "ShadowBillingService",
     # 映射器
     "UsageMapper",
     "map_usage",
