@@ -1893,10 +1893,6 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 logger.warning(f"[{ctx.request_id}] 流式请求失败，未选中提供商")
                 return
 
-            # Claude API 的 input_tokens 已经是非缓存部分，不需要再减去 cached_tokens
-            # 实际计费的输入 tokens = input_tokens + cache_creation_tokens（缓存读取免费或折扣）
-            actual_input_tokens = ctx.input_tokens
-
             # 获取新的 DB session
             db_gen = get_db()
             bg_db = next(db_gen)
@@ -1951,7 +1947,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                             is_stream=True,
                             api_format=ctx.api_format,
                             provider_request_headers=ctx.provider_request_headers,
-                            input_tokens=actual_input_tokens,
+                            input_tokens=ctx.input_tokens,
                             output_tokens=ctx.output_tokens,
                             cache_creation_tokens=ctx.cache_creation_tokens,
                             cache_read_tokens=ctx.cached_tokens,
@@ -1965,7 +1961,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                         logger.debug(f"{self.FORMAT_ID} 流式响应被客户端取消")
                         logger.info(
                             f"[CANCEL] {self.request_id[:8]} | {ctx.model} | {ctx.provider_name} | {response_time_ms}ms | "
-                            f"{ctx.status_code} | in:{actual_input_tokens} out:{ctx.output_tokens} cache:{ctx.cached_tokens}"
+                            f"{ctx.status_code} | in:{ctx.input_tokens} out:{ctx.output_tokens} cache:{ctx.cached_tokens}"
                         )
                     else:
                         # 服务端/上游异常：记录为失败
@@ -1981,7 +1977,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                             api_format=ctx.api_format,
                             provider_request_headers=ctx.provider_request_headers,
                             # 预估 token 信息（来自 message_start 事件）
-                            input_tokens=actual_input_tokens,
+                            input_tokens=ctx.input_tokens,
                             output_tokens=ctx.output_tokens,
                             cache_creation_tokens=ctx.cache_creation_tokens,
                             cache_read_tokens=ctx.cached_tokens,
@@ -1997,7 +1993,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                         logger.debug(f"{self.FORMAT_ID} 流式响应中断")
                         logger.info(
                             f"[FAIL] {self.request_id[:8]} | {ctx.model} | {ctx.provider_name} | {response_time_ms}ms | "
-                            f"{ctx.status_code} | in:{actual_input_tokens} out:{ctx.output_tokens} cache:{ctx.cached_tokens}"
+                            f"{ctx.status_code} | in:{ctx.input_tokens} out:{ctx.output_tokens} cache:{ctx.cached_tokens}"
                         )
                 else:
                     # 在记录统计前，允许子类从 parsed_chunks 中提取额外的元数据
@@ -2016,12 +2012,12 @@ class CliMessageHandlerBase(BaseMessageHandler):
                     logger.debug(
                         f"[{ctx.request_id}] 开始记录 Usage: "
                         f"provider={ctx.provider_name}, model={ctx.model}, "
-                        f"in={actual_input_tokens}, out={ctx.output_tokens}"
+                        f"in={ctx.input_tokens}, out={ctx.output_tokens}"
                     )
                     total_cost = await bg_telemetry.record_success(
                         provider=ctx.provider_name,
                         model=ctx.model,
-                        input_tokens=actual_input_tokens,
+                        input_tokens=ctx.input_tokens,
                         output_tokens=ctx.output_tokens,
                         response_time_ms=response_time_ms,
                         first_byte_time_ms=ctx.first_byte_time_ms,  # 传递首字时间
@@ -2472,8 +2468,6 @@ class CliMessageHandlerBase(BaseMessageHandler):
             output_tokens = usage.get("output_tokens", 0)
             cached_tokens = usage.get("cache_read_tokens", 0)
             cache_creation_tokens = usage.get("cache_creation_tokens", 0)
-            # Claude API 的 input_tokens 已经是非缓存部分，不需要再减去 cached_tokens
-            actual_input_tokens = input_tokens
 
             output_text = self.parser.extract_text_content(response_json)[:200]
 
@@ -2487,7 +2481,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
             total_cost = await self.telemetry.record_success(
                 provider=provider_name,
                 model=model,
-                input_tokens=actual_input_tokens,
+                input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 response_time_ms=response_time_ms,
                 status_code=status_code,

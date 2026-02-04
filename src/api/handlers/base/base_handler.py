@@ -126,16 +126,7 @@ class MessageTelemetry:
         # Provider 响应元数据（如 Gemini 的 modelVersion）
         response_metadata: dict[str, Any] | None = None,
     ) -> float:
-        total_cost = await self.calculate_cost(
-            provider,
-            model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_tokens=cache_creation_tokens,
-            cache_read_tokens=cache_read_tokens,
-        )
-
-        await UsageService.record_usage(
+        usage = await UsageService.record_usage(
             db=self.db,
             user=self.user,
             api_key=self.api_key,
@@ -170,6 +161,8 @@ class MessageTelemetry:
             metadata=response_metadata,
         )
 
+        total_cost = float(getattr(usage, "total_cost_usd", 0.0) or 0.0)
+
         if self.user and self.api_key:
             audit_service.log_api_request(
                 db=self.db,
@@ -181,8 +174,8 @@ class MessageTelemetry:
                 success=True,
                 ip_address=self.client_ip,
                 status_code=status_code,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=getattr(usage, "input_tokens", input_tokens),
+                output_tokens=getattr(usage, "output_tokens", output_tokens),
                 cost_usd=total_cost,
             )
 
