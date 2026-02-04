@@ -25,6 +25,7 @@ from src.models.database import (
     User,
     UserRole,
 )
+from src.services.billing.token_normalization import normalize_input_tokens_for_billing
 from src.services.model.cost import ModelCostService
 from src.services.system.config import SystemConfigService
 
@@ -848,8 +849,6 @@ class UsageService:
                 billing_api_format = normalize_signature_key(str(params.api_format))
             except Exception:
                 billing_api_format = None
-
-        from src.services.billing.token_normalization import normalize_input_tokens_for_billing
 
         input_tokens_for_billing = normalize_input_tokens_for_billing(
             billing_api_format,
