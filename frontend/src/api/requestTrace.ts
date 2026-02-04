@@ -15,7 +15,7 @@ export interface CandidateRecord {
   key_preview?: string  // 密钥脱敏预览（如 sk-***abc）
   key_capabilities?: Record<string, boolean> | null  // Key 支持的能力
   required_capabilities?: Record<string, boolean> | null  // 请求实际需要的能力标签
-  status: 'pending' | 'streaming' | 'success' | 'failed' | 'skipped' | 'cancelled'
+  status: 'pending' | 'streaming' | 'success' | 'failed' | 'skipped' | 'cancelled' | 'available' | 'unused' | 'stream_interrupted'
   skip_reason?: string
   is_cached: boolean
   // 执行结果字段

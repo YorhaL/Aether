@@ -433,7 +433,17 @@ const formatLatency = (ms: number | undefined | null): string => {
 const timeline = computed<CandidateRecord[]>(() => {
   if (!trace.value) return []
   return [...trace.value.candidates]
-    .filter(c => ['success', 'failed', 'skipped', 'cancelled', 'pending', 'streaming'].includes(c.status))
+    .filter(c => [
+      'success',
+      'failed',
+      'skipped',
+      'cancelled',
+      'pending',
+      'streaming',
+      'available',
+      'unused',
+      'stream_interrupted'
+    ].includes(c.status))
     .sort((a, b) => {
       const startedA = a.started_at ? new Date(a.started_at).getTime() : Infinity
       const startedB = b.started_at ? new Date(b.started_at).getTime() : Infinity
@@ -730,8 +740,10 @@ const formatDuration = (startStr: string, endStr: string): string => {
 const getStatusLabel = (status: string) => {
   const labels: Record<string, string> = {
     available: '未执行',
+    unused: '未执行',
     pending: '等待中',
     streaming: '传输中',
+    stream_interrupted: '流中断',
     success: '成功',
     failed: '失败',
     cancelled: '已取消',
@@ -744,8 +756,10 @@ const getStatusLabel = (status: string) => {
 const getStatusColorClass = (status: string) => {
   const classes: Record<string, string> = {
     available: 'status-available',
+    unused: 'status-available',
     pending: 'status-pending',
     streaming: 'status-pending',
+    stream_interrupted: 'status-failed',
     success: 'status-success',
     failed: 'status-failed',
     cancelled: 'status-cancelled',
