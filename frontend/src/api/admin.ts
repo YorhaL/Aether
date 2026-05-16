@@ -4,6 +4,8 @@ import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 import type { ApiKeyInstallSession, InstallSessionTargetSystem, InstallTargetCli } from './me'
 
+const SYSTEM_DATA_IMPORT_TIMEOUT_MS = 10 * 60 * 1000
+
 function extractConflictPayload(error: unknown): ManualUsageCleanupConflict | null {
   if (!axios.isAxiosError(error) || error.response?.status !== 409) {
     return null
@@ -854,7 +856,8 @@ export const adminApi = {
   async importConfig(data: ConfigImportRequest): Promise<ConfigImportResponse> {
     const response = await apiClient.post<ConfigImportResponse>(
       '/api/admin/system/config/import',
-      data
+      data,
+      { timeout: SYSTEM_DATA_IMPORT_TIMEOUT_MS }
     )
     return response.data
   },
@@ -869,7 +872,8 @@ export const adminApi = {
   async importUsers(data: UsersImportRequest): Promise<UsersImportResponse> {
     const response = await apiClient.post<UsersImportResponse>(
       '/api/admin/system/users/import',
-      data
+      data,
+      { timeout: SYSTEM_DATA_IMPORT_TIMEOUT_MS }
     )
     return response.data
   },
@@ -884,7 +888,8 @@ export const adminApi = {
   async importAggregateData(data: AggregateImportRequest): Promise<AggregateImportResponse> {
     const response = await apiClient.post<AggregateImportResponse>(
       '/api/admin/system/data/import',
-      data
+      data,
+      { timeout: SYSTEM_DATA_IMPORT_TIMEOUT_MS }
     )
     return response.data
   },
