@@ -370,6 +370,8 @@ impl IntoResponse for ExecutionRuntimeAppError {
             ) => StatusCode::BAD_REQUEST,
             ExecutionRuntimeServerError::Transport(
                 ExecutionRuntimeTransportError::ClientBuild(_)
+                | ExecutionRuntimeTransportError::BrowserClientBuild(_)
+                | ExecutionRuntimeTransportError::BrowserBody(_)
                 | ExecutionRuntimeTransportError::UpstreamRequest(_)
                 | ExecutionRuntimeTransportError::RelayError(_)
                 | ExecutionRuntimeTransportError::InvalidJson(_),

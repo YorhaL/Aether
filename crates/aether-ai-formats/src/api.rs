@@ -180,9 +180,10 @@ pub use crate::formats::{
         request::{
             build_chatgpt_web_image_request_body, build_openai_image_provider_request_body,
             default_model_for_openai_image_operation, is_openai_image_stream_request,
-            normalize_openai_image_request, openai_image_operation_from_path,
-            resolve_requested_openai_image_model_for_request, ChatGptWebImageRequestError,
-            NormalizedOpenAiImageRequest, OpenAiImageOperation, OpenAiImageResponseFormat,
+            normalize_openai_image_request, normalize_openai_image_request_with_options,
+            openai_image_operation_from_path, resolve_requested_openai_image_model_for_request,
+            ChatGptWebImageRequestError, NormalizedOpenAiImageRequest, OpenAiImageNormalizeOptions,
+            OpenAiImageOperation, OpenAiImageResponseFormat,
         },
         spec::{
             resolve_stream_spec as resolve_local_image_stream_spec,

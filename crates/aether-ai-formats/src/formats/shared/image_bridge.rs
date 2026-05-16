@@ -1,6 +1,5 @@
 use serde_json::{json, Map, Number, Value};
 
-use crate::formats::openai::responses::codex::CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT;
 use crate::formats::shared::model_directives::extract_gemini_model_from_path;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,11 +31,6 @@ pub fn build_gemini_image_request_body_from_openai_image_request(
     }
 
     let prompt = normalized_request_prompt(normalized_request)
-        .or_else(|| {
-            (normalized_request.operation
-                == crate::formats::openai::image::request::OpenAiImageOperation::Variation)
-                .then(|| CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT.to_string())
-        })
         .unwrap_or_else(|| "Generate a high quality image.".to_string());
     let mut parts = Vec::new();
     if !prompt.trim().is_empty() {
@@ -393,20 +387,7 @@ pub fn build_openai_image_response_from_response_stream_sync_body(
     let output = provider_body_json.get("output").and_then(Value::as_array)?;
     let images = output
         .iter()
-        .filter_map(|item| {
-            if item.get("type").and_then(Value::as_str) != Some("image_generation_call") {
-                return None;
-            }
-            let b64_json = item
-                .get("result")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())?;
-            Some(json!({
-                "b64_json": b64_json,
-                "revised_prompt": item.get("revised_prompt").cloned().unwrap_or(Value::Null),
-            }))
-        })
+        .filter_map(openai_response_image_generation_item_to_image_data)
         .collect::<Vec<_>>();
     if images.is_empty() {
         return None;
@@ -437,6 +418,48 @@ pub fn build_openai_image_response_from_response_stream_sync_body(
         response.insert("usage".to_string(), usage);
     }
     Some(Value::Object(response))
+}
+
+fn openai_response_image_generation_item_to_image_data(item: &Value) -> Option<Value> {
+    if item.get("type").and_then(Value::as_str) != Some("image_generation_call") {
+        return None;
+    }
+    let result = item
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let url = item
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut image = Map::new();
+    match result {
+        Some(value) if value.starts_with("data:") => {
+            let (_, b64_json) = parse_data_url(value)?;
+            image.insert("b64_json".to_string(), Value::String(b64_json));
+        }
+        Some(value) if value.starts_with("http://") || value.starts_with("https://") => {
+            image.insert("url".to_string(), Value::String(value.to_string()));
+        }
+        Some(value) => {
+            image.insert("b64_json".to_string(), Value::String(value.to_string()));
+        }
+        None => {
+            let url = url?;
+            if let Some((_, b64_json)) = parse_data_url(url) {
+                image.insert("b64_json".to_string(), Value::String(b64_json));
+            } else {
+                image.insert("url".to_string(), Value::String(url.to_string()));
+            }
+        }
+    }
+    image.insert(
+        "revised_prompt".to_string(),
+        item.get("revised_prompt").cloned().unwrap_or(Value::Null),
+    );
+    Some(Value::Object(image))
 }
 
 pub fn build_openai_image_provider_body_from_response_stream_sync_body(
@@ -882,7 +905,9 @@ mod tests {
         build_gemini_image_request_body_from_openai_image_request,
         build_gemini_image_response_from_openai_image_response,
         build_openai_image_request_body_from_gemini_image_request,
-        build_openai_image_response_from_gemini_response, gemini_request_is_image_generation,
+        build_openai_image_response_from_gemini_response,
+        build_openai_image_response_from_response_stream_sync_body,
+        gemini_request_is_image_generation,
     };
     use crate::formats::openai::image::request::normalize_openai_image_request;
 
@@ -1011,6 +1036,29 @@ mod tests {
         assert_eq!(converted["data"][0]["b64_json"], "aGVsbG8=");
         assert_eq!(converted["data"][0]["revised_prompt"], "revised");
         assert_eq!(converted["usage"]["total_tokens"], 3);
+    }
+
+    #[test]
+    fn converts_responses_image_generation_url_to_openai_image_url() {
+        let converted = build_openai_image_response_from_response_stream_sync_body(
+            &json!({
+                "created_at": 1776839946,
+                "model": "gpt-image-2",
+                "output": [{
+                    "type": "image_generation_call",
+                    "status": "completed",
+                    "url": "https://assets.example/generated.png"
+                }]
+            }),
+            None,
+        )
+        .expect("response image output should convert");
+
+        assert_eq!(
+            converted["data"][0]["url"],
+            "https://assets.example/generated.png"
+        );
+        assert!(converted["data"][0].get("b64_json").is_none());
     }
 
     #[test]

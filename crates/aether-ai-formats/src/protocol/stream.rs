@@ -38,6 +38,10 @@ pub enum CanonicalStreamEvent {
     ReasoningSummaryDone,
     ReasoningSignature(String),
     ContentPart(CanonicalContentPart),
+    ImageGenerationCall {
+        index: usize,
+        item: Value,
+    },
     ToolCallStart {
         index: usize,
         call_id: String,

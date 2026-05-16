@@ -1,17 +1,19 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use aether_contracts::ResolvedTransportProfile;
 use serde_json::Value;
 
 use crate::ai_serving::planner::candidate_preparation::{
     prepare_header_authenticated_candidate, OauthPreparationContext,
 };
 use crate::ai_serving::planner::spec_metadata::local_openai_image_spec_metadata;
+use crate::ai_serving::pure::normalize_openai_image_request_with_options;
 use crate::ai_serving::transport::{
-    build_openai_image_headers, build_openai_image_upstream_url,
-    build_standard_provider_request_headers, openai_image_transport_unsupported_reason,
-    resolve_openai_image_auth, ProviderOpenAiImageHeadersInput,
-    StandardProviderRequestHeadersInput,
+    build_grok_browser_headers, build_grok_upstream_url, build_openai_image_headers,
+    build_openai_image_upstream_url, build_standard_provider_request_headers,
+    openai_image_transport_unsupported_reason, resolve_openai_image_auth, GrokHeaderInput,
+    ProviderOpenAiImageHeadersInput, StandardProviderRequestHeadersInput, GROK_CHAT_PATH,
 };
 use crate::ai_serving::{
     apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
@@ -21,6 +23,7 @@ use crate::ai_serving::{
     normalize_openai_image_request, request_conversion_direct_auth, CandidateFailureDiagnostic,
     GatewayProviderTransportSnapshot, PlannerAppState, RequestConversionKind,
 };
+use crate::image_capabilities::openai_image_normalize_options_for_provider;
 use crate::AppState;
 
 use super::support::{
@@ -43,6 +46,7 @@ pub(super) struct LocalOpenAiImageCandidatePayloadParts {
     pub(super) provider_request_body: Value,
     pub(super) upstream_url: String,
     pub(super) input_summary: Value,
+    pub(super) transport_profile: Option<ResolvedTransportProfile>,
 }
 
 pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
@@ -120,8 +124,13 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
     let auth_header = prepared_candidate.auth_header;
     let auth_value = prepared_candidate.auth_value;
 
-    let Some(normalized_request) = normalize_openai_image_request(parts, body_json, body_base64)
-    else {
+    let normalized_request = normalize_openai_image_request_with_options(
+        parts,
+        body_json,
+        body_base64,
+        openai_image_normalize_options_for_provider(&transport.provider.provider_type),
+    );
+    let Some(normalized_request) = normalized_request else {
         mark_skipped_local_openai_image_candidate_with_failure_diagnostic(
             state,
             input,
@@ -145,8 +154,16 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("chatgpt_web");
+    let is_grok = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("grok");
+    let transport_profile = crate::ai_serving::transport::resolve_transport_profile(transport);
     let upstream_url = if is_chatgpt_web {
         chatgpt_web_image_internal_url(&transport.endpoint.base_url)
+    } else if is_grok {
+        build_grok_upstream_url(transport, GROK_CHAT_PATH)
     } else {
         build_openai_image_upstream_url(transport, parts.uri.query())
     };
@@ -168,7 +185,18 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         );
     }
 
-    let Some(mut provider_request_headers) =
+    let Some(mut provider_request_headers) = (if is_grok {
+        build_grok_browser_headers(GrokHeaderInput {
+            transport,
+            transport_profile: transport_profile.as_ref(),
+            request_headers: Some(&parts.headers),
+            content_type: "application/json",
+            accept: "*/*",
+            header_rules: transport.endpoint.header_rules.as_ref(),
+            provider_request_body: &provider_request_body,
+            original_request_body: body_json,
+        })
+    } else {
         build_openai_image_headers(ProviderOpenAiImageHeadersInput {
             headers: &parts.headers,
             auth_header: &auth_header,
@@ -177,7 +205,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
             provider_request_body: &provider_request_body,
             original_request_body: body_json,
         })
-    else {
+    }) else {
         mark_skipped_local_openai_image_candidate_with_failure_diagnostic(
             state,
             input,
@@ -197,6 +225,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
     };
     if is_chatgpt_web {
         provider_request_headers.insert("x-aether-chatgpt-web-image".to_string(), "1".to_string());
+    } else if is_grok {
     } else {
         apply_codex_openai_responses_special_headers(
             &mut provider_request_headers,
@@ -222,7 +251,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         .unwrap_or_default()
         .to_string();
 
-    let input_summary = if is_chatgpt_web {
+    let input_summary = if is_chatgpt_web || is_grok {
         provider_request_body.clone()
     } else {
         normalized_request.summary_json
@@ -239,6 +268,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         provider_request_body,
         upstream_url,
         input_summary,
+        transport_profile,
     })
 }
 
@@ -423,6 +453,7 @@ async fn resolve_local_openai_image_to_gemini_candidate_payload_parts(
         provider_request_body: converted.body_json,
         upstream_url,
         input_summary: converted.summary_json,
+        transport_profile: None,
     })
 }
 

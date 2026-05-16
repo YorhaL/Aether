@@ -485,6 +485,16 @@ impl GeminiClientEmitter {
                 None,
                 None,
             ),
+            CanonicalStreamEvent::ImageGenerationCall { item, .. } => {
+                let Some(part) = content_part_from_openai_image_generation_item(&item) else {
+                    return Ok(Vec::new());
+                };
+                self.emit_candidate(
+                    vec![gemini_part_from_canonical_content_part(part)],
+                    None,
+                    None,
+                )
+            }
             CanonicalStreamEvent::ToolCallStart {
                 index,
                 call_id,

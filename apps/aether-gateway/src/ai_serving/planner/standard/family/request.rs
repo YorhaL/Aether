@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use aether_contracts::ResolvedTransportProfile;
 use serde_json::Value;
 
 use crate::ai_serving::planner::candidate_preparation::{
@@ -21,10 +22,11 @@ use crate::ai_serving::transport::kiro::{
     KIRO_ENVELOPE_NAME,
 };
 use crate::ai_serving::transport::{
-    build_kiro_cross_format_upstream_url, build_openai_image_headers,
-    build_openai_image_upstream_url, build_standard_provider_request_headers,
-    openai_image_transport_unsupported_reason, resolve_openai_image_auth,
-    ProviderOpenAiImageHeadersInput, StandardProviderRequestHeadersInput,
+    build_grok_browser_headers, build_grok_upstream_url, build_kiro_cross_format_upstream_url,
+    build_openai_image_headers, build_openai_image_upstream_url,
+    build_standard_provider_request_headers, openai_image_transport_unsupported_reason,
+    resolve_grok_session_auth, resolve_openai_image_auth, GrokHeaderInput,
+    ProviderOpenAiImageHeadersInput, StandardProviderRequestHeadersInput, GROK_CHAT_PATH,
 };
 use crate::ai_serving::{
     build_openai_image_request_body_from_gemini_image_request, gemini_request_is_image_generation,
@@ -49,6 +51,14 @@ pub(crate) struct LocalStandardCandidatePayloadParts {
     pub(super) upstream_is_stream: bool,
     pub(super) envelope_name: Option<&'static str>,
     pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
+    pub(super) transport_profile: Option<ResolvedTransportProfile>,
+}
+
+fn is_grok_text_provider_api_format(provider_api_format: &str) -> bool {
+    matches!(
+        crate::ai_serving::normalize_api_format_alias(provider_api_format).as_str(),
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "claude:messages"
+    )
 }
 
 pub(crate) async fn resolve_local_standard_candidate_payload_parts(
@@ -64,7 +74,13 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
     let planner_state = crate::ai_serving::PlannerAppState::new(state);
     let candidate = &attempt.eligible.candidate;
     let transport = &attempt.eligible.transport;
+    let transport_profile = crate::ai_serving::transport::resolve_transport_profile(transport);
     let provider_api_format = attempt.eligible.provider_api_format.as_str();
+    let is_grok = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("grok");
     if spec_metadata.api_format == "gemini:generate_content"
         && provider_api_format == "openai:image"
         && gemini_request_is_image_generation(body_json)
@@ -75,6 +91,104 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         .await;
     }
     let is_kiro_claude_cli = is_kiro_claude_messages_transport(transport, provider_api_format);
+    if is_grok && is_grok_text_provider_api_format(provider_api_format) {
+        let prepared_candidate = match prepare_header_authenticated_candidate(
+            planner_state,
+            transport,
+            candidate,
+            resolve_grok_session_auth(transport),
+            OauthPreparationContext {
+                trace_id,
+                api_format: provider_api_format,
+                operation: "standard_family_grok_text_request",
+            },
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(skip_reason) => {
+                mark_skipped_local_standard_candidate(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    attempt.candidate_index,
+                    &attempt.candidate_id,
+                    skip_reason,
+                )
+                .await;
+                return None;
+            }
+        };
+
+        let mut provider_request_body = body_json.clone();
+        if let Some(object) = provider_request_body.as_object_mut() {
+            object.insert(
+                "model".to_string(),
+                serde_json::Value::String(prepared_candidate.mapped_model.clone()),
+            );
+        }
+
+        let upstream_is_stream = resolve_upstream_is_stream_for_provider(
+            transport.endpoint.config.as_ref(),
+            transport.provider.provider_type.as_str(),
+            provider_api_format,
+            spec_metadata.require_streaming,
+            false,
+        );
+        let force_body_stream_field =
+            endpoint_config_forces_body_stream_field(transport.endpoint.config.as_ref());
+        enforce_provider_body_stream_policy(
+            &mut provider_request_body,
+            provider_api_format,
+            upstream_is_stream,
+            request_requires_body_stream_field(body_json, force_body_stream_field),
+        );
+
+        let upstream_url = build_grok_upstream_url(transport, GROK_CHAT_PATH);
+        let Some(provider_request_headers) = build_grok_browser_headers(GrokHeaderInput {
+            transport,
+            transport_profile: transport_profile.as_ref(),
+            request_headers: Some(&parts.headers),
+            content_type: "application/json",
+            accept: "text/event-stream",
+            header_rules: transport.endpoint.header_rules.as_ref(),
+            provider_request_body: &provider_request_body,
+            original_request_body: body_json,
+        }) else {
+            mark_skipped_local_standard_candidate_with_failure_diagnostic(
+                state,
+                input,
+                trace_id,
+                candidate,
+                attempt.candidate_index,
+                &attempt.candidate_id,
+                "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    spec_metadata.api_format,
+                    provider_api_format,
+                    "grok_standard_family_headers",
+                ),
+            )
+            .await;
+            return None;
+        };
+
+        return Some(LocalStandardCandidatePayloadParts {
+            auth_header: prepared_candidate.auth_header,
+            auth_value: prepared_candidate.auth_value,
+            mapped_model: prepared_candidate.mapped_model,
+            provider_api_format: provider_api_format.to_string(),
+            provider_request_body,
+            provider_request_headers,
+            upstream_url,
+            upstream_is_stream,
+            envelope_name: None,
+            transport: Arc::clone(transport),
+            transport_profile,
+        });
+    }
+
     let Some(conversion_kind) =
         crate::ai_serving::request_conversion_kind(spec_metadata.api_format, provider_api_format)
     else {
@@ -361,6 +475,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         upstream_is_stream,
         envelope_name: None,
         transport: Arc::clone(transport),
+        transport_profile: None,
     })
 }
 
@@ -496,6 +611,7 @@ async fn resolve_local_gemini_image_to_openai_image_candidate_payload_parts(
         upstream_is_stream,
         envelope_name: None,
         transport: Arc::clone(transport),
+        transport_profile: None,
     })
 }
 
@@ -614,5 +730,6 @@ async fn build_kiro_cross_format_payload_parts(
         upstream_is_stream,
         envelope_name: Some(KIRO_ENVELOPE_NAME),
         transport: Arc::clone(transport),
+        transport_profile: None,
     })
 }

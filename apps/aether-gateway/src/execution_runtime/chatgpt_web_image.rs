@@ -3,9 +3,10 @@ use std::io::Error as IoError;
 use std::time::Instant;
 
 use aether_contracts::{
-    ExecutionPlan, ExecutionResult, ExecutionTelemetry, RequestBody, ResponseBody, StreamFrame,
-    StreamFramePayload, StreamFrameType, EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER,
-    EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
+    ExecutionPlan, ExecutionResult, ExecutionTelemetry, RequestBody, ResolvedTransportProfile,
+    ResponseBody, StreamFrame, StreamFramePayload, StreamFrameType,
+    EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
+    TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_HTTP_MODE_AUTO, TRANSPORT_POOL_SCOPE_KEY,
 };
 use axum::body::Bytes;
 use base64::Engine as _;
@@ -30,6 +31,7 @@ const CHATGPT_WEB_CLIENT_VERSION: &str = "prod-be885abbfcfe7b1f511e88b3003d9ee44
 const CHATGPT_WEB_BUILD_NUMBER: &str = "5955942";
 const CHATGPT_WEB_SEC_CH_UA: &str =
     r#""Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24""#;
+const CHATGPT_WEB_BROWSER_PROFILE: &str = "chrome143";
 
 pub(crate) struct ChatGptWebImageStream {
     pub(crate) frame_stream: BoxStream<'static, Result<Bytes, IoError>>,
@@ -921,12 +923,40 @@ async fn execute_subrequest(
         provider_api_format: plan.provider_api_format.clone(),
         model_name: plan.model_name.clone(),
         proxy: plan.proxy.clone(),
-        transport_profile: plan.transport_profile.clone(),
+        transport_profile: chatgpt_web_image_transport_profile(plan),
         timeouts: plan.timeouts.clone(),
     };
     DirectSyncExecutionRuntime::new()
         .execute_sync(&subplan)
         .await
+}
+
+fn chatgpt_web_image_transport_profile(plan: &ExecutionPlan) -> Option<ResolvedTransportProfile> {
+    match plan.transport_profile.as_ref() {
+        Some(profile)
+            if profile
+                .backend
+                .trim()
+                .eq_ignore_ascii_case(TRANSPORT_BACKEND_BROWSER_WREQ) =>
+        {
+            Some(profile.clone())
+        }
+        _ => Some(default_chatgpt_web_image_transport_profile()),
+    }
+}
+
+fn default_chatgpt_web_image_transport_profile() -> ResolvedTransportProfile {
+    ResolvedTransportProfile {
+        profile_id: CHATGPT_WEB_BROWSER_PROFILE.to_string(),
+        backend: TRANSPORT_BACKEND_BROWSER_WREQ.to_string(),
+        http_mode: TRANSPORT_HTTP_MODE_AUTO.to_string(),
+        pool_scope: TRANSPORT_POOL_SCOPE_KEY.to_string(),
+        header_fingerprint: None,
+        extra: Some(json!({
+            "browser_profile": CHATGPT_WEB_BROWSER_PROFILE,
+            "source": "chatgpt_web_image_default",
+        })),
+    }
 }
 
 fn web_base_headers(fp: &WebFingerprint, token: &str, path: &str) -> BTreeMap<String, String> {
@@ -1960,6 +1990,30 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    #[test]
+    fn chatgpt_web_image_subrequests_default_to_browser_wreq_transport() {
+        let plan = sample_plan(
+            CHATGPT_WEB_DEFAULT_BASE_URL,
+            json!({"prompt": "draw a small test image"}),
+            false,
+        );
+
+        let profile = chatgpt_web_image_transport_profile(&plan).expect("transport profile");
+
+        assert_eq!(profile.backend, TRANSPORT_BACKEND_BROWSER_WREQ);
+        assert_eq!(profile.profile_id, CHATGPT_WEB_BROWSER_PROFILE);
+        assert_eq!(profile.http_mode, TRANSPORT_HTTP_MODE_AUTO);
+        assert_eq!(profile.pool_scope, TRANSPORT_POOL_SCOPE_KEY);
+        assert_eq!(
+            profile
+                .extra
+                .as_ref()
+                .and_then(|value| value.get("source"))
+                .and_then(Value::as_str),
+            Some("chatgpt_web_image_default")
+        );
     }
 
     async fn start_mock_chatgpt_web() -> (String, tokio::task::JoinHandle<()>) {

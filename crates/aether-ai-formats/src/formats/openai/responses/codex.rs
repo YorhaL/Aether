@@ -44,6 +44,18 @@ fn is_openai_image_request(provider_api_format: &str) -> bool {
         .eq_ignore_ascii_case("openai:image")
 }
 
+fn codex_openai_responses_body_uses_image_generation_tool(
+    body_object: &serde_json::Map<String, Value>,
+) -> bool {
+    body_object
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .any(|tool| tool.get("type").and_then(Value::as_str) == Some("image_generation"))
+}
+
 fn apply_codex_openai_image_tool_overrides(body_object: &mut serde_json::Map<String, Value>) {
     let mut tool = body_object
         .get("tools")
@@ -397,7 +409,9 @@ pub fn apply_codex_openai_responses_special_body_edits(
     {
         body_object.insert("instructions".to_string(), json!(""));
     }
-    if is_openai_image_request(provider_api_format) {
+    if is_openai_image_request(provider_api_format)
+        || codex_openai_responses_body_uses_image_generation_tool(body_object)
+    {
         body_object.insert(
             "model".to_string(),
             json!(CODEX_OPENAI_IMAGE_INTERNAL_MODEL),
@@ -706,6 +720,39 @@ mod tests {
             json!(CODEX_OPENAI_IMAGE_INTERNAL_MODEL)
         );
         assert_eq!(provider_request_body["stream"], json!(true));
+        assert_eq!(
+            provider_request_body["tool_choice"]["type"],
+            json!("image_generation")
+        );
+    }
+
+    #[test]
+    fn codex_responses_image_tool_edits_force_internal_model_and_tool_defaults() {
+        let mut provider_request_body = json!({
+            "model": "gpt-image-2",
+            "input": "generate image",
+            "tools": [{
+                "type": "image_generation"
+            }]
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            provider_request_body["model"],
+            json!(CODEX_OPENAI_IMAGE_INTERNAL_MODEL)
+        );
+        assert_eq!(provider_request_body["stream"], json!(true));
+        assert_eq!(
+            provider_request_body["tools"][0]["type"],
+            json!("image_generation")
+        );
         assert_eq!(
             provider_request_body["tool_choice"]["type"],
             json!("image_generation")

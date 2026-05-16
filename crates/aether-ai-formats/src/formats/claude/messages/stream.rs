@@ -669,6 +669,12 @@ impl ClaudeClientEmitter {
                 Ok(out)
             }
             CanonicalStreamEvent::ContentPart(part) => self.emit_content_part(part),
+            CanonicalStreamEvent::ImageGenerationCall { item, .. } => {
+                let Some(part) = content_part_from_openai_image_generation_item(&item) else {
+                    return Ok(Vec::new());
+                };
+                self.emit_content_part(part)
+            }
             CanonicalStreamEvent::ToolCallStart {
                 index,
                 call_id,

@@ -18,7 +18,9 @@ use crate::ai_serving::api::{
     normalize_provider_private_report_context, StreamingStandardTerminalObserver,
 };
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
-use crate::execution_runtime::transport::DirectUpstreamResponse;
+use crate::execution_runtime::transport::{
+    format_wreq_upstream_request_error, DirectUpstreamResponse,
+};
 use crate::execution_runtime::DirectUpstreamStreamExecution;
 use crate::GatewayError;
 
@@ -215,6 +217,62 @@ pub(crate) fn build_direct_execution_frame_stream(
                         }
                         Err(err) => {
                             let message = format_error_chain(&err);
+                            warn!(
+                                event_name = "stream_pump_body_read_error",
+                                log_type = "ops",
+                                status_code,
+                                upstream_bytes,
+                                error = %message,
+                                "upstream body stream read error"
+                            );
+                            match encode_error_frame(status_code, message) {
+                                Ok(frame) => yield Ok(frame),
+                                Err(encode_err) => {
+                                    yield Err(encode_err);
+                                    return;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            DirectUpstreamResponse::BrowserWreq(response) => {
+                let mut bytes_stream = response.bytes_stream();
+                while let Some(item) = bytes_stream.next().await {
+                    match item {
+                        Ok(chunk) => {
+                            if ttfb_ms.is_none() {
+                                ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
+                            }
+                            if !first_chunk_telemetry_emitted {
+                                match encode_telemetry_frame(ttfb_ms, ttfb_ms, upstream_bytes) {
+                                    Ok(frame) => yield Ok(frame),
+                                    Err(err) => {
+                                        yield Err(err);
+                                        return;
+                                    }
+                                }
+                                first_chunk_telemetry_emitted = true;
+                            }
+                            upstream_bytes += chunk.len() as u64;
+                            observe_stream_chunk(
+                                &mut stream_terminal_observer,
+                                &normalized_observer_context,
+                                private_stream_normalizer.as_mut(),
+                                &mut observer_buffered,
+                                chunk.as_ref(),
+                            );
+                            match encode_data_frame(&chunk) {
+                                Ok(frame) => yield Ok(frame),
+                                Err(err) => {
+                                    yield Err(err);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let message = format_wreq_upstream_request_error(&err);
                             warn!(
                                 event_name = "stream_pump_body_read_error",
                                 log_type = "ops",
@@ -438,6 +496,35 @@ async fn buffer_non_sse_upstream_body(
                     }
                     Err(err) => {
                         let message = format_error_chain(&err);
+                        warn!(
+                            event_name = "stream_pump_body_read_error",
+                            log_type = "ops",
+                            upstream_bytes,
+                            error = %message,
+                            "upstream body stream read error"
+                        );
+                        return Err(BufferedUpstreamBodyError {
+                            message,
+                            ttfb_ms,
+                            upstream_bytes,
+                        });
+                    }
+                }
+            }
+        }
+        DirectUpstreamResponse::BrowserWreq(response) => {
+            let mut bytes_stream = response.bytes_stream();
+            while let Some(item) = bytes_stream.next().await {
+                match item {
+                    Ok(chunk) => {
+                        if ttfb_ms.is_none() {
+                            ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
+                        }
+                        upstream_bytes += chunk.len() as u64;
+                        body_bytes.extend_from_slice(&chunk);
+                    }
+                    Err(err) => {
+                        let message = format_wreq_upstream_request_error(&err);
                         warn!(
                             event_name = "stream_pump_body_read_error",
                             log_type = "ops",

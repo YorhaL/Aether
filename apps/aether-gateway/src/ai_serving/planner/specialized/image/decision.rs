@@ -57,7 +57,10 @@ pub(super) async fn maybe_build_local_openai_image_decision_payload_for_candidat
         .app()
         .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
         .await;
-    let transport_profile = resolve_transport_profile(&transport);
+    let transport_profile = resolved
+        .transport_profile
+        .clone()
+        .or_else(|| resolve_transport_profile(&transport));
     let mut extra_fields = serde_json::Map::new();
     if let Some(proxy_value) = build_request_trace_proxy_value(Some(&transport), proxy.as_ref()) {
         extra_fields.insert("proxy".to_string(), proxy_value);

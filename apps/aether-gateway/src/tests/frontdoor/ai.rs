@@ -4,6 +4,7 @@ use super::{
     InMemoryVideoTaskRepository, UpsertVideoTask, VideoTaskLookupKey, VideoTaskReadRepository,
     VideoTaskStatus, VideoTaskWriteRepository, DEVELOPMENT_ENCRYPTION_KEY,
 };
+use crate::image_capabilities::openai_image_gateway_max_generation_count;
 use crate::tests::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
     to_bytes, AppState, Arc, Body, Json, Mutex, Request, Router, StatusCode, EXECUTION_PATH_HEADER,
@@ -582,7 +583,7 @@ async fn gateway_does_not_locally_reject_image_model_name_on_chat_completions() 
 }
 
 #[tokio::test]
-async fn gateway_rejects_image_request_with_n_greater_than_one_without_hitting_fallback_probe() {
+async fn gateway_rejects_image_request_with_n_greater_than_four_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
     let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
     let fallback_probe = Router::new().route(
@@ -615,9 +616,9 @@ async fn gateway_rejects_image_request_with_n_greater_than_one_without_hitting_f
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(
             serde_json::to_vec(&json!({
-                "model": "gpt-image-2",
+                "model": "grok-imagine-image-lite",
                 "prompt": "draw",
-                "n": 2,
+                "n": 5,
                 "response_format": "b64_json"
             }))
             .expect("request body should encode"),
@@ -635,7 +636,13 @@ async fn gateway_rejects_image_request_with_n_greater_than_one_without_hitting_f
         Some(EXECUTION_PATH_LOCAL_AI_PUBLIC)
     );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["detail"], "当前 Codex 图片反代仅支持 n=1");
+    assert_eq!(
+        payload["detail"],
+        format!(
+            "当前图片反代仅支持 n=1..{}",
+            openai_image_gateway_max_generation_count()
+        )
+    );
     assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -643,7 +650,7 @@ async fn gateway_rejects_image_request_with_n_greater_than_one_without_hitting_f
 }
 
 #[tokio::test]
-async fn gateway_rejects_variation_request_without_image_without_hitting_fallback_probe() {
+async fn gateway_does_not_mount_image_variation_route_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
     let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
     let fallback_probe = Router::new().route(
@@ -685,16 +692,7 @@ async fn gateway_rejects_variation_request_without_image_without_hitting_fallbac
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response
-            .headers()
-            .get(EXECUTION_PATH_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        Some(EXECUTION_PATH_LOCAL_AI_PUBLIC)
-    );
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["detail"], "图片变体请求需要 image 文件");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

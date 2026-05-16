@@ -66,7 +66,10 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
     let proxy = state
         .resolve_transport_proxy_snapshot_with_tunnel_affinity(&resolved.transport)
         .await;
-    let transport_profile = resolve_transport_profile(&resolved.transport);
+    let transport_profile = resolved
+        .transport_profile
+        .clone()
+        .or_else(|| resolve_transport_profile(&resolved.transport));
     let mut extra_fields = serde_json::Map::new();
     if let Some(proxy_value) =
         build_request_trace_proxy_value(Some(&resolved.transport), proxy.as_ref())
@@ -149,6 +152,7 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         upstream_url,
         provider_request_headers,
         provider_request_body,
+        transport_profile: _,
     } = resolved;
 
     Some(build_ai_execution_decision_response(

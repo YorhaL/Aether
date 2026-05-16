@@ -36,14 +36,15 @@ use crate::api::response::{
 use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::chatgpt_web_image::maybe_execute_chatgpt_web_image_sync;
+use crate::execution_runtime::grok::maybe_execute_grok_sync;
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_sync_plan_to_remote_execution_runtime;
 use crate::execution_runtime::submission::submit_local_core_error_or_sync_finalize;
 use crate::execution_runtime::transport::{
     build_request_body, collect_response_headers, decode_response_body_bytes,
-    response_body_is_json, send_request, DirectSyncExecutionRuntime,
-    ExecutionRuntimeTransportError,
+    format_upstream_request_error, format_wreq_upstream_request_error, response_body_is_json,
+    send_request, DirectHttpResponse, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
 };
 use crate::execution_runtime::{
     analyze_local_candidate_failover_sync, apply_endpoint_response_header_rules,
@@ -682,23 +683,46 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
         .await
         .map_err(SyncExecutionFailure::from_transport)?;
     let ttfb_ms = started_at.elapsed().as_millis() as u64;
-    let status_code = response.status().as_u16();
-    let headers = collect_response_headers(response.headers());
+    let status_code = response.status_code();
+    let headers = response.headers();
     progress.record_response_started(status_code, ttfb_ms).await;
 
-    let mut upstream_stream = response.bytes_stream();
     let mut body_bytes = Vec::new();
-    while let Some(chunk) = upstream_stream.next().await {
-        let chunk = chunk.map_err(|err| {
-            SyncExecutionFailure::from_transport(ExecutionRuntimeTransportError::UpstreamRequest(
-                crate::execution_runtime::transport::format_upstream_request_error(&err),
-            ))
-        })?;
-        let elapsed_ms = started_at.elapsed().as_millis() as u64;
-        progress
-            .observe_chunk(&chunk, status_code, elapsed_ms)
-            .await;
-        body_bytes.extend_from_slice(&chunk);
+    match response {
+        DirectHttpResponse::Reqwest(response) => {
+            let mut upstream_stream = response.bytes_stream();
+            while let Some(chunk) = upstream_stream.next().await {
+                let chunk = chunk.map_err(|err| {
+                    SyncExecutionFailure::from_transport(
+                        ExecutionRuntimeTransportError::UpstreamRequest(
+                            format_upstream_request_error(&err),
+                        ),
+                    )
+                })?;
+                let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                progress
+                    .observe_chunk(&chunk, status_code, elapsed_ms)
+                    .await;
+                body_bytes.extend_from_slice(&chunk);
+            }
+        }
+        DirectHttpResponse::BrowserWreq(response) => {
+            let mut upstream_stream = response.bytes_stream();
+            while let Some(chunk) = upstream_stream.next().await {
+                let chunk = chunk.map_err(|err| {
+                    SyncExecutionFailure::from_transport(
+                        ExecutionRuntimeTransportError::UpstreamRequest(
+                            format_wreq_upstream_request_error(&err),
+                        ),
+                    )
+                })?;
+                let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                progress
+                    .observe_chunk(&chunk, status_code, elapsed_ms)
+                    .await;
+                body_bytes.extend_from_slice(&chunk);
+            }
+        }
     }
 
     let decoded_body_bytes =
@@ -1077,64 +1101,106 @@ async fn execute_execution_runtime_sync_impl(
     .await;
     #[cfg(not(test))]
     let mut result = {
-        match maybe_execute_chatgpt_web_image_sync(state, &plan, report_context.as_ref()).await {
+        match maybe_execute_grok_sync(&plan, report_context.as_ref()).await {
             Ok(Some(result)) => result,
-            Ok(None) => match execute_direct_sync_runtime_candidate(
-                state,
-                &plan,
-                report_context.as_ref(),
-                trace_id,
-                plan_kind,
-                plan_request_id_for_log.as_str(),
-                plan_candidate_id.as_deref(),
-                provider_name.as_str(),
-                endpoint_id.as_str(),
-                key_id.as_str(),
-                model_name.as_str(),
-                candidate_index.as_str(),
-                progress_snapshot.clone(),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    warn!(
-                        event_name = "sync_execution_runtime_unavailable",
-                        log_type = "ops",
-                        trace_id = %trace_id,
-                        request_id = %plan_request_id_for_log,
-                        candidate_id = ?plan_candidate_id,
-                        provider_name,
-                        endpoint_id,
-                        key_id,
-                        model_name,
-                        candidate_index = candidate_index.as_str(),
-                        error_type = err.error_type,
-                        error = %err.message,
-                        "gateway in-process sync execution unavailable"
-                    );
-                    let terminal_unix_secs = current_request_candidate_unix_ms();
-                    record_local_request_candidate_status(
+            Ok(None) => {
+                match maybe_execute_chatgpt_web_image_sync(state, &plan, report_context.as_ref())
+                    .await
+                {
+                    Ok(Some(result)) => result,
+                    Ok(None) => match execute_direct_sync_runtime_candidate(
                         state,
                         &plan,
                         report_context.as_ref(),
-                        SchedulerRequestCandidateStatusUpdate {
-                            status: RequestCandidateStatus::Failed,
-                            status_code: err.status_code,
-                            error_type: Some(err.error_type.to_string()),
-                            error_message: Some(err.message),
-                            latency_ms: err.latency_ms,
-                            started_at_unix_ms: Some(candidate_started_unix_secs),
-                            finished_at_unix_ms: Some(terminal_unix_secs),
-                        },
+                        trace_id,
+                        plan_kind,
+                        plan_request_id_for_log.as_str(),
+                        plan_candidate_id.as_deref(),
+                        provider_name.as_str(),
+                        endpoint_id.as_str(),
+                        key_id.as_str(),
+                        model_name.as_str(),
+                        candidate_index.as_str(),
+                        progress_snapshot.clone(),
                     )
-                    .await;
-                    return Ok(None);
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(err) => {
+                            warn!(
+                                event_name = "sync_execution_runtime_unavailable",
+                                log_type = "ops",
+                                trace_id = %trace_id,
+                                request_id = %plan_request_id_for_log,
+                                candidate_id = ?plan_candidate_id,
+                                provider_name,
+                                endpoint_id,
+                                key_id,
+                                model_name,
+                                candidate_index = candidate_index.as_str(),
+                                error_type = err.error_type,
+                                error = %err.message,
+                                "gateway in-process sync execution unavailable"
+                            );
+                            let terminal_unix_secs = current_request_candidate_unix_ms();
+                            record_local_request_candidate_status(
+                                state,
+                                &plan,
+                                report_context.as_ref(),
+                                SchedulerRequestCandidateStatusUpdate {
+                                    status: RequestCandidateStatus::Failed,
+                                    status_code: err.status_code,
+                                    error_type: Some(err.error_type.to_string()),
+                                    error_message: Some(err.message),
+                                    latency_ms: err.latency_ms,
+                                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                                    finished_at_unix_ms: Some(terminal_unix_secs),
+                                },
+                            )
+                            .await;
+                            return Ok(None);
+                        }
+                    },
+                    Err(err) => {
+                        warn!(
+                            event_name = "chatgpt_web_image_execution_unavailable",
+                            log_type = "ops",
+                            trace_id = %trace_id,
+                            request_id = %plan_request_id_for_log,
+                            candidate_id = ?plan_candidate_id,
+                            provider_name,
+                            endpoint_id,
+                            key_id,
+                            model_name,
+                            candidate_index = candidate_index.as_str(),
+                            error = %err,
+                            "gateway ChatGPT-Web image execution unavailable"
+                        );
+                        let terminal_unix_secs = current_request_candidate_unix_ms();
+                        record_local_request_candidate_status(
+                            state,
+                            &plan,
+                            report_context.as_ref(),
+                            SchedulerRequestCandidateStatusUpdate {
+                                status: RequestCandidateStatus::Failed,
+                                status_code: None,
+                                error_type: Some(
+                                    "chatgpt_web_image_execution_unavailable".to_string(),
+                                ),
+                                error_message: Some(err.to_string()),
+                                latency_ms: None,
+                                started_at_unix_ms: Some(candidate_started_unix_secs),
+                                finished_at_unix_ms: Some(terminal_unix_secs),
+                            },
+                        )
+                        .await;
+                        return Ok(None);
+                    }
                 }
-            },
+            }
             Err(err) => {
                 warn!(
-                    event_name = "chatgpt_web_image_execution_unavailable",
+                    event_name = "grok_execution_unavailable",
                     log_type = "ops",
                     trace_id = %trace_id,
                     request_id = %plan_request_id_for_log,
@@ -1145,7 +1211,7 @@ async fn execute_execution_runtime_sync_impl(
                     model_name,
                     candidate_index = candidate_index.as_str(),
                     error = %err,
-                    "gateway ChatGPT-Web image execution unavailable"
+                    "gateway Grok execution unavailable"
                 );
                 let terminal_unix_secs = current_request_candidate_unix_ms();
                 record_local_request_candidate_status(
@@ -1155,7 +1221,7 @@ async fn execute_execution_runtime_sync_impl(
                     SchedulerRequestCandidateStatusUpdate {
                         status: RequestCandidateStatus::Failed,
                         status_code: None,
-                        error_type: Some("chatgpt_web_image_execution_unavailable".to_string()),
+                        error_type: Some("grok_execution_unavailable".to_string()),
                         error_message: Some(err.to_string()),
                         latency_ms: None,
                         started_at_unix_ms: Some(candidate_started_unix_secs),
@@ -1212,30 +1278,72 @@ async fn execute_execution_runtime_sync_impl(
             .trim()
             .is_empty()
         {
-            match maybe_execute_chatgpt_web_image_sync(state, &plan, report_context.as_ref()).await
-            {
+            match maybe_execute_grok_sync(&plan, report_context.as_ref()).await {
                 Ok(Some(result)) => result,
-                Ok(None) => match execute_direct_sync_runtime_candidate(
+                Ok(None) => match maybe_execute_chatgpt_web_image_sync(
                     state,
                     &plan,
                     report_context.as_ref(),
-                    trace_id,
-                    plan_kind,
-                    plan_request_id_for_log.as_str(),
-                    plan_candidate_id.as_deref(),
-                    provider_name.as_str(),
-                    endpoint_id.as_str(),
-                    key_id.as_str(),
-                    model_name.as_str(),
-                    candidate_index.as_str(),
-                    progress_snapshot.clone(),
                 )
                 .await
                 {
-                    Ok(result) => result,
+                    Ok(Some(result)) => result,
+                    Ok(None) => match execute_direct_sync_runtime_candidate(
+                        state,
+                        &plan,
+                        report_context.as_ref(),
+                        trace_id,
+                        plan_kind,
+                        plan_request_id_for_log.as_str(),
+                        plan_candidate_id.as_deref(),
+                        provider_name.as_str(),
+                        endpoint_id.as_str(),
+                        key_id.as_str(),
+                        model_name.as_str(),
+                        candidate_index.as_str(),
+                        progress_snapshot.clone(),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(err) => {
+                            warn!(
+                                event_name = "sync_execution_runtime_unavailable",
+                                log_type = "ops",
+                                trace_id = %trace_id,
+                                request_id = %plan_request_id_for_log,
+                                candidate_id = ?plan_candidate_id,
+                                provider_name,
+                                endpoint_id,
+                                key_id,
+                                model_name,
+                                candidate_index = candidate_index.as_str(),
+                                error_type = err.error_type,
+                                error = %err.message,
+                                "gateway in-process sync execution unavailable"
+                            );
+                            let terminal_unix_secs = current_request_candidate_unix_ms();
+                            record_local_request_candidate_status(
+                                state,
+                                &plan,
+                                report_context.as_ref(),
+                                SchedulerRequestCandidateStatusUpdate {
+                                    status: RequestCandidateStatus::Failed,
+                                    status_code: err.status_code,
+                                    error_type: Some(err.error_type.to_string()),
+                                    error_message: Some(err.message),
+                                    latency_ms: err.latency_ms,
+                                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                                    finished_at_unix_ms: Some(terminal_unix_secs),
+                                },
+                            )
+                            .await;
+                            return Ok(None);
+                        }
+                    },
                     Err(err) => {
                         warn!(
-                            event_name = "sync_execution_runtime_unavailable",
+                            event_name = "chatgpt_web_image_execution_unavailable",
                             log_type = "ops",
                             trace_id = %trace_id,
                             request_id = %plan_request_id_for_log,
@@ -1245,9 +1353,8 @@ async fn execute_execution_runtime_sync_impl(
                             key_id,
                             model_name,
                             candidate_index = candidate_index.as_str(),
-                            error_type = err.error_type,
-                            error = %err.message,
-                            "gateway in-process sync execution unavailable"
+                            error = %err,
+                            "gateway ChatGPT-Web image execution unavailable"
                         );
                         let terminal_unix_secs = current_request_candidate_unix_ms();
                         record_local_request_candidate_status(
@@ -1256,10 +1363,12 @@ async fn execute_execution_runtime_sync_impl(
                             report_context.as_ref(),
                             SchedulerRequestCandidateStatusUpdate {
                                 status: RequestCandidateStatus::Failed,
-                                status_code: err.status_code,
-                                error_type: Some(err.error_type.to_string()),
-                                error_message: Some(err.message),
-                                latency_ms: err.latency_ms,
+                                status_code: None,
+                                error_type: Some(
+                                    "chatgpt_web_image_execution_unavailable".to_string(),
+                                ),
+                                error_message: Some(err.to_string()),
+                                latency_ms: None,
                                 started_at_unix_ms: Some(candidate_started_unix_secs),
                                 finished_at_unix_ms: Some(terminal_unix_secs),
                             },
@@ -1270,7 +1379,7 @@ async fn execute_execution_runtime_sync_impl(
                 },
                 Err(err) => {
                     warn!(
-                        event_name = "chatgpt_web_image_execution_unavailable",
+                        event_name = "grok_execution_unavailable",
                         log_type = "ops",
                         trace_id = %trace_id,
                         request_id = %plan_request_id_for_log,
@@ -1281,7 +1390,7 @@ async fn execute_execution_runtime_sync_impl(
                         model_name,
                         candidate_index = candidate_index.as_str(),
                         error = %err,
-                        "gateway ChatGPT-Web image execution unavailable"
+                        "gateway Grok execution unavailable"
                     );
                     let terminal_unix_secs = current_request_candidate_unix_ms();
                     record_local_request_candidate_status(
@@ -1291,7 +1400,7 @@ async fn execute_execution_runtime_sync_impl(
                         SchedulerRequestCandidateStatusUpdate {
                             status: RequestCandidateStatus::Failed,
                             status_code: None,
-                            error_type: Some("chatgpt_web_image_execution_unavailable".to_string()),
+                            error_type: Some("grok_execution_unavailable".to_string()),
                             error_message: Some(err.to_string()),
                             latency_ms: None,
                             started_at_unix_ms: Some(candidate_started_unix_secs),

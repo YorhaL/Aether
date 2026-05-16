@@ -81,6 +81,28 @@ fn classifies_openai_chat_and_responses_separately_from_embedding() {
 }
 
 #[test]
+fn classifies_openai_image_generation_and_edit_but_not_variation() {
+    let headers = headers(&[("authorization", "Bearer sk-test")]);
+
+    for path in ["/v1/images/generations", "/v1/images/edits"] {
+        let uri: Uri = path.parse().expect("uri should parse");
+        let decision = classify_control_route(&http::Method::POST, &uri, &headers)
+            .expect("image route should classify");
+
+        assert_eq!(decision.route_family.as_deref(), Some("openai"));
+        assert_eq!(decision.route_kind.as_deref(), Some("image"));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("openai:image")
+        );
+        assert!(decision.is_execution_runtime_candidate());
+    }
+
+    let variation_uri: Uri = "/v1/images/variations".parse().expect("uri should parse");
+    assert!(classify_control_route(&http::Method::POST, &variation_uri, &headers).is_none());
+}
+
+#[test]
 fn classifies_models_list_as_claude_when_headers_match() {
     let headers = headers(&[
         ("x-api-key", "sk-claude"),

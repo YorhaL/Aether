@@ -1762,6 +1762,11 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
                     ),
                 });
             }
+            "image_generation_call" => {
+                blocks.push(openai_responses_image_generation_call_to_block(
+                    item_object,
+                )?);
+            }
             "output_text" | "text" | "output_image" | "image_url" | "file" | "input_file"
             | "input_audio" => blocks.push(openai_responses_part_to_canonical_block(item)?),
             _ => blocks.push(CanonicalContentBlock::Unknown {
@@ -1772,6 +1777,79 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
         }
     }
     Some(blocks)
+}
+
+fn openai_responses_image_generation_call_to_block(
+    item_object: &Map<String, Value>,
+) -> Option<CanonicalContentBlock> {
+    let result = item_object
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let url = item_object
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let raw_image = result.or(url)?;
+    let fallback_media_type = item_object
+        .get("mime_type")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            item_object
+                .get("output_format")
+                .and_then(Value::as_str)
+                .map(openai_responses_output_format_to_mime_type)
+        });
+    let (media_type, data, url) = if raw_image.starts_with("data:image/") {
+        split_data_url(Some(raw_image.to_string()), fallback_media_type)
+    } else if raw_image.starts_with("http://") || raw_image.starts_with("https://") {
+        (fallback_media_type, None, Some(raw_image.to_string()))
+    } else if result.is_some() {
+        (
+            fallback_media_type.or_else(|| Some("image/png".to_string())),
+            Some(raw_image.to_string()),
+            None,
+        )
+    } else {
+        (fallback_media_type, None, Some(raw_image.to_string()))
+    };
+    let mut extensions = openai_responses_extensions(
+        item_object,
+        &[
+            "type",
+            "id",
+            "status",
+            "action",
+            "result",
+            "url",
+            "output_format",
+            "mime_type",
+        ],
+    );
+    canonical_extension_object_mut(&mut extensions, OPENAI_RESPONSES_EXTENSION_NAMESPACE).insert(
+        "item_type".to_string(),
+        Value::String("image_generation_call".to_string()),
+    );
+    Some(CanonicalContentBlock::Image {
+        data,
+        url,
+        media_type,
+        detail: None,
+        extensions,
+    })
+}
+
+fn openai_responses_output_format_to_mime_type(output_format: &str) -> String {
+    match output_format.trim().to_ascii_lowercase().as_str() {
+        "jpeg" | "jpg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/png",
+    }
+    .to_string()
 }
 
 pub(crate) fn openai_responses_part_to_canonical_block(
@@ -5325,6 +5403,48 @@ mod tests {
             1
         );
         assert_eq!(rebuilt["service_tier"], "flex");
+    }
+
+    #[test]
+    fn openai_responses_image_generation_call_becomes_canonical_image_block() {
+        let response = json!({
+            "id": "resp_img",
+            "model": "gpt-image-2",
+            "status": "completed",
+            "output": [{
+                "id": "ig_1",
+                "type": "image_generation_call",
+                "status": "completed",
+                "output_format": "png",
+                "result": "aW1hZ2U="
+            }]
+        });
+
+        let canonical =
+            from_openai_responses_to_canonical_response(&response).expect("canonical response");
+        assert!(matches!(
+            canonical.content[0],
+            CanonicalContentBlock::Image { ref data, ref media_type, .. }
+                if data.as_deref() == Some("aW1hZ2U=")
+                    && media_type.as_deref() == Some("image/png")
+        ));
+
+        let rebuilt_chat = canonical_to_openai_chat_response(&canonical);
+        assert_eq!(
+            rebuilt_chat["choices"][0]["message"]["content"][0]["type"],
+            json!("image_url")
+        );
+        assert_eq!(
+            rebuilt_chat["choices"][0]["message"]["content"][0]["image_url"]["url"],
+            json!("data:image/png;base64,aW1hZ2U=")
+        );
+
+        let rebuilt_responses = canonical_to_openai_responses_response(&canonical, &json!({}));
+        assert_eq!(
+            rebuilt_responses["output"][0]["type"],
+            json!("image_generation_call")
+        );
+        assert_eq!(rebuilt_responses["output"][0]["result"], json!("aW1hZ2U="));
     }
 
     #[test]

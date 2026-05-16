@@ -160,6 +160,57 @@ pub fn canonical_usage_from_claude_usage(value: Option<&Value>) -> Option<Canoni
     })
 }
 
+pub fn content_part_from_openai_image_generation_item(
+    item: &Value,
+) -> Option<CanonicalContentPart> {
+    let item = item.as_object()?;
+    let result = item
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let url = item
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let image = if let Some(result) = result {
+        if result.starts_with("data:image/")
+            || result.starts_with("http://")
+            || result.starts_with("https://")
+        {
+            result.to_string()
+        } else {
+            let mime_type = item
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    item.get("output_format")
+                        .and_then(Value::as_str)
+                        .map(openai_image_output_format_to_mime_type)
+                })
+                .unwrap_or_else(|| "image/png".to_string());
+            format!("data:{mime_type};base64,{result}")
+        }
+    } else {
+        url?.to_string()
+    };
+    Some(CanonicalContentPart::ImageUrl(image))
+}
+
+fn openai_image_output_format_to_mime_type(output_format: &str) -> String {
+    match output_format.trim().to_ascii_lowercase().as_str() {
+        "jpeg" | "jpg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/png",
+    }
+    .to_string()
+}
+
 pub fn canonical_usage_from_gemini_usage(value: Option<&Value>) -> Option<CanonicalUsage> {
     let usage = value?.as_object()?;
     let input_tokens = usage

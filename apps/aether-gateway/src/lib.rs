@@ -45,6 +45,7 @@ mod frontdoor_loop_guard;
 mod handlers;
 mod headers;
 mod hooks;
+mod image_capabilities;
 mod log_ids;
 mod maintenance;
 pub(crate) mod middleware;

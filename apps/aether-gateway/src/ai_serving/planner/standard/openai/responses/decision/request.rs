@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use aether_contracts::ResolvedTransportProfile;
 use serde_json::Value;
 use tracing::debug;
 
@@ -35,8 +36,10 @@ use crate::ai_serving::transport::kiro::{
     KiroRequestAuth, KIRO_ENVELOPE_NAME,
 };
 use crate::ai_serving::transport::{
-    build_kiro_cross_format_upstream_url, build_standard_provider_request_headers,
-    local_standard_transport_unsupported_reason_with_network, StandardProviderRequestHeadersInput,
+    build_grok_browser_headers, build_grok_upstream_url, build_kiro_cross_format_upstream_url,
+    build_standard_provider_request_headers,
+    local_standard_transport_unsupported_reason_with_network, GrokHeaderInput,
+    StandardProviderRequestHeadersInput, GROK_CHAT_PATH,
 };
 use crate::ai_serving::{
     ai_local_execution_contract_for_formats, request_conversion_direct_auth,
@@ -56,6 +59,13 @@ use super::LocalOpenAiResponsesSpec;
 
 const ANTIGRAVITY_ENVELOPE_NAME: &str = "antigravity:v1internal";
 
+fn is_grok_text_provider_api_format(provider_api_format: &str) -> bool {
+    matches!(
+        crate::ai_serving::normalize_api_format_alias(provider_api_format).as_str(),
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "claude:messages"
+    )
+}
+
 pub(crate) struct LocalOpenAiResponsesCandidatePayloadParts {
     pub(super) auth_header: String,
     pub(super) auth_value: String,
@@ -70,6 +80,7 @@ pub(crate) struct LocalOpenAiResponsesCandidatePayloadParts {
     pub(super) envelope_name: Option<&'static str>,
     pub(super) upstream_is_stream: bool,
     pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
+    pub(super) transport_profile: Option<ResolvedTransportProfile>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -90,12 +101,22 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
     let candidate = &eligible.candidate;
     let provider_api_format = eligible.provider_api_format.as_str();
     let transport = &eligible.transport;
+    let transport_profile = crate::ai_serving::transport::resolve_transport_profile(transport);
     let is_antigravity = is_antigravity_provider_transport(transport);
     let is_kiro_claude_cli = is_kiro_claude_messages_transport(transport, provider_api_format);
+    let is_grok = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("grok");
 
     let same_format = api_format_alias_matches(provider_api_format, &client_api_format);
     let conversion_kind = request_conversion_kind(spec_metadata.api_format, provider_api_format);
-    let transport_unsupported_reason = if same_format && is_kiro_claude_cli {
+    let transport_unsupported_reason = if is_grok
+        && is_grok_text_provider_api_format(provider_api_format)
+    {
+        None
+    } else if same_format && is_kiro_claude_cli {
         local_kiro_request_transport_unsupported_reason_with_network(transport)
     } else if same_format {
         local_standard_transport_unsupported_reason_with_network(transport, provider_api_format)
@@ -154,7 +175,9 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         None
     };
 
-    let direct_auth = if kiro_auth.is_some() {
+    let direct_auth = if is_grok && is_grok_text_provider_api_format(provider_api_format) {
+        crate::ai_serving::transport::resolve_grok_session_auth(transport)
+    } else if kiro_auth.is_some() {
         None
     } else if same_format {
         match crate::ai_serving::normalize_api_format_alias(provider_api_format).as_str() {
@@ -236,42 +259,57 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
     );
     let force_body_stream_field =
         endpoint_config_forces_body_stream_field(transport.endpoint.config.as_ref());
-    let Some(mut base_provider_request_body) = (if needs_bidirectional_conversion {
-        build_cross_format_openai_responses_request_body(
-            body_json,
-            &mapped_model,
-            spec_metadata.api_format,
-            provider_api_format,
-            upstream_is_stream,
-            force_body_stream_field,
-            transport.provider.provider_type.as_str(),
-            if is_kiro_claude_cli {
-                None
-            } else {
-                transport.endpoint.body_rules.as_ref()
-            },
-            Some(input.auth_context.api_key_id.as_str()),
-            &parts.headers,
-            enable_model_directives,
-        )
-    } else {
-        build_local_openai_responses_request_body(
-            body_json,
-            &mapped_model,
-            upstream_is_stream,
-            force_body_stream_field,
-            transport.provider.provider_type.as_str(),
-            provider_api_format,
-            if is_kiro_claude_cli {
-                None
-            } else {
-                transport.endpoint.body_rules.as_ref()
-            },
-            Some(input.auth_context.api_key_id.as_str()),
-            &parts.headers,
-            enable_model_directives,
-        )
-    }) else {
+    let Some(mut base_provider_request_body) =
+        (if is_grok && is_grok_text_provider_api_format(provider_api_format) {
+            build_local_openai_responses_request_body(
+                body_json,
+                &mapped_model,
+                upstream_is_stream,
+                force_body_stream_field,
+                transport.provider.provider_type.as_str(),
+                spec_metadata.api_format,
+                transport.endpoint.body_rules.as_ref(),
+                Some(input.auth_context.api_key_id.as_str()),
+                &parts.headers,
+                enable_model_directives,
+            )
+        } else if needs_bidirectional_conversion {
+            build_cross_format_openai_responses_request_body(
+                body_json,
+                &mapped_model,
+                spec_metadata.api_format,
+                provider_api_format,
+                upstream_is_stream,
+                force_body_stream_field,
+                transport.provider.provider_type.as_str(),
+                if is_kiro_claude_cli {
+                    None
+                } else {
+                    transport.endpoint.body_rules.as_ref()
+                },
+                Some(input.auth_context.api_key_id.as_str()),
+                &parts.headers,
+                enable_model_directives,
+            )
+        } else {
+            build_local_openai_responses_request_body(
+                body_json,
+                &mapped_model,
+                upstream_is_stream,
+                force_body_stream_field,
+                transport.provider.provider_type.as_str(),
+                provider_api_format,
+                if is_kiro_claude_cli {
+                    None
+                } else {
+                    transport.endpoint.body_rules.as_ref()
+                },
+                Some(input.auth_context.api_key_id.as_str()),
+                &parts.headers,
+                enable_model_directives,
+            )
+        })
+    else {
         mark_skipped_local_openai_responses_candidate_with_extra_data(
             state,
             input,
@@ -390,7 +428,9 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         .await;
     }
 
-    let Some(upstream_url) = (if needs_bidirectional_conversion {
+    let Some(upstream_url) = (if is_grok && is_grok_text_provider_api_format(provider_api_format) {
+        Some(build_grok_upstream_url(transport, GROK_CHAT_PATH))
+    } else if needs_bidirectional_conversion {
         build_cross_format_openai_responses_upstream_url(
             parts,
             transport,
@@ -427,48 +467,86 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         .as_ref()
         .map(build_antigravity_static_identity_headers)
         .unwrap_or_default();
-    let Some(resolved_headers) =
-        build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
+    let resolved_headers = if is_grok && is_grok_text_provider_api_format(provider_api_format) {
+        let Some(headers) = build_grok_browser_headers(GrokHeaderInput {
             transport,
-            provider_api_format,
-            same_format,
-            headers: &parts.headers,
-            auth_header: &auth_header,
-            auth_value: &auth_value,
-            extra_headers: &extra_headers,
+            transport_profile: transport_profile.as_ref(),
+            request_headers: Some(&parts.headers),
+            content_type: "application/json",
+            accept: "text/event-stream",
             header_rules: transport.endpoint.header_rules.as_ref(),
             provider_request_body: &provider_request_body,
             original_request_body: body_json,
-            upstream_is_stream,
-        })
-    else {
-        mark_skipped_local_openai_responses_candidate_with_failure_diagnostic(
-            state,
-            input,
-            trace_id,
-            candidate,
-            candidate_index,
-            candidate_id,
-            "transport_header_rules_apply_failed",
-            CandidateFailureDiagnostic::header_rules_apply_failed(
-                spec_metadata.api_format,
+        }) else {
+            mark_skipped_local_openai_responses_candidate_with_failure_diagnostic(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    spec_metadata.api_format,
+                    provider_api_format,
+                    "grok_openai_responses_headers",
+                ),
+            )
+            .await;
+            return None;
+        };
+        crate::ai_serving::transport::StandardProviderRequestHeaders {
+            headers,
+            auth_header: auth_header.clone(),
+            auth_value: auth_value.clone(),
+        }
+    } else {
+        let Some(resolved_headers) =
+            build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
+                transport,
                 provider_api_format,
-                "openai_responses_headers",
-            ),
-        )
-        .await;
-        return None;
+                same_format,
+                headers: &parts.headers,
+                auth_header: &auth_header,
+                auth_value: &auth_value,
+                extra_headers: &extra_headers,
+                header_rules: transport.endpoint.header_rules.as_ref(),
+                provider_request_body: &provider_request_body,
+                original_request_body: body_json,
+                upstream_is_stream,
+            })
+        else {
+            mark_skipped_local_openai_responses_candidate_with_failure_diagnostic(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    spec_metadata.api_format,
+                    provider_api_format,
+                    "openai_responses_headers",
+                ),
+            )
+            .await;
+            return None;
+        };
+        resolved_headers
     };
     let mut provider_request_headers = resolved_headers.headers;
-    apply_codex_openai_responses_special_headers(
-        &mut provider_request_headers,
-        &provider_request_body,
-        &parts.headers,
-        transport.provider.provider_type.as_str(),
-        provider_api_format,
-        Some(trace_id),
-        transport.key.decrypted_auth_config.as_deref(),
-    );
+    if !is_grok {
+        apply_codex_openai_responses_special_headers(
+            &mut provider_request_headers,
+            &provider_request_body,
+            &parts.headers,
+            transport.provider.provider_type.as_str(),
+            provider_api_format,
+            Some(trace_id),
+            transport.key.decrypted_auth_config.as_deref(),
+        );
+    }
 
     let (execution_strategy, conversion_mode) =
         ai_local_execution_contract_for_formats(spec_metadata.api_format, provider_api_format);
@@ -516,6 +594,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         },
         upstream_is_stream,
         transport: Arc::clone(transport),
+        transport_profile,
     })
 }
 
@@ -666,5 +745,6 @@ async fn build_kiro_openai_responses_payload_parts(
         envelope_name: Some(KIRO_ENVELOPE_NAME),
         upstream_is_stream,
         transport: Arc::clone(transport),
+        transport_profile: None,
     })
 }

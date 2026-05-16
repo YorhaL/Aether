@@ -60,6 +60,7 @@ use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::build_direct_execution_frame_stream;
 use crate::execution_runtime::chatgpt_web_image::maybe_execute_chatgpt_web_image_stream;
+use crate::execution_runtime::grok::maybe_execute_grok_stream;
 use crate::execution_runtime::kiro_web_search::maybe_execute_kiro_web_search_stream;
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
@@ -525,6 +526,58 @@ pub(crate) async fn execute_execution_runtime_stream(
         key_id.as_str(),
     )
     .await;
+    match maybe_execute_grok_stream(&plan, report_context.as_ref()).await {
+        Ok(Some(grok_stream)) => {
+            return execute_stream_from_frame_stream(
+                state,
+                plan,
+                trace_id,
+                decision,
+                plan_kind,
+                report_kind,
+                grok_stream.report_context.or(report_context),
+                candidate_started_unix_secs,
+                stream_started_at,
+                grok_stream.frame_stream,
+                provider_pool_in_flight_guard.take(),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            info!(
+                event_name = "grok_execution_unavailable",
+                log_type = "ops",
+                trace_id = %trace_id,
+                request_id = %plan_request_id_for_log,
+                candidate_id = ?plan.candidate_id,
+                provider_name = provider_name.as_str(),
+                endpoint_id = %endpoint_id,
+                key_id = %key_id,
+                model_name = model_name.as_str(),
+                candidate_index = candidate_index.as_str(),
+                error = %err,
+                "gateway Grok stream execution unavailable"
+            );
+            let terminal_unix_secs = current_request_candidate_unix_ms();
+            record_local_request_candidate_status(
+                state,
+                &plan,
+                report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: None,
+                    error_type: Some("grok_execution_unavailable".to_string()),
+                    error_message: Some(format!("{err:?}")),
+                    latency_ms: None,
+                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                    finished_at_unix_ms: Some(terminal_unix_secs),
+                },
+            )
+            .await;
+            return Ok(None);
+        }
+    }
     match maybe_execute_kiro_web_search_stream(state, &plan, report_context.as_ref()).await {
         Ok(Some(kiro_web_search)) => {
             return execute_stream_from_frame_stream(

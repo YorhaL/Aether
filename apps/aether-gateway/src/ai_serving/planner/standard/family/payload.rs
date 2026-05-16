@@ -144,7 +144,10 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
         ),
         &resolved.transport,
     );
-    let transport_profile = resolve_transport_profile(&resolved.transport);
+    let transport_profile = resolved
+        .transport_profile
+        .clone()
+        .or_else(|| resolve_transport_profile(&resolved.transport));
     let timeouts = resolve_transport_execution_timeouts(&resolved.transport);
     let super::request::LocalStandardCandidatePayloadParts {
         auth_header,
@@ -157,6 +160,7 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
         upstream_is_stream,
         envelope_name: _,
         transport,
+        transport_profile: _,
     } = resolved;
 
     Some(build_ai_execution_decision_response(

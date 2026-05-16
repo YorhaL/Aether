@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 
@@ -50,6 +50,7 @@ pub struct OpenAIResponsesProviderState {
     tool_calls: BTreeMap<usize, OpenAIResponsesProviderToolState>,
     tool_results: BTreeMap<usize, OpenAIResponsesProviderToolResultState>,
     tool_index_by_key: BTreeMap<String, usize>,
+    image_item_keys: BTreeSet<String>,
     last_tool_index: Option<usize>,
 }
 
@@ -718,6 +719,55 @@ impl OpenAIResponsesProviderState {
         }
     }
 
+    fn emit_image_generation_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+        final_item: bool,
+    ) {
+        if item.get("type").and_then(Value::as_str) != Some("image_generation_call") {
+            return;
+        }
+        if !final_item
+            && !item
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("completed"))
+        {
+            return;
+        }
+        let has_image_payload = item
+            .get("result")
+            .or_else(|| item.get("url"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        if !has_image_payload {
+            return;
+        }
+        let index = output_index.unwrap_or(self.image_item_keys.len());
+        let key = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("image_generation_call:{index}"));
+        if !self.image_item_keys.insert(key) {
+            return;
+        }
+        self.ensure_started(report_context, out);
+        let (id, model) = self.identity(report_context);
+        out.push(CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::ImageGenerationCall {
+                index,
+                item: Value::Object(item.clone()),
+            },
+        });
+    }
+
     pub fn push_line(
         &mut self,
         report_context: &Value,
@@ -893,6 +943,15 @@ impl OpenAIResponsesProviderState {
                     }
                     "reasoning" => {
                         self.ensure_started(report_context, &mut out);
+                    }
+                    "image_generation_call" => {
+                        self.emit_image_generation_item(
+                            report_context,
+                            &mut out,
+                            item,
+                            output_index,
+                            false,
+                        );
                     }
                     _ => {
                         out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
@@ -1107,6 +1166,15 @@ impl OpenAIResponsesProviderState {
                     "reasoning" => {
                         self.emit_reasoning_item(report_context, &mut out, item);
                     }
+                    "image_generation_call" => {
+                        self.emit_image_generation_item(
+                            report_context,
+                            &mut out,
+                            item,
+                            output_index,
+                            true,
+                        );
+                    }
                     _ => {
                         out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
                     }
@@ -1151,6 +1219,15 @@ impl OpenAIResponsesProviderState {
                         }
                         "reasoning" => {
                             self.emit_reasoning_item(report_context, &mut out, item);
+                        }
+                        "image_generation_call" => {
+                            self.emit_image_generation_item(
+                                report_context,
+                                &mut out,
+                                item,
+                                Some(output_index),
+                                true,
+                            );
                         }
                         _ => {
                             out.push(
@@ -1255,6 +1332,7 @@ pub struct OpenAIResponsesClientEmitter {
     reasoning_summary_parts: Vec<String>,
     tool_calls: BTreeMap<usize, OpenAIResponsesClientToolState>,
     tool_results: BTreeMap<usize, OpenAIResponsesClientToolResultState>,
+    image_generation_items: BTreeMap<usize, Value>,
 }
 
 impl OpenAIChatClientEmitter {
@@ -1345,6 +1423,26 @@ impl OpenAIChatClientEmitter {
             }
             CanonicalStreamEvent::ReasoningSignature(_) => Ok(Vec::new()),
             CanonicalStreamEvent::ContentPart(part) => {
+                let placeholder = openai_stream_placeholder_for_content_part(&part);
+                let mut out = self.ensure_started()?;
+                out.extend(encode_json_sse(
+                    None,
+                    &build_openai_chat_chunk(
+                        self.response_id
+                            .as_deref()
+                            .unwrap_or("chatcmpl-local-stream"),
+                        self.model.as_deref().unwrap_or("unknown"),
+                        placeholder,
+                        None,
+                        None,
+                    ),
+                )?);
+                Ok(out)
+            }
+            CanonicalStreamEvent::ImageGenerationCall { item, .. } => {
+                let Some(part) = content_part_from_openai_image_generation_item(&item) else {
+                    return Ok(Vec::new());
+                };
                 let placeholder = openai_stream_placeholder_for_content_part(&part);
                 let mut out = self.ensure_started()?;
                 out.extend(encode_json_sse(
@@ -1653,6 +1751,11 @@ impl OpenAIResponsesClientEmitter {
         output_index
     }
 
+    fn ensure_image_generation_output_index(&mut self, index: usize) -> usize {
+        self.next_output_index = self.next_output_index.max(index.saturating_add(1));
+        index
+    }
+
     fn ensure_reasoning_item_started(&mut self) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         let mut out = self.ensure_started()?;
         let output_index = self.ensure_reasoning_output_index();
@@ -1956,6 +2059,42 @@ impl OpenAIResponsesClientEmitter {
         Ok(out)
     }
 
+    fn emit_image_generation_call_item(
+        &mut self,
+        index: usize,
+        item: Value,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let mut out = self.ensure_started()?;
+        let output_index = self.ensure_image_generation_output_index(index);
+        let mut item = item.as_object().cloned().unwrap_or_default();
+        item.insert(
+            "type".to_string(),
+            Value::String("image_generation_call".to_string()),
+        );
+        if !item.contains_key("id") {
+            item.insert(
+                "id".to_string(),
+                Value::String(format!("{}_ig_{}", self.response_id(), output_index)),
+            );
+        }
+        if !item.contains_key("status") {
+            item.insert("status".to_string(), Value::String("completed".to_string()));
+        }
+        let item = Value::Object(item);
+        self.image_generation_items
+            .insert(output_index, item.clone());
+        out.extend(self.encode_response_event(
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "response_id": self.response_id(),
+                "output_index": output_index,
+                "item": item,
+            }),
+        )?);
+        Ok(out)
+    }
+
     fn completed_response(&self, usage: CanonicalUsage) -> Value {
         let mut ordered_output = Vec::new();
         let summary = if self.reasoning_summary_parts.is_empty() {
@@ -2057,6 +2196,9 @@ impl OpenAIResponsesClientEmitter {
                 item.insert("output".to_string(), Value::String(state.content.clone()));
                 ordered_output.push((output_index, Value::Object(item)));
             }
+        }
+        for (output_index, item) in &self.image_generation_items {
+            ordered_output.push((*output_index, item.clone()));
         }
         ordered_output.sort_by_key(|(output_index, _)| *output_index);
 
@@ -2182,6 +2324,9 @@ impl OpenAIResponsesClientEmitter {
                     }),
                 )?);
                 Ok(out)
+            }
+            CanonicalStreamEvent::ImageGenerationCall { index, item } => {
+                self.emit_image_generation_call_item(index, item)
             }
             CanonicalStreamEvent::ToolCallStart {
                 index,
@@ -2874,6 +3019,134 @@ mod tests {
                 ref content,
             } if tool_use_id == "call_123" && name == "lookup" && content == "{\"ok\":true}"
         )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_preserves_image_generation_calls() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_img_123",
+                        "model": "gpt-image-2",
+                        "output": [{
+                            "id": "ig_123",
+                            "type": "image_generation_call",
+                            "status": "completed",
+                            "output_format": "png",
+                            "result": "aGVsbG8="
+                        }],
+                        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+                    }
+                })),
+            )
+            .expect("completed event should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ImageGenerationCall {
+                index: 0,
+                ref item,
+            } if item["type"] == json!("image_generation_call")
+                && item["result"] == json!("aGVsbG8=")
+        )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_waits_for_final_image_generation_item() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+
+        let added_frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "id": "ig_123",
+                        "type": "image_generation_call",
+                        "status": "generating",
+                        "output_format": "png",
+                        "result": "early"
+                    }
+                })),
+            )
+            .expect("added event should parse");
+
+        assert!(!added_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ImageGenerationCall { .. }
+        )));
+
+        let done_frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": "ig_123",
+                        "type": "image_generation_call",
+                        "status": "completed",
+                        "output_format": "png",
+                        "result": "final"
+                    }
+                })),
+            )
+            .expect("done event should parse");
+
+        assert!(done_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ImageGenerationCall {
+                index: 0,
+                ref item,
+            } if item["status"] == json!("completed") && item["result"] == json!("final")
+        )));
+    }
+
+    #[test]
+    fn openai_responses_client_emitter_emits_image_generation_call_events() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
+        let mut bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "resp_img_123".to_string(),
+                model: "gpt-image-2".to_string(),
+                event: CanonicalStreamEvent::ImageGenerationCall {
+                    index: 0,
+                    item: json!({
+                        "id": "ig_123",
+                        "type": "image_generation_call",
+                        "status": "completed",
+                        "output_format": "png",
+                        "result": "aGVsbG8="
+                    }),
+                },
+            })
+            .expect("image event should encode");
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "resp_img_123".to_string(),
+                    model: "gpt-image-2".to_string(),
+                    event: CanonicalStreamEvent::Finish {
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                    },
+                })
+                .expect("finish should encode"),
+        );
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("event: response.output_item.done\n"));
+        assert!(sse.contains("\"type\":\"image_generation_call\""));
+        assert!(sse.contains("\"result\":\"aGVsbG8=\""));
+        assert!(sse.contains("\"output\":["));
+        assert!(sse.contains("\"id\":\"ig_123\""));
     }
 
     #[test]

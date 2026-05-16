@@ -22,8 +22,8 @@ use crate::formats::gemini::generate_content::stream::GeminiProviderState;
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 use crate::formats::shared::response::remove_empty_pages_from_tool_arguments;
 use crate::formats::shared::stream_core::common::{
-    map_openai_finish_reason_to_gemini, parse_json_arguments_value, CanonicalContentPart,
-    CanonicalStreamEvent, CanonicalUsage,
+    content_part_from_openai_image_generation_item, map_openai_finish_reason_to_gemini,
+    parse_json_arguments_value, CanonicalContentPart, CanonicalStreamEvent, CanonicalUsage,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1577,6 +1577,7 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
     let mut message_states: BTreeMap<usize, OpenAIResponsesSyncMessageState> = BTreeMap::new();
     let mut reasoning_states: BTreeMap<usize, OpenAIResponsesSyncReasoningState> = BTreeMap::new();
     let mut tool_states: BTreeMap<usize, OpenAIResponsesSyncToolState> = BTreeMap::new();
+    let mut image_items: BTreeMap<usize, Value> = BTreeMap::new();
     let mut item_output_indexes = BTreeMap::<String, usize>::new();
 
     for event in events {
@@ -1734,6 +1735,9 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
                             item,
                         );
                     }
+                    "image_generation_call" => {
+                        image_items.insert(output_index, Value::Object(item.clone()));
+                    }
                     _ => {}
                 }
             }
@@ -1833,6 +1837,9 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
                                     item,
                                 );
                             }
+                            "image_generation_call" => {
+                                image_items.insert(output_index, Value::Object(item.clone()));
+                            }
                             _ => {}
                         }
                     }
@@ -1874,6 +1881,7 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
         .keys()
         .chain(reasoning_states.keys())
         .chain(tool_states.keys())
+        .chain(image_items.keys())
         .copied()
         .collect::<Vec<_>>();
     output_indexes.sort_unstable();
@@ -1896,6 +1904,9 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
             }
             if let Some(state) = tool_states.remove(&output_index) {
                 output.push(materialize_openai_responses_tool_item(output_index, state));
+            }
+            if let Some(item) = image_items.remove(&output_index) {
+                output.push(item);
             }
         }
         response.insert("output".to_string(), Value::Array(output));
@@ -2540,6 +2551,11 @@ pub fn aggregate_gemini_stream_sync_response(body: &[u8]) -> Option<Value> {
                 }
                 CanonicalStreamEvent::ContentPart(part) => {
                     parts.push(gemini_sync_part_from_canonical_content_part(part));
+                }
+                CanonicalStreamEvent::ImageGenerationCall { item, .. } => {
+                    if let Some(part) = content_part_from_openai_image_generation_item(&item) {
+                        parts.push(gemini_sync_part_from_canonical_content_part(part));
+                    }
                 }
                 CanonicalStreamEvent::ToolCallStart {
                     index,
@@ -3462,6 +3478,25 @@ mod tests {
             .expect("openai-responses stream should aggregate into a sync body");
 
         assert_eq!(result["output"][0]["content"][0]["text"], "Authoritative");
+    }
+
+    #[test]
+    fn reconstructs_openai_responses_image_generation_call_from_output_item_done() {
+        let body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_image_123\",\"object\":\"response\",\"model\":\"gpt-5.4-mini\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ig_123\",\"type\":\"image_generation_call\",\"status\":\"completed\",\"output_format\":\"png\",\"result\":\"aGVsbG8=\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_image_123\",\"object\":\"response\",\"model\":\"gpt-5.4-mini\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+
+        let result = aggregate_openai_responses_stream_sync_response(body.as_bytes())
+            .expect("openai-responses stream should aggregate into a sync body");
+
+        assert_eq!(result["output"][0]["type"], "image_generation_call");
+        assert_eq!(result["output"][0]["result"], "aGVsbG8=");
+        assert_eq!(result["output"][0]["output_format"], "png");
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_contracts::ResolvedTransportProfile;
 use serde_json::Value;
 
 use crate::ai_serving::planner::candidate_preparation::{
@@ -27,8 +28,9 @@ use crate::ai_serving::transport::kiro::{
 };
 use crate::ai_serving::transport::local_openai_chat_transport_unsupported_reason;
 use crate::ai_serving::transport::{
-    build_kiro_cross_format_upstream_url, build_standard_provider_request_headers,
-    StandardProviderRequestHeadersInput,
+    build_grok_browser_headers, build_grok_upstream_url, build_kiro_cross_format_upstream_url,
+    build_standard_provider_request_headers, GrokHeaderInput, StandardProviderRequestHeadersInput,
+    GROK_CHAT_PATH,
 };
 use crate::ai_serving::{
     ai_local_execution_contract_for_formats, request_conversion_direct_auth,
@@ -64,6 +66,14 @@ pub(crate) struct LocalOpenAiChatCandidatePayloadParts {
     pub(super) envelope_name: Option<&'static str>,
     pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
     pub(super) request_redacted: bool,
+    pub(super) transport_profile: Option<ResolvedTransportProfile>,
+}
+
+fn is_grok_text_provider_api_format(provider_api_format: &str) -> bool {
+    matches!(
+        crate::ai_serving::normalize_api_format_alias(provider_api_format).as_str(),
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "claude:messages"
+    )
 }
 
 fn request_identity_response_encoding_when_redacted(
@@ -177,6 +187,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
     let candidate = &eligible.candidate;
     let provider_api_format = eligible.provider_api_format.as_str();
     let transport = &eligible.transport;
+    let transport_profile = crate::ai_serving::transport::resolve_transport_profile(transport);
     let force_body_stream_field =
         endpoint_config_forces_body_stream_field(transport.endpoint.config.as_ref());
     let enable_model_directives =
@@ -190,6 +201,129 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         resolve_provider_chat_request_redaction(state, parts, body_json, input, candidate_id)
             .await?;
     let body_json = redaction.body_json.as_ref();
+    let is_grok = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("grok");
+
+    if is_grok && is_grok_text_provider_api_format(provider_api_format) {
+        let prepared_candidate = match prepare_header_authenticated_candidate(
+            planner_state,
+            transport,
+            candidate,
+            crate::ai_serving::transport::resolve_grok_session_auth(transport),
+            OauthPreparationContext {
+                trace_id,
+                api_format: provider_api_format,
+                operation: "openai_chat_same_format",
+            },
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(skip_reason) => {
+                mark_skipped_local_openai_chat_candidate(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    skip_reason,
+                )
+                .await;
+                return Ok(None);
+            }
+        };
+
+        let Some(provider_request_body) = build_local_openai_chat_request_body(
+            body_json,
+            &prepared_candidate.mapped_model,
+            upstream_is_stream,
+            force_body_stream_field,
+            transport.endpoint.body_rules.as_ref(),
+            &parts.headers,
+            enable_model_directives,
+        ) else {
+            mark_skipped_local_openai_chat_candidate_with_extra_data(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "provider_request_body_build_failed",
+                request_body_build_failure_extra_data(
+                    body_json,
+                    "openai:chat",
+                    provider_api_format,
+                ),
+            )
+            .await;
+            return Ok(None);
+        };
+
+        let upstream_url = build_grok_upstream_url(transport, GROK_CHAT_PATH);
+        let Some(mut provider_request_headers) = build_grok_browser_headers(GrokHeaderInput {
+            transport,
+            transport_profile: transport_profile.as_ref(),
+            request_headers: Some(&parts.headers),
+            content_type: "application/json",
+            accept: "text/event-stream",
+            header_rules: transport.endpoint.header_rules.as_ref(),
+            provider_request_body: &provider_request_body,
+            original_request_body: body_json,
+        }) else {
+            mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    "openai:chat",
+                    provider_api_format,
+                    "grok_openai_chat_headers",
+                ),
+            )
+            .await;
+            return Ok(None);
+        };
+
+        let (execution_strategy, conversion_mode) =
+            ai_local_execution_contract_for_formats("openai:chat", provider_api_format);
+        let resolved_report_kind =
+            if decision_kind == OPENAI_CHAT_STREAM_PLAN_KIND || !upstream_is_stream {
+                report_kind.to_string()
+            } else {
+                "openai_chat_sync_finalize".to_string()
+            };
+
+        request_identity_response_encoding_when_redacted(
+            &mut provider_request_headers,
+            redaction.redacted,
+        );
+
+        return Ok(Some(LocalOpenAiChatCandidatePayloadParts {
+            auth_header: prepared_candidate.auth_header,
+            auth_value: prepared_candidate.auth_value,
+            mapped_model: prepared_candidate.mapped_model,
+            provider_api_format: provider_api_format.to_string(),
+            provider_request_body,
+            provider_request_headers,
+            upstream_url,
+            execution_strategy,
+            conversion_mode,
+            report_kind: resolved_report_kind,
+            envelope_name: None,
+            transport: Arc::clone(transport),
+            request_redacted: redaction.redacted,
+            transport_profile,
+        }));
+    }
 
     if provider_api_format == "openai:chat" {
         if let Some(skip_reason) = local_openai_chat_transport_unsupported_reason(transport) {
@@ -351,6 +485,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             envelope_name: None,
             transport: Arc::clone(transport),
             request_redacted: redaction.redacted,
+            transport_profile,
         }));
     };
 
@@ -639,6 +774,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         envelope_name: None,
         transport: Arc::clone(transport),
         request_redacted: redaction.redacted,
+        transport_profile: None,
     }))
 }
 
@@ -775,6 +911,7 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
         envelope_name: Some(KIRO_ENVELOPE_NAME),
         transport: Arc::clone(transport),
         request_redacted,
+        transport_profile: None,
     })
 }
 

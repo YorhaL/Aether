@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use aether_contracts::ResolvedTransportProfile;
 use serde_json::Value;
 
 use crate::ai_serving::planner::common::{
@@ -12,7 +13,8 @@ use crate::ai_serving::transport::antigravity::{
     AntigravityRequestEnvelopeSupport, AntigravityRequestSideSupport,
 };
 use crate::ai_serving::transport::{
-    build_same_format_provider_headers, SameFormatProviderHeadersInput,
+    build_grok_browser_headers, build_grok_upstream_url, build_same_format_provider_headers,
+    GrokHeaderInput, SameFormatProviderHeadersInput, GROK_CHAT_PATH,
 };
 use crate::ai_serving::{CandidateFailureDiagnostic, GatewayProviderTransportSnapshot};
 use crate::AppState;
@@ -96,6 +98,7 @@ pub(crate) struct LocalSameFormatProviderCandidatePayloadParts {
     pub(super) upstream_url: String,
     pub(super) provider_request_headers: BTreeMap<String, String>,
     pub(super) provider_request_body: Value,
+    pub(super) transport_profile: Option<ResolvedTransportProfile>,
 }
 
 pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
@@ -246,15 +249,27 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         base_provider_request_body
     };
 
-    let Some(upstream_url) = super::super::request::build_same_format_upstream_url(
-        parts,
-        &prepared.transport,
-        &prepared.mapped_model,
-        prepared.provider_api_format.as_str(),
-        spec,
-        prepared.upstream_is_stream,
-        prepared.kiro_auth.as_ref(),
-    ) else {
+    let is_grok = prepared
+        .transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("grok");
+    let transport_profile =
+        crate::ai_serving::transport::resolve_transport_profile(&prepared.transport);
+    let Some(upstream_url) = (if is_grok {
+        Some(build_grok_upstream_url(&prepared.transport, GROK_CHAT_PATH))
+    } else {
+        super::super::request::build_same_format_upstream_url(
+            parts,
+            &prepared.transport,
+            &prepared.mapped_model,
+            prepared.provider_api_format.as_str(),
+            spec,
+            prepared.upstream_is_stream,
+            prepared.kiro_auth.as_ref(),
+        )
+    }) else {
         mark_skipped_local_same_format_provider_candidate_with_failure_diagnostic(
             state,
             input,
@@ -277,7 +292,18 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         .as_ref()
         .map(build_antigravity_static_identity_headers)
         .unwrap_or_default();
-    let Some(provider_request_headers) =
+    let Some(provider_request_headers) = (if is_grok {
+        build_grok_browser_headers(GrokHeaderInput {
+            transport: &prepared.transport,
+            transport_profile: transport_profile.as_ref(),
+            request_headers: Some(&parts.headers),
+            content_type: "application/json",
+            accept: "text/event-stream",
+            header_rules: prepared.transport.endpoint.header_rules.as_ref(),
+            provider_request_body: &provider_request_body,
+            original_request_body: body_json,
+        })
+    } else {
         build_same_format_provider_headers(SameFormatProviderHeadersInput {
             headers: &parts.headers,
             provider_request_body: &provider_request_body,
@@ -294,7 +320,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
                 .as_ref()
                 .map(|auth| auth.machine_id.as_str()),
         })
-    else {
+    }) else {
         mark_skipped_local_same_format_provider_candidate_with_failure_diagnostic(
             state,
             input,
@@ -326,5 +352,6 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         upstream_url,
         provider_request_headers,
         provider_request_body,
+        transport_profile,
     })
 }

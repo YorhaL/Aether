@@ -8,7 +8,8 @@ use aether_contracts::{
     ExecutionPlan, ExecutionResult, ExecutionTelemetry, ProxySnapshot, ResolvedTransportProfile,
     ResponseBody, EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER,
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
-    TRANSPORT_BACKEND_REQWEST_RUSTLS, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
+    TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS,
+    TRANSPORT_HTTP_MODE_HTTP1_ONLY,
 };
 use aether_data::repository::proxy_nodes::ProxyNodeTrafficMutation;
 use aether_http::{apply_http_client_config, HttpClientConfig};
@@ -81,6 +82,52 @@ pub(crate) fn format_upstream_request_error(err: &reqwest::Error) -> String {
     detail
 }
 
+pub(crate) fn format_wreq_upstream_request_error(err: &wreq::Error) -> String {
+    let mut kinds = Vec::new();
+    if err.is_connect() {
+        kinds.push("connect");
+    }
+    if err.is_timeout() {
+        kinds.push("timeout");
+    }
+    if err.is_redirect() {
+        kinds.push("redirect");
+    }
+    if err.is_body() {
+        kinds.push("body");
+    }
+    if err.is_decode() {
+        kinds.push("decode");
+    }
+    if err.is_request() {
+        kinds.push("request");
+    }
+
+    let mut detail = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !detail.contains(&cause_text) {
+            detail.push_str(": ");
+            detail.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+
+    if let Some(uri) = err.uri() {
+        detail.push_str(" [uri=");
+        detail.push_str(&uri.to_string());
+        detail.push(']');
+    }
+    if !kinds.is_empty() {
+        detail.push_str(" [kind=");
+        detail.push_str(&kinds.join(","));
+        detail.push(']');
+    }
+
+    detail
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum ExecutionRuntimeTransportError {
     #[error("stream execution is not supported for this plan")]
@@ -107,6 +154,10 @@ pub(crate) enum ExecutionRuntimeTransportError {
     BodyEncode(serde_json::Error),
     #[error("failed to build HTTP client: {0}")]
     ClientBuild(reqwest::Error),
+    #[error("failed to build browser impersonation HTTP client: {0}")]
+    BrowserClientBuild(wreq::Error),
+    #[error("browser impersonation response body failed: {0}")]
+    BrowserBody(String),
     #[error("failed to execute upstream request: {0}")]
     UpstreamRequest(String),
     #[error("hub relay request failed: {0}")]
@@ -136,7 +187,7 @@ struct RelayRequestMeta {
 pub(crate) struct DirectSyncExecutionRuntime;
 
 #[derive(Debug, Clone, Copy, Default)]
-struct ExecutionTransportControls {
+pub(crate) struct ExecutionTransportControls {
     follow_redirects: Option<bool>,
     http1_only: bool,
     accept_invalid_certs: bool,
@@ -144,6 +195,7 @@ struct ExecutionTransportControls {
 
 pub(crate) enum DirectUpstreamResponse {
     Reqwest(reqwest::Response),
+    BrowserWreq(wreq::Response),
     LocalTunnel(tunnel::DirectRelayResponse),
 }
 
@@ -172,11 +224,9 @@ impl DirectSyncExecutionRuntime {
         let started_at = Instant::now();
         let response = send_request(plan, body_bytes).await?;
         let ttfb_ms = started_at.elapsed().as_millis() as u64;
-        let status_code = response.status().as_u16();
-        let headers = collect_response_headers(response.headers());
-        let body_bytes = response.bytes().await.map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
-        })?;
+        let status_code = response.status_code();
+        let headers = response.headers();
+        let body_bytes = response.bytes().await?;
         let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)
             .unwrap_or_else(|| body_bytes.to_vec());
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -230,8 +280,8 @@ impl DirectSyncExecutionRuntime {
 
         let started_at = Instant::now();
         let response = send_request(plan, body_bytes).await?;
-        let status_code = response.status().as_u16();
-        let headers = collect_response_headers(response.headers());
+        let status_code = response.status_code();
+        let headers = response.headers();
 
         let stream_summary_report_context = build_stream_summary_report_context(plan);
 
@@ -242,7 +292,7 @@ impl DirectSyncExecutionRuntime {
             headers,
             provider_api_format: plan.provider_api_format.clone(),
             stream_summary_report_context,
-            response: DirectUpstreamResponse::Reqwest(response),
+            response: response.into_direct_upstream_response(),
             started_at,
         })
     }
@@ -252,6 +302,15 @@ pub(crate) async fn execute_sync_plan(
     state: &AppState,
     trace_id: Option<&str>,
     plan: &ExecutionPlan,
+) -> Result<ExecutionResult, GatewayError> {
+    execute_sync_plan_with_report_context(state, trace_id, plan, None).await
+}
+
+pub(crate) async fn execute_sync_plan_with_report_context(
+    state: &AppState,
+    trace_id: Option<&str>,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
 ) -> Result<ExecutionResult, GatewayError> {
     #[cfg(test)]
     {
@@ -273,6 +332,18 @@ pub(crate) async fn execute_sync_plan(
         return execute_sync_plan_via_local_tunnel(state, plan)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()));
+    }
+
+    match super::grok::maybe_execute_grok_sync(plan, report_context).await {
+        Ok(Some(result)) => {
+            record_manual_proxy_request_outcome(state, plan, result.status_code).await;
+            return Ok(result);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            record_manual_proxy_request_failure(state, plan).await;
+            return Err(GatewayError::Internal(err.to_string()));
+        }
     }
 
     let _ = trace_id;
@@ -554,7 +625,7 @@ fn build_direct_tunnel_request_meta(
 pub(crate) async fn send_request(
     plan: &ExecutionPlan,
     body_bytes: Vec<u8>,
-) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
+) -> Result<DirectHttpResponse, ExecutionRuntimeTransportError> {
     if let Some(detail) = gateway_frontdoor_self_loop_guard_error(plan.url.as_str()) {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(detail));
     }
@@ -572,6 +643,18 @@ pub(crate) async fn send_request(
         .and_then(|timeouts| timeouts.total_ms)
         .map(Duration::from_millis);
 
+    if transport_profile_uses_browser_wreq(plan.transport_profile.as_ref()) {
+        return send_via_browser_wreq_transport(
+            plan,
+            method,
+            headers,
+            body_bytes,
+            total_timeout,
+            transport_controls,
+        )
+        .await;
+    }
+
     if let Some(node_id) = resolve_tunnel_node_id(plan.proxy.as_ref()) {
         return send_via_tunnel_relay(
             plan,
@@ -582,7 +665,8 @@ pub(crate) async fn send_request(
             total_timeout,
             transport_controls,
         )
-        .await;
+        .await
+        .map(DirectHttpResponse::Reqwest);
     }
 
     let client = build_client(
@@ -596,9 +680,95 @@ pub(crate) async fn send_request(
     if let Some(timeout) = total_timeout {
         request = request.timeout(timeout);
     }
-    request.send().await.map_err(|err| {
-        ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
-    })
+    request
+        .send()
+        .await
+        .map(DirectHttpResponse::Reqwest)
+        .map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
+        })
+}
+
+pub(crate) enum DirectHttpResponse {
+    Reqwest(reqwest::Response),
+    BrowserWreq(wreq::Response),
+}
+
+impl DirectHttpResponse {
+    pub(crate) fn status_code(&self) -> u16 {
+        match self {
+            DirectHttpResponse::Reqwest(response) => response.status().as_u16(),
+            DirectHttpResponse::BrowserWreq(response) => response.status().as_u16(),
+        }
+    }
+
+    pub(crate) fn headers(&self) -> BTreeMap<String, String> {
+        match self {
+            DirectHttpResponse::Reqwest(response) => collect_response_headers(response.headers()),
+            DirectHttpResponse::BrowserWreq(response) => {
+                collect_response_headers(response.headers())
+            }
+        }
+    }
+
+    pub(crate) async fn bytes(self) -> Result<Bytes, ExecutionRuntimeTransportError> {
+        match self {
+            DirectHttpResponse::Reqwest(response) => response.bytes().await.map_err(|err| {
+                ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
+            }),
+            DirectHttpResponse::BrowserWreq(response) => response.bytes().await.map_err(|err| {
+                ExecutionRuntimeTransportError::BrowserBody(format_wreq_upstream_request_error(
+                    &err,
+                ))
+            }),
+        }
+    }
+
+    fn into_direct_upstream_response(self) -> DirectUpstreamResponse {
+        match self {
+            DirectHttpResponse::Reqwest(response) => DirectUpstreamResponse::Reqwest(response),
+            DirectHttpResponse::BrowserWreq(response) => {
+                DirectUpstreamResponse::BrowserWreq(response)
+            }
+        }
+    }
+}
+
+async fn send_via_browser_wreq_transport(
+    plan: &ExecutionPlan,
+    method: reqwest::Method,
+    headers: HeaderMap,
+    body_bytes: Vec<u8>,
+    total_timeout: Option<Duration>,
+    transport_controls: ExecutionTransportControls,
+) -> Result<DirectHttpResponse, ExecutionRuntimeTransportError> {
+    let profile = plan.transport_profile.as_ref().ok_or_else(|| {
+        ExecutionRuntimeTransportError::UnsupportedTransportProfile(String::new())
+    })?;
+    let client = build_browser_wreq_client(
+        plan.timeouts.as_ref(),
+        plan.proxy.as_ref(),
+        profile,
+        transport_controls,
+    )?;
+    let method = wreq::Method::from_bytes(method.as_str().as_bytes())
+        .map_err(ExecutionRuntimeTransportError::InvalidMethod)?;
+    let mut request = client
+        .request(method, plan.url.as_str())
+        .headers(headers)
+        .body(body_bytes);
+    if let Some(timeout) = total_timeout {
+        request = request.timeout(timeout);
+    }
+    request
+        .send()
+        .await
+        .map(DirectHttpResponse::BrowserWreq)
+        .map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(
+                &err,
+            ))
+        })
 }
 
 async fn send_via_tunnel_relay(
@@ -905,6 +1075,96 @@ fn build_client(
         .map_err(ExecutionRuntimeTransportError::ClientBuild)
 }
 
+pub(crate) fn build_browser_wreq_client(
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+    proxy: Option<&ProxySnapshot>,
+    transport_profile: &ResolvedTransportProfile,
+    transport_controls: ExecutionTransportControls,
+) -> Result<wreq::Client, ExecutionRuntimeTransportError> {
+    let emulation = browser_wreq_emulation_from_profile(transport_profile)?;
+    let mut builder = wreq::Client::builder().emulation(emulation);
+    if transport_controls.follow_redirects == Some(true) {
+        builder = builder.redirect(wreq::redirect::Policy::limited(10));
+    }
+    if transport_controls.http1_only || transport_profile_http1_only(Some(transport_profile)) {
+        builder = builder.http1_only();
+    }
+    if transport_controls.accept_invalid_certs {
+        builder = builder.cert_verification(false).verify_hostname(false);
+    }
+    if let Some(connect_ms) = timeouts.and_then(|timeouts| timeouts.connect_ms) {
+        builder = builder.connect_timeout(Duration::from_millis(connect_ms));
+    }
+    if let Some(total_ms) = timeouts.and_then(|timeouts| timeouts.total_ms) {
+        builder = builder.timeout(Duration::from_millis(total_ms));
+    }
+    if let Some(read_ms) = timeouts.and_then(|timeouts| timeouts.read_ms) {
+        builder = builder.read_timeout(Duration::from_millis(read_ms));
+    }
+    if let Some(proxy_url) = resolve_proxy_url(proxy)? {
+        let proxy = wreq::Proxy::all(proxy_url.as_str())
+            .map_err(ExecutionRuntimeTransportError::BrowserClientBuild)?;
+        builder = builder.proxy(proxy);
+    }
+    builder
+        .build()
+        .map_err(ExecutionRuntimeTransportError::BrowserClientBuild)
+}
+
+fn browser_wreq_emulation_from_profile(
+    profile: &ResolvedTransportProfile,
+) -> Result<wreq_util::Emulation, ExecutionRuntimeTransportError> {
+    match normalize_browser_profile_name(browser_transport_profile_name(profile)).as_str() {
+        "chrome100" => Ok(wreq_util::Emulation::Chrome100),
+        "chrome101" => Ok(wreq_util::Emulation::Chrome101),
+        "chrome104" => Ok(wreq_util::Emulation::Chrome104),
+        "chrome105" => Ok(wreq_util::Emulation::Chrome105),
+        "chrome106" => Ok(wreq_util::Emulation::Chrome106),
+        "chrome107" => Ok(wreq_util::Emulation::Chrome107),
+        "chrome108" => Ok(wreq_util::Emulation::Chrome108),
+        "chrome109" => Ok(wreq_util::Emulation::Chrome109),
+        "chrome110" => Ok(wreq_util::Emulation::Chrome110),
+        "chrome114" => Ok(wreq_util::Emulation::Chrome114),
+        "chrome116" => Ok(wreq_util::Emulation::Chrome116),
+        "chrome117" => Ok(wreq_util::Emulation::Chrome117),
+        "chrome118" => Ok(wreq_util::Emulation::Chrome118),
+        "chrome119" => Ok(wreq_util::Emulation::Chrome119),
+        "chrome120" => Ok(wreq_util::Emulation::Chrome120),
+        "chrome123" => Ok(wreq_util::Emulation::Chrome123),
+        "chrome124" => Ok(wreq_util::Emulation::Chrome124),
+        "chrome126" => Ok(wreq_util::Emulation::Chrome126),
+        "chrome127" => Ok(wreq_util::Emulation::Chrome127),
+        "chrome128" => Ok(wreq_util::Emulation::Chrome128),
+        "chrome129" => Ok(wreq_util::Emulation::Chrome129),
+        "chrome130" => Ok(wreq_util::Emulation::Chrome130),
+        "chrome131" => Ok(wreq_util::Emulation::Chrome131),
+        "chrome132" => Ok(wreq_util::Emulation::Chrome132),
+        "chrome133" => Ok(wreq_util::Emulation::Chrome133),
+        "chrome134" => Ok(wreq_util::Emulation::Chrome134),
+        "chrome135" => Ok(wreq_util::Emulation::Chrome135),
+        "chrome136" => Ok(wreq_util::Emulation::Chrome136),
+        "chrome137" => Ok(wreq_util::Emulation::Chrome137),
+        "chrome138" => Ok(wreq_util::Emulation::Chrome138),
+        "chrome139" => Ok(wreq_util::Emulation::Chrome139),
+        "chrome140" => Ok(wreq_util::Emulation::Chrome140),
+        "chrome141" => Ok(wreq_util::Emulation::Chrome141),
+        "chrome142" => Ok(wreq_util::Emulation::Chrome142),
+        "chrome143" => Ok(wreq_util::Emulation::Chrome143),
+        "chrome144" => Ok(wreq_util::Emulation::Chrome144),
+        "chrome145" => Ok(wreq_util::Emulation::Chrome145),
+        other => Err(ExecutionRuntimeTransportError::UnsupportedTransportProfile(
+            format!("browser_wreq:{other}"),
+        )),
+    }
+}
+
+fn normalize_browser_profile_name(value: String) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-', ' '], "")
+}
+
 fn validate_reqwest_transport_profile(
     transport_profile: Option<&ResolvedTransportProfile>,
 ) -> Result<(), ExecutionRuntimeTransportError> {
@@ -921,6 +1181,56 @@ fn validate_reqwest_transport_profile(
     Err(ExecutionRuntimeTransportError::UnsupportedTransportProfile(
         profile.backend.clone(),
     ))
+}
+
+fn transport_profile_uses_browser_wreq(
+    transport_profile: Option<&ResolvedTransportProfile>,
+) -> bool {
+    transport_profile
+        .map(|profile| {
+            profile
+                .backend
+                .trim()
+                .eq_ignore_ascii_case(TRANSPORT_BACKEND_BROWSER_WREQ)
+        })
+        .unwrap_or(false)
+}
+
+fn browser_transport_profile_name(profile: &ResolvedTransportProfile) -> String {
+    profile
+        .extra
+        .as_ref()
+        .and_then(|value| {
+            value
+                .get("browser_profile")
+                .or_else(|| value.get("impersonate"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            profile
+                .profile_id
+                .trim()
+                .is_empty()
+                .then_some("chrome136".to_string())
+                .or_else(|| Some(profile.profile_id.trim().to_string()))
+        })
+        .unwrap_or_else(|| "chrome136".to_string())
+}
+
+fn insert_browser_control_header(
+    headers: &mut HeaderMap,
+    name: &'static str,
+    value: &str,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    headers.insert(
+        HeaderName::from_static(name),
+        HeaderValue::from_str(value)
+            .map_err(|_| ExecutionRuntimeTransportError::InvalidHeaderValue(name.to_string()))?,
+    );
+    Ok(())
 }
 
 fn transport_profile_http1_only(transport_profile: Option<&ResolvedTransportProfile>) -> bool {
@@ -991,7 +1301,7 @@ fn resolve_proxy_url(
     Ok(None)
 }
 
-fn build_request_headers(
+pub(crate) fn build_request_headers(
     headers: &BTreeMap<String, String>,
     content_encoding: Option<&str>,
     allow_passthrough_content_encoding: bool,
@@ -1180,22 +1490,22 @@ mod tests {
     use aether_contracts::{
         ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody, ResolvedTransportProfile,
         EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
-        TRANSPORT_BACKEND_REQWEST_RUSTLS,
+        TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS,
     };
     use aether_data::repository::proxy_nodes::{
         InMemoryProxyNodeRepository, ProxyNodeReadRepository, StoredProxyNode,
     };
-    use axum::body::Bytes;
+    use axum::body::{Body, Bytes};
     use axum::extract::ws::Message;
     use axum::extract::Path;
     use axum::http::HeaderMap as AxumHeaderMap;
-    use axum::routing::post;
+    use axum::routing::{any, post};
     use axum::{Json, Router};
     use serde_json::json;
     use tokio::sync::watch;
 
     use super::{
-        build_client, build_request_headers, execute_sync_plan,
+        build_browser_wreq_client, build_client, build_request_headers, execute_sync_plan,
         record_manual_proxy_request_failure, record_manual_proxy_request_outcome,
         record_manual_proxy_request_success, record_manual_proxy_stream_error,
         resolve_execution_transport_controls, DirectSyncExecutionRuntime,
@@ -1428,6 +1738,228 @@ mod tests {
         assert_eq!(
             result.body.and_then(|body| body.json_body),
             Some(json!({"error": {"message": "slow down"}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_sync_execution_runtime_routes_browser_wreq_transport_in_process() {
+        async fn browser_upstream(headers: AxumHeaderMap, body: Bytes) -> axum::response::Response {
+            assert_eq!(
+                headers
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/json")
+            );
+            assert!(
+                headers
+                    .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                    .is_none(),
+                "internal execution control headers must not leak upstream"
+            );
+            assert_eq!(body.as_ref(), br#"{"modelName":"auto"}"#);
+            axum::response::Response::builder()
+                .status(http::StatusCode::ACCEPTED)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "ok": true,
+                        "via": "browser_wreq"
+                    })
+                    .to_string(),
+                ))
+                .expect("response should build")
+        }
+
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route("/request", any(browser_upstream));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let plan = ExecutionPlan {
+            request_id: "req-browser-wreq".into(),
+            candidate_id: None,
+            provider_name: Some("grok".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: format!("http://{addr}/request"),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                (
+                    EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.into(),
+                    "true".into(),
+                ),
+            ]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"modelName":"auto"})),
+            stream: false,
+            client_api_format: "openai:responses".into(),
+            provider_api_format: "grok:rate_limits".into(),
+            model_name: Some("grok-quota".into()),
+            proxy: None,
+            transport_profile: Some(ResolvedTransportProfile {
+                profile_id: "chrome136".into(),
+                backend: TRANSPORT_BACKEND_BROWSER_WREQ.into(),
+                http_mode: "auto".into(),
+                pool_scope: "key".into(),
+                header_fingerprint: None,
+                extra: Some(json!({
+                    "browser_profile": "chrome136"
+                })),
+            }),
+            timeouts: Some(ExecutionTimeouts {
+                total_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+
+        let result = DirectSyncExecutionRuntime::new()
+            .execute_sync(&plan)
+            .await
+            .expect("browser wreq transport plan should execute in-process");
+
+        server.abort();
+
+        assert_eq!(result.status_code, http::StatusCode::ACCEPTED.as_u16());
+        assert_eq!(
+            result
+                .body
+                .and_then(|body| body.json_body)
+                .and_then(|body| body.get("via").cloned()),
+            Some(json!("browser_wreq"))
+        );
+    }
+
+    #[test]
+    fn browser_wreq_transport_rejects_unknown_profile() {
+        let profile = ResolvedTransportProfile {
+            profile_id: "firefox999".into(),
+            backend: TRANSPORT_BACKEND_BROWSER_WREQ.into(),
+            http_mode: "auto".into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+
+        let error = match build_browser_wreq_client(
+            None,
+            None,
+            &profile,
+            ExecutionTransportControls::default(),
+        ) {
+            Ok(_) => panic!("unknown browser profile should fail loudly"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::UnsupportedTransportProfile(backend)
+                if backend == "browser_wreq:firefox999"
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_routes_grok_marker_through_grok_runtime() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route(
+            "/rest/app-chat/conversations/new",
+            post(|body: Bytes| async move {
+                let body_json: serde_json::Value =
+                    serde_json::from_slice(&body).expect("request body should be json");
+                if body_json.get("message").and_then(serde_json::Value::as_str)
+                    != Some("[user]: hello")
+                {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": {
+                                "message": "expected grok app-chat message",
+                                "body": body_json,
+                            }
+                        })),
+                    );
+                }
+                (
+                    axum::http::StatusCode::OK,
+                    Json(json!({
+                        "result": {
+                            "response": {
+                                "token": "pong",
+                                "messageTag": "final"
+                            }
+                        }
+                    })),
+                )
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+        let plan = ExecutionPlan {
+            request_id: "req-grok-runtime".into(),
+            candidate_id: Some("cand-grok".into()),
+            provider_name: Some("grok".into()),
+            provider_id: "provider-grok".into(),
+            endpoint_id: "endpoint-grok".into(),
+            key_id: "key-grok".into(),
+            method: "POST".into(),
+            url: format!("http://{addr}/rest/app-chat/conversations/new"),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                (
+                    aether_provider_transport::GROK_INTERNAL_HEADER.into(),
+                    "1".into(),
+                ),
+            ]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "grok-4.20-0309-non-reasoning",
+                "messages": [{"role": "user", "content": "hello"}],
+            })),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("grok-4.20-0309-non-reasoning".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+        let report_context = json!({"mapped_model": "grok-4.20-fast"});
+
+        let result = super::super::grok::maybe_execute_grok_sync(&plan, Some(&report_context))
+            .await
+            .expect("grok runtime plan should execute")
+            .expect("grok runtime should handle marked plan");
+
+        server.abort();
+
+        assert_eq!(result.status_code, http::StatusCode::OK.as_u16());
+        assert_eq!(
+            result
+                .body
+                .and_then(|body| body.json_body)
+                .and_then(|body| body["choices"][0]["message"]["content"]
+                    .as_str()
+                    .map(str::to_string)),
+            Some("pong".to_string())
         );
     }
 

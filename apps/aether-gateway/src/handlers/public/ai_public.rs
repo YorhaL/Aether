@@ -1,6 +1,9 @@
 use crate::async_task::CancelVideoTaskError;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
+use crate::image_capabilities::{
+    openai_image_gateway_max_generation_count, openai_image_gateway_max_generation_count_for_model,
+};
 use crate::{AppState, GatewayError};
 use aether_data_contracts::repository::video_tasks::{
     StoredVideoTask, VideoTaskQueryFilter, VideoTaskStatus,
@@ -18,9 +21,6 @@ const AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL: &str = "Method not allowed";
 const AI_PUBLIC_UNAUTHORIZED_DETAIL: &str = "Unauthorized";
 const OPENAI_IMAGE_PROMPT_DETAIL: &str = "图片生成/编辑请求缺少 prompt";
 const OPENAI_IMAGE_EDIT_INPUT_DETAIL: &str = "图片编辑请求至少需要 1 张输入图片";
-const OPENAI_IMAGE_VARIATION_INPUT_DETAIL: &str = "图片变体请求需要 image 文件";
-const OPENAI_IMAGE_N_DETAIL: &str = "当前 Codex 图片反代仅支持 n=1";
-const OPENAI_IMAGE_STREAM_VARIATION_DETAIL: &str = "图片变体接口当前仅支持同步响应";
 const OPENAI_IMAGE_PARTIAL_IMAGES_DETAIL: &str =
     "partial_images 仅支持 0-3，且必须配合 stream=true";
 const OPENAI_IMAGE_STYLE_DETAIL: &str = "当前 Codex 图片反代暂不支持 style 参数";
@@ -57,7 +57,6 @@ const OPENAI_RERANK_STREAM_UNSUPPORTED_DETAIL: &str = "Rerank requests do not su
 enum OpenAiImageOperation {
     Generate,
     Edit,
-    Variation,
 }
 
 impl OpenAiImageOperation {
@@ -65,7 +64,6 @@ impl OpenAiImageOperation {
         match path {
             "/v1/images/generations" => Some(Self::Generate),
             "/v1/images/edits" => Some(Self::Edit),
-            "/v1/images/variations" => Some(Self::Variation),
             _ => None,
         }
     }
@@ -202,7 +200,7 @@ fn maybe_build_local_openai_request_validation_response(
     if decision.route_kind.as_deref() != Some("image")
         || !matches!(
             request_context.request_path.as_str(),
-            "/v1/images/generations" | "/v1/images/edits" | "/v1/images/variations"
+            "/v1/images/generations" | "/v1/images/edits"
         )
     {
         return None;
@@ -240,19 +238,13 @@ fn maybe_build_local_openai_request_validation_response(
                 OPENAI_IMAGE_EDIT_INPUT_DETAIL,
             ));
         }
-        OpenAiImageOperation::Variation if validation.image_count == 0 => {
-            return Some(build_ai_public_error_response(
-                http::StatusCode::BAD_REQUEST,
-                OPENAI_IMAGE_VARIATION_INPUT_DETAIL,
-            ));
-        }
         _ => {}
     }
 
-    if validation.n.is_some_and(|value| value != 1) {
+    if let Some(detail) = validate_openai_image_n(&validation) {
         return Some(build_ai_public_error_response(
             http::StatusCode::BAD_REQUEST,
-            OPENAI_IMAGE_N_DETAIL,
+            detail,
         ));
     }
 
@@ -270,15 +262,6 @@ fn maybe_build_local_openai_request_validation_response(
             http::StatusCode::BAD_REQUEST,
             OPENAI_IMAGE_STYLE_DETAIL,
         ));
-    }
-
-    if validation.stream {
-        if operation == OpenAiImageOperation::Variation {
-            return Some(build_ai_public_error_response(
-                http::StatusCode::BAD_REQUEST,
-                OPENAI_IMAGE_STREAM_VARIATION_DETAIL,
-            ));
-        }
     }
 
     if validation
@@ -358,6 +341,23 @@ fn maybe_build_local_openai_request_validation_response(
     }
 
     None
+}
+
+fn openai_image_n_detail(max_generation_count: u64) -> String {
+    if max_generation_count >= openai_image_gateway_max_generation_count() {
+        format!("当前图片反代仅支持 n=1..{max_generation_count}")
+    } else {
+        format!("当前图片模型仅支持 n=1..{max_generation_count}")
+    }
+}
+
+fn validate_openai_image_n(validation: &OpenAiImageValidationInput) -> Option<String> {
+    let max_generation_count =
+        openai_image_gateway_max_generation_count_for_model(validation.model.as_deref());
+    validation
+        .n
+        .is_some_and(|value| value == 0 || value > max_generation_count)
+        .then(|| openai_image_n_detail(max_generation_count))
 }
 
 fn validate_openai_embedding_request(
@@ -535,7 +535,6 @@ fn parse_openai_image_validation_input(
             OpenAiImageOperation::Generate | OpenAiImageOperation::Edit => {
                 OPENAI_IMAGE_PROMPT_DETAIL
             }
-            OpenAiImageOperation::Variation => OPENAI_IMAGE_VARIATION_INPUT_DETAIL,
         });
     }
 
@@ -1260,7 +1259,8 @@ fn estimate_text_tokens(text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_claude_count_tokens, parse_openai_image_validation_input, OpenAiImageOperation,
+        estimate_claude_count_tokens, parse_openai_image_validation_input, validate_openai_image_n,
+        OpenAiImageOperation,
     };
     use axum::body::Bytes;
     use serde_json::json;
@@ -1343,5 +1343,32 @@ mod tests {
         assert_eq!(validation.model.as_deref(), Some("gpt-image-2"));
         assert_eq!(validation.prompt.as_deref(), Some("edit this image"));
         assert_eq!(validation.image_count, 1);
+    }
+
+    #[test]
+    fn image_validation_restricts_multi_image_count_to_grok_models() {
+        let openai_body = Bytes::from_static(br#"{"model":"gpt-image-2","prompt":"draw","n":2}"#);
+        let openai_validation = parse_openai_image_validation_input(
+            OpenAiImageOperation::Generate,
+            Some("application/json"),
+            &openai_body,
+        )
+        .expect("valid image payload should parse");
+
+        assert_eq!(
+            validate_openai_image_n(&openai_validation).as_deref(),
+            Some("当前图片模型仅支持 n=1..1")
+        );
+
+        let grok_body =
+            Bytes::from_static(br#"{"model":"grok-imagine-image-lite","prompt":"draw","n":4}"#);
+        let grok_validation = parse_openai_image_validation_input(
+            OpenAiImageOperation::Generate,
+            Some("application/json"),
+            &grok_body,
+        )
+        .expect("valid grok image payload should parse");
+
+        assert!(validate_openai_image_n(&grok_validation).is_none());
     }
 }

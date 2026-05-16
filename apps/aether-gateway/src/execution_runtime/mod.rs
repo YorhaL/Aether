@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 mod chatgpt_web_image;
 mod constants;
 mod fallback;
+mod grok;
 mod kiro_web_search;
 pub(crate) mod ndjson;
 mod oauth_retry;
@@ -54,6 +55,7 @@ pub(crate) use sync::{
     resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessBuild,
     LocalVideoSyncSuccessOutcome,
 };
+pub(crate) use transport::execute_sync_plan_with_report_context as execute_execution_runtime_sync_plan_with_report_context;
 pub(crate) use transport::{
     execute_sync_plan as execute_execution_runtime_sync_plan, DirectSyncExecutionRuntime,
     DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
