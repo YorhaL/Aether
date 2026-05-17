@@ -543,6 +543,7 @@ const defaultForm = (): FormData => ({
 })
 
 const form = ref<FormData>(defaultForm())
+const imageGenerationExplicitOverride = ref<boolean | null>(null)
 
 const isEmbeddingEnabled = computed(() => {
   return form.value.supported_capabilities?.includes('embedding') === true
@@ -551,11 +552,15 @@ const isEmbeddingEnabled = computed(() => {
 })
 
 const isImageGenerationEnabled = computed(() => {
+  if (imageGenerationExplicitOverride.value !== null) {
+    return imageGenerationExplicitOverride.value
+  }
   return form.value.supported_capabilities?.includes('image_generation') === true
     || form.value.config?.image_generation === true
     || form.value.config?.model_type === 'image'
     || (Array.isArray(form.value.config?.api_formats)
       && form.value.config.api_formats.some((format) => String(format).endsWith(':image')))
+    || tieredPricingHasImageOutputPricing(tieredPricing.value)
 })
 
 const KEEP_FALSE_CONFIG_KEYS = new Set(['streaming'])
@@ -602,6 +607,7 @@ function setEmbeddingEnabled(enabled: boolean) {
 
 function setImageGenerationEnabled(value: boolean | 'indeterminate') {
   const enabled = value === true
+  imageGenerationExplicitOverride.value = enabled
   const caps = new Set(form.value.supported_capabilities || [])
   if (enabled) {
     caps.add('image_generation')
@@ -767,6 +773,7 @@ watch(() => props.open, (isOpen) => {
 
 // 选择模型并填充表单
 function selectModel(model: ModelsDevModelItem) {
+  imageGenerationExplicitOverride.value = null
   selectedModel.value = model
   expandedProvider.value = model.providerId
   form.value.name = model.modelId
@@ -815,6 +822,7 @@ function selectModel(model: ModelsDevModelItem) {
 
 // 清除选择（手动填写）
 function clearSelection() {
+  imageGenerationExplicitOverride.value = null
   selectedModel.value = null
   form.value = defaultForm()
   tieredPricing.value = null
@@ -828,6 +836,7 @@ function handleLogoError(event: Event) {
 
 // 重置表单
 function resetForm() {
+  imageGenerationExplicitOverride.value = null
   form.value = defaultForm()
   tieredPricing.value = null
   videoResolutionPrices.value = []
@@ -839,6 +848,7 @@ function resetForm() {
 // 加载模型数据（编辑模式）
 function loadModelData() {
   if (!props.model) return
+  imageGenerationExplicitOverride.value = null
   // 先重置创建模式的残留状态
   selectedModel.value = null
   searchQuery.value = ''
@@ -937,10 +947,19 @@ async function handleSubmit() {
 
 function tieredPricingHasImageOutputPricing(pricing: TieredPricingConfig | null | undefined): boolean {
   if (!pricing) return false
-  if (pricing.image_output_price_default != null) return true
+  if (toFinitePrice(pricing.image_output_price_default) !== null) return true
   return Object.values(pricing.image_output_prices || {}).some((prices) => {
     if (!prices || typeof prices !== 'object') return false
-    return Object.values(prices).some((price) => typeof price === 'number' && Number.isFinite(price))
+    return Object.values(prices).some((price) => toFinitePrice(price) !== null)
   })
+}
+
+function toFinitePrice(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
 }
 </script>

@@ -2,8 +2,8 @@
   <input
     type="checkbox"
     :class="checkboxClass"
-    :checked="isChecked"
     v-bind="$attrs"
+    :checked="isChecked"
     @change="handleChange"
   >
 </template>

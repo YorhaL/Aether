@@ -353,12 +353,16 @@ const editingModelSupportsImageGeneration = computed(() => {
 })
 
 const isImageGenerationEnabled = computed(() => {
+  if (imageGenerationExplicitOverride.value !== null) {
+    return imageGenerationExplicitOverride.value
+  }
   if (form.value.supports_image_generation !== undefined) {
     return form.value.supports_image_generation === true
   }
-  return isEditing.value
+  const supportsImageGeneration = isEditing.value
     ? editingModelSupportsImageGeneration.value
     : selectedGlobalModelSupportsImageGeneration.value
+  return supportsImageGeneration || tieredPricingHasImageOutputPricing(tieredPricing.value)
 })
 
 // 1h 缓存定价始终显示
@@ -422,6 +426,7 @@ const form = ref({
   supports_image_generation: undefined as boolean | undefined,
   is_active: true
 })
+const imageGenerationExplicitOverride = ref<boolean | null>(null)
 
 const canSubmitCreate = computed(() => {
   if (isEditing.value) return true
@@ -502,6 +507,7 @@ watch(tieredPricing, (newValue) => {
 
 // 重置表单
 function resetForm() {
+  imageGenerationExplicitOverride.value = null
   form.value = {
     global_model_id: '',
     provider_model_name: '',
@@ -526,6 +532,8 @@ function resetForm() {
 }
 
 function handleGlobalModelSelect(value: string) {
+  imageGenerationExplicitOverride.value = null
+  form.value.supports_image_generation = undefined
   form.value.global_model_id = value
   const selectedModel = availableGlobalModels.value.find(model => model.id === value)
   form.value.provider_model_name = selectedModel?.name || form.value.provider_model_name
@@ -565,15 +573,26 @@ function modelSupportsImageGeneration(model: {
 
 function tieredPricingHasImageOutputPricing(pricing: TieredPricingConfig | null | undefined): boolean {
   if (!pricing) return false
-  if (pricing.image_output_price_default != null) return true
+  if (toFinitePrice(pricing.image_output_price_default) !== null) return true
   return Object.values(pricing.image_output_prices || {}).some((prices) => {
     if (!prices || typeof prices !== 'object') return false
-    return Object.values(prices).some((price) => typeof price === 'number' && Number.isFinite(price))
+    return Object.values(prices).some((price) => toFinitePrice(price) !== null)
   })
 }
 
+function toFinitePrice(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
 function setImageGenerationEnabled(value: boolean | 'indeterminate') {
-  form.value.supports_image_generation = value === true
+  const enabled = value === true
+  imageGenerationExplicitOverride.value = enabled
+  form.value.supports_image_generation = enabled
 }
 
 function getNested(obj: Record<string, unknown>, path: string): unknown {
