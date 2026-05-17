@@ -158,30 +158,55 @@
       </div>
 
       <div class="space-y-2">
-        <div class="grid grid-cols-[96px_repeat(3,minmax(0,1fr))] gap-2 text-xs text-muted-foreground">
-          <span />
+        <div class="grid grid-cols-[minmax(120px,1.1fr)_repeat(3,minmax(0,1fr))_32px] gap-2 text-xs text-muted-foreground">
+          <span>分辨率</span>
           <span>low</span>
           <span>medium</span>
           <span>high</span>
+          <span />
         </div>
         <div
-          v-for="size in IMAGE_OUTPUT_SIZES"
-          :key="size.value"
-          class="grid grid-cols-[96px_repeat(3,minmax(0,1fr))] gap-2 items-center"
+          v-for="row in imageOutputPriceRows"
+          :key="row.id"
+          class="grid grid-cols-[minmax(120px,1.1fr)_repeat(3,minmax(0,1fr))_32px] gap-2 items-center"
         >
-          <span class="text-xs text-muted-foreground">{{ size.label }}</span>
+          <Input
+            :model-value="row.size"
+            class="h-8 font-mono text-xs"
+            placeholder="1024x1024"
+            @update:model-value="(v) => updateImageOutputSize(row.id, v)"
+          />
           <Input
             v-for="quality in IMAGE_OUTPUT_QUALITIES"
-            :key="`${size.value}-${quality}`"
-            :model-value="getImageOutputPrice(size.value, quality)"
+            :key="`${row.id}-${quality}`"
+            :model-value="getImageOutputPrice(row, quality)"
             type="number"
             step="0.001"
             min="0"
             class="h-8"
             placeholder="0"
-            @update:model-value="(v) => updateImageOutputPrice(size.value, quality, v)"
+            @update:model-value="(v) => updateImageOutputPrice(row.id, quality, v)"
           />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            class="h-8 w-8 p-0"
+            @click="removeImageOutputSizeRow(row.id)"
+          >
+            <X class="w-4 h-4 text-muted-foreground hover:text-destructive" />
+          </Button>
         </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          class="w-full"
+          @click="addImageOutputSizeRow"
+        >
+          <Plus class="w-4 h-4 mr-2" />
+          添加分辨率
+        </Button>
       </div>
     </div>
 
@@ -202,13 +227,13 @@ import { Button, Input, Label } from '@/components/ui'
 import type { TieredPricingConfig, PricingTier } from '@/api/endpoints/types'
 
 type ImageOutputQuality = 'low' | 'medium' | 'high'
+type ImageOutputPriceRow = {
+  id: string
+  size: string
+  prices: Partial<Record<ImageOutputQuality, number>>
+}
 
-const IMAGE_OUTPUT_SIZES = [
-  { value: '1024x1024', label: '1024 x 1024' },
-  { value: '1536x1024', label: '1536 x 1024' },
-  { value: '1024x1536', label: '1024 x 1536' },
-] as const
-
+const DEFAULT_IMAGE_OUTPUT_SIZES = ['1024x1024', '1536x1024', '1024x1536']
 const IMAGE_OUTPUT_QUALITIES: ImageOutputQuality[] = ['low', 'medium', 'high']
 
 const props = defineProps<{
@@ -223,8 +248,10 @@ const emit = defineEmits<{
 
 // 本地状态
 const localTiers = ref<PricingTier[]>([])
-const imageOutputPrices = ref<Record<string, Record<string, number | undefined>>>({})
+const imageOutputPriceRows = ref<ImageOutputPriceRow[]>([])
 const imageOutputPriceDefault = ref<string>('')
+const lastEmittedPricingJson = ref<string>('')
+let imageOutputPriceRowId = 0
 
 // 跟踪每个阶梯的缓存价格是否被手动设置
 const cacheManuallySet = reactive<Record<number, { creation: boolean; read: boolean; cache1h: boolean }>>({})
@@ -247,9 +274,12 @@ const customInputValue = reactive<Record<number, string>>({})
 watch(
   () => props.modelValue,
   (newValue) => {
+    if (lastEmittedPricingJson.value && JSON.stringify(newValue ?? null) === lastEmittedPricingJson.value) {
+      return
+    }
     if (newValue?.tiers) {
       localTiers.value = newValue.tiers.map(t => ({ ...t }))
-      imageOutputPrices.value = cloneImageOutputPrices(newValue.image_output_prices)
+      imageOutputPriceRows.value = createImageOutputPriceRows(newValue.image_output_prices)
       imageOutputPriceDefault.value = newValue.image_output_price_default != null
         ? String(newValue.image_output_price_default)
         : ''
@@ -268,7 +298,7 @@ watch(
         input_price_per_1m: 0,
         output_price_per_1m: 0,
       }]
-      imageOutputPrices.value = {}
+      imageOutputPriceRows.value = createImageOutputPriceRows(null)
       imageOutputPriceDefault.value = ''
       cacheManuallySet[0] = { creation: false, read: false, cache1h: false }
     }
@@ -434,7 +464,9 @@ function syncToParent() {
     return tier
   })
 
-  emit('update:modelValue', buildPricingConfig(tiers))
+  const value = buildPricingConfig(tiers)
+  lastEmittedPricingJson.value = JSON.stringify(value ?? null)
+  emit('update:modelValue', value)
 }
 
 // 获取最终提交的数据（包含自动计算的缓存价格）
@@ -499,26 +531,45 @@ function buildPricingConfig(tiers: PricingTier[]): TieredPricingConfig {
   return config
 }
 
-function cloneImageOutputPrices(value: TieredPricingConfig['image_output_prices']): Record<string, Record<string, number | undefined>> {
-  const out: Record<string, Record<string, number | undefined>> = {}
-  if (!value || typeof value !== 'object') return out
+function createImageOutputPriceRows(value: TieredPricingConfig['image_output_prices']): ImageOutputPriceRow[] {
+  const rows: ImageOutputPriceRow[] = []
+  if (!value || typeof value !== 'object') {
+    return DEFAULT_IMAGE_OUTPUT_SIZES.map(size => createImageOutputPriceRow(size))
+  }
   for (const [size, prices] of Object.entries(value)) {
     if (!prices || typeof prices !== 'object') continue
+    const rowPrices: Partial<Record<ImageOutputQuality, number>> = {}
     for (const quality of IMAGE_OUTPUT_QUALITIES) {
       const price = (prices as Record<string, unknown>)[quality]
       if (typeof price === 'number' && Number.isFinite(price)) {
-        out[size] = { ...(out[size] || {}), [quality]: price }
+        rowPrices[quality] = price
       }
     }
+    rows.push(createImageOutputPriceRow(size, rowPrices))
   }
-  return out
+  if (rows.length > 0) return rows
+  return DEFAULT_IMAGE_OUTPUT_SIZES.map(size => createImageOutputPriceRow(size))
+}
+
+function createImageOutputPriceRow(
+  size = '',
+  prices: Partial<Record<ImageOutputQuality, number>> = {},
+): ImageOutputPriceRow {
+  imageOutputPriceRowId += 1
+  return {
+    id: `image-output-size-${imageOutputPriceRowId}`,
+    size,
+    prices: { ...prices },
+  }
 }
 
 function normalizedImageOutputPrices(): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {}
-  for (const [size, prices] of Object.entries(imageOutputPrices.value)) {
+  for (const row of imageOutputPriceRows.value) {
+    const size = normalizeImageOutputSize(row.size)
+    if (!size) continue
     for (const quality of IMAGE_OUTPUT_QUALITIES) {
-      const price = prices[quality]
+      const price = row.prices[quality]
       if (price != null && Number.isFinite(price)) {
         out[size] = { ...(out[size] || {}), [quality]: price }
       }
@@ -533,25 +584,44 @@ function parseOptionalFloat(value: string | number): number | null {
   return Number.isFinite(number) ? number : null
 }
 
-function getImageOutputPrice(size: string, quality: ImageOutputQuality): string | number {
-  return imageOutputPrices.value[size]?.[quality] ?? ''
+function normalizeImageOutputSize(size: string): string {
+  return String(size || '').trim().replace(/\s*[xX×]\s*/g, 'x')
 }
 
-function updateImageOutputPrice(size: string, quality: ImageOutputQuality, value: string | number) {
+function getImageOutputPrice(row: ImageOutputPriceRow, quality: ImageOutputQuality): string | number {
+  return row.prices[quality] ?? ''
+}
+
+function updateImageOutputSize(rowId: string, value: string | number) {
+  const row = imageOutputPriceRows.value.find(item => item.id === rowId)
+  if (!row) return
+  row.size = normalizeImageOutputSize(String(value ?? ''))
+  imageOutputPriceRows.value = [...imageOutputPriceRows.value]
+  syncToParent()
+}
+
+function updateImageOutputPrice(rowId: string, quality: ImageOutputQuality, value: string | number) {
+  const row = imageOutputPriceRows.value.find(item => item.id === rowId)
+  if (!row) return
   const price = parseOptionalFloat(value)
-  const current = { ...(imageOutputPrices.value[size] || {}) }
   if (price == null) {
-    delete current[quality]
+    delete row.prices[quality]
   } else {
-    current[quality] = price
+    row.prices[quality] = price
   }
-  if (Object.values(current).some(v => v != null)) {
-    imageOutputPrices.value = { ...imageOutputPrices.value, [size]: current }
-  } else {
-    const next = { ...imageOutputPrices.value }
-    delete next[size]
-    imageOutputPrices.value = next
-  }
+  imageOutputPriceRows.value = [...imageOutputPriceRows.value]
+  syncToParent()
+}
+
+function addImageOutputSizeRow() {
+  const usedSizes = new Set(imageOutputPriceRows.value.map(row => normalizeImageOutputSize(row.size)).filter(Boolean))
+  const suggestedSize = DEFAULT_IMAGE_OUTPUT_SIZES.find(size => !usedSizes.has(size)) || ''
+  imageOutputPriceRows.value = [...imageOutputPriceRows.value, createImageOutputPriceRow(suggestedSize)]
+  syncToParent()
+}
+
+function removeImageOutputSizeRow(rowId: string) {
+  imageOutputPriceRows.value = imageOutputPriceRows.value.filter(row => row.id !== rowId)
   syncToParent()
 }
 

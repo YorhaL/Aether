@@ -844,18 +844,24 @@ function loadModelData() {
   searchQuery.value = ''
   expandedProvider.value = null
 
+  const modelTieredPricing = props.model.default_tiered_pricing
+    ? JSON.parse(JSON.stringify(props.model.default_tiered_pricing))
+    : null
+  const supportedCapabilities = new Set(props.model.supported_capabilities || [])
+  if (tieredPricingHasImageOutputPricing(modelTieredPricing)) {
+    supportedCapabilities.add('image_generation')
+  }
+
   form.value = {
     name: props.model.name,
     display_name: props.model.display_name,
     default_price_per_request: props.model.default_price_per_request,
-    supported_capabilities: [...(props.model.supported_capabilities || [])],
+    supported_capabilities: [...supportedCapabilities],
     config: props.model.config ? { ...props.model.config } : { streaming: true },
     is_active: props.model.is_active,
   }
   // 确保 tieredPricing 也被正确设置或重置
-  tieredPricing.value = props.model.default_tiered_pricing
-    ? JSON.parse(JSON.stringify(props.model.default_tiered_pricing))
-    : null
+  tieredPricing.value = modelTieredPricing
   loadVideoPricingFromConfig()
 }
 
@@ -896,6 +902,9 @@ async function handleSubmit() {
   } else {
     caps.delete('cache_1h')
   }
+  if (tieredPricingHasImageOutputPricing(finalTieredPricing)) {
+    caps.add('image_generation')
+  }
   form.value.supported_capabilities = caps.size > 0 ? [...caps] : []
 
   // 清理空的 config
@@ -924,5 +933,14 @@ async function handleSubmit() {
   } finally {
     submitting.value = false
   }
+}
+
+function tieredPricingHasImageOutputPricing(pricing: TieredPricingConfig | null | undefined): boolean {
+  if (!pricing) return false
+  if (pricing.image_output_price_default != null) return true
+  return Object.values(pricing.image_output_prices || {}).some((prices) => {
+    if (!prices || typeof prices !== 'object') return false
+    return Object.values(prices).some((price) => typeof price === 'number' && Number.isFinite(price))
+  })
 }
 </script>

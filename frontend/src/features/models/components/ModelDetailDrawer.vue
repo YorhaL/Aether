@@ -137,6 +137,7 @@
                     </p>
                   </div>
                 </div>
+
               </div>
 
               <!-- 默认定价 -->
@@ -144,6 +145,68 @@
                 <h4 class="font-semibold text-sm">
                   默认定价
                 </h4>
+
+                <!-- 图片输出计费 -->
+                <div
+                  v-if="hasImagePricing"
+                  class="space-y-2"
+                >
+                  <div class="flex items-center justify-between gap-3 text-sm text-muted-foreground">
+                    <div class="flex items-center gap-2">
+                      <span>图片输出计费</span>
+                      <Badge
+                        v-if="imagePricingEntries.length > 0"
+                        variant="outline"
+                        class="text-[10px] h-5 px-1.5"
+                      >
+                        矩阵
+                      </Badge>
+                    </div>
+                    <span
+                      v-if="imageOutputDefaultPrice !== null"
+                      class="text-xs font-mono"
+                    >默认 ${{ imageOutputDefaultPrice.toFixed(6) }}/张</span>
+                  </div>
+                  <div
+                    v-if="imagePricingEntries.length > 0"
+                    class="border rounded-lg overflow-hidden"
+                  >
+                    <Table>
+                      <TableHeader>
+                        <TableRow class="bg-muted/30">
+                          <TableHead class="text-xs h-9">
+                            分辨率
+                          </TableHead>
+                          <TableHead
+                            v-for="quality in IMAGE_OUTPUT_QUALITIES"
+                            :key="quality"
+                            class="text-xs h-9 text-right"
+                          >
+                            {{ quality }}
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow
+                          v-for="entry in imagePricingEntries"
+                          :key="entry.size"
+                          class="text-xs"
+                        >
+                          <TableCell class="py-2 font-mono">
+                            {{ formatImageSize(entry.size) }}
+                          </TableCell>
+                          <TableCell
+                            v-for="quality in IMAGE_OUTPUT_QUALITIES"
+                            :key="`${entry.size}-${quality}`"
+                            class="py-2 text-right font-mono"
+                          >
+                            {{ formatImagePrice(entry.prices[quality]) }}
+                          </TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
 
                 <!-- 单阶梯（固定价格）展示 -->
                 <div
@@ -560,6 +623,47 @@ const videoPricingEntries = computed(() => {
   if (!priceByResolution || typeof priceByResolution !== 'object') return []
   return sortResolutionEntries(Object.entries(priceByResolution))
 })
+
+const IMAGE_OUTPUT_QUALITIES = ['low', 'medium', 'high'] as const
+
+const imageOutputDefaultPrice = computed(() => {
+  const value = props.model?.default_tiered_pricing?.image_output_price_default
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+})
+
+const imagePricingEntries = computed(() => {
+  const prices = props.model?.default_tiered_pricing?.image_output_prices
+  if (!prices || typeof prices !== 'object') return []
+  return sortResolutionEntries(Object.entries(prices)).map(([size, qualityPrices]) => ({
+    size,
+    prices: normalizeImageQualityPrices(qualityPrices),
+  })).filter(entry => Object.values(entry.prices).some(price => price !== null))
+})
+
+const hasImagePricing = computed(() =>
+  imageOutputDefaultPrice.value !== null || imagePricingEntries.value.length > 0,
+)
+
+function normalizeImageQualityPrices(value: unknown): Record<typeof IMAGE_OUTPUT_QUALITIES[number], number | null> {
+  const object = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  return {
+    low: toFiniteNumber(object.low),
+    medium: toFiniteNumber(object.medium),
+    high: toFiniteNumber(object.high),
+  }
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function formatImagePrice(value: number | null): string {
+  return value === null ? '-' : `$${value.toFixed(6)}`
+}
+
+function formatImageSize(value: string): string {
+  return value.replace(/\s*[xX×]\s*/g, ' x ')
+}
 
 const detailTab = ref('basic')
 

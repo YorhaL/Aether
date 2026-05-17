@@ -438,6 +438,7 @@ watch(() => props.open, async (newOpen) => {
       // 编辑模式：填充表单
       // 使用有效配置（合并全局模型的默认值）供用户查看和编辑
       const effectiveConfig = props.editingModel.effective_config || props.editingModel.config || {}
+      const supportsImageGeneration = modelSupportsImageGeneration(props.editingModel)
       form.value = {
         global_model_id: props.editingModel.global_model_id || '',
         provider_model_name: props.editingModel.provider_model_name || '',
@@ -450,7 +451,7 @@ watch(() => props.open, async (newOpen) => {
         supports_function_calling: props.editingModel.supports_function_calling ?? undefined,
         supports_streaming: props.editingModel.supports_streaming ?? undefined,
         supports_extended_thinking: props.editingModel.supports_extended_thinking ?? undefined,
-        supports_image_generation: props.editingModel.supports_image_generation ?? undefined,
+        supports_image_generation: supportsImageGeneration ? true : props.editingModel.supports_image_generation ?? undefined,
         is_active: props.editingModel.is_active
       }
       // 从有效配置中加载视频费用
@@ -544,6 +545,9 @@ function modelSupportsImageGeneration(model: {
   supported_capabilities?: string[] | null
   supports_image_generation?: boolean | null
   effective_supports_image_generation?: boolean | null
+  default_tiered_pricing?: TieredPricingConfig | null
+  tiered_pricing?: TieredPricingConfig | null
+  effective_tiered_pricing?: TieredPricingConfig | null
   config?: Record<string, unknown> | null
 } | null | undefined): boolean {
   if (!model) return false
@@ -554,6 +558,18 @@ function modelSupportsImageGeneration(model: {
     || config.image_generation === true
     || config.model_type === 'image'
     || (Array.isArray(config.api_formats) && config.api_formats.some((format) => String(format).endsWith(':image')))
+    || tieredPricingHasImageOutputPricing(model.default_tiered_pricing)
+    || tieredPricingHasImageOutputPricing(model.tiered_pricing)
+    || tieredPricingHasImageOutputPricing(model.effective_tiered_pricing)
+}
+
+function tieredPricingHasImageOutputPricing(pricing: TieredPricingConfig | null | undefined): boolean {
+  if (!pricing) return false
+  if (pricing.image_output_price_default != null) return true
+  return Object.values(pricing.image_output_prices || {}).some((prices) => {
+    if (!prices || typeof prices !== 'object') return false
+    return Object.values(prices).some((price) => typeof price === 'number' && Number.isFinite(price))
+  })
 }
 
 function setImageGenerationEnabled(value: boolean | 'indeterminate') {
@@ -696,7 +712,11 @@ function _copyVideoPricingFromSelectedGlobal() {
   configTouched.value = true
 }
 
-async function createManualGlobalModel(finalTieredPricing: TieredPricingConfig | null, cleanConfig: Record<string, unknown> | undefined): Promise<GlobalModelResponse> {
+async function createManualGlobalModel(
+  finalTieredPricing: TieredPricingConfig | null,
+  cleanConfig: Record<string, unknown> | undefined,
+  supportsImageGeneration: boolean,
+): Promise<GlobalModelResponse> {
   const modelName = form.value.manual_global_model_name.trim()
   const displayName = form.value.manual_global_model_display_name.trim() || modelName
   const supportedCapabilities = [
@@ -704,7 +724,7 @@ async function createManualGlobalModel(finalTieredPricing: TieredPricingConfig |
     form.value.supports_function_calling === true ? 'function_calling' : null,
     form.value.supports_streaming === true ? 'streaming' : null,
     form.value.supports_extended_thinking === true ? 'extended_thinking' : null,
-    form.value.supports_image_generation === true ? 'image_generation' : null,
+    supportsImageGeneration ? 'image_generation' : null,
   ].filter((capability): capability is string => capability !== null)
 
   return createGlobalModel({
@@ -763,6 +783,8 @@ async function handleSubmit() {
   try {
     // 获取包含自动计算缓存价格的最终数据
     const finalTieredPricing = tieredPricingEditorRef.value?.getFinalPricing() ?? tieredPricing.value
+    const supportsImageGeneration = isImageGenerationEnabled.value
+      || tieredPricingHasImageOutputPricing(finalTieredPricing)
 
     // Apply billing (video) pricing into config.
     applyVideoPricingToConfig(form.value.config)
@@ -781,14 +803,14 @@ async function handleSubmit() {
         supportsFunctionCalling: form.value.supports_function_calling,
         supportsStreaming: form.value.supports_streaming,
         supportsExtendedThinking: form.value.supports_extended_thinking,
-        supportsImageGeneration: form.value.supports_image_generation,
+        supportsImageGeneration,
         isActive: form.value.is_active
       }))
       showSuccess('模型配置已更新')
     } else {
       // 添加模式：只有用户修改了配置才提交 tiered_pricing，否则保持继承关系
       const selectedModel = manualGlobalModelMode.value
-        ? await createManualGlobalModel(finalTieredPricing, cleanConfig)
+        ? await createManualGlobalModel(finalTieredPricing, cleanConfig, supportsImageGeneration)
         : availableGlobalModels.value.find(m => m.id === form.value.global_model_id)
       if (!selectedModel) {
         showError('请选择模型，或切换到手动添加后填写模型ID', '错误')
@@ -806,7 +828,7 @@ async function handleSubmit() {
         supportsFunctionCalling: form.value.supports_function_calling,
         supportsStreaming: form.value.supports_streaming,
         supportsExtendedThinking: form.value.supports_extended_thinking,
-        supportsImageGeneration: form.value.supports_image_generation,
+        supportsImageGeneration,
         isActive: form.value.is_active
       }))
       showSuccess('模型已添加')
