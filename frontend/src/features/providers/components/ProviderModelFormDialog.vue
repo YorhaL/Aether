@@ -129,9 +129,9 @@
       <div class="rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
         <div class="flex items-start gap-2">
           <Checkbox
-            :model-value="isImageGenerationEnabled"
+            :checked="isImageGenerationEnabled"
             class="mt-0.5"
-            @update:model-value="setImageGenerationEnabled"
+            @update:checked="setImageGenerationEnabled"
           />
           <div class="space-y-1">
             <div class="text-sm font-medium">
