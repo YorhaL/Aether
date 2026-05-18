@@ -151,6 +151,18 @@ fn remote_ip_allowed(allowed_ips: Option<&serde_json::Value>, remote_ip: std::ne
         .any(|value| ip_or_cidr_matches(value, remote_ip))
 }
 
+fn api_key_remote_ip_allowed(allowed_ips: Option<&[String]>, remote_ip: std::net::IpAddr) -> bool {
+    let Some(allowed_ips) = allowed_ips else {
+        return true;
+    };
+    if allowed_ips.is_empty() {
+        return false;
+    }
+    allowed_ips
+        .iter()
+        .any(|value| ip_or_cidr_matches(value, remote_ip))
+}
+
 fn ip_or_cidr_matches(pattern: &str, remote_ip: std::net::IpAddr) -> bool {
     let pattern = pattern.trim();
     if pattern.is_empty() {
@@ -917,6 +929,31 @@ pub(crate) async fn proxy_request(
         &mut request_context,
     )
     .await?;
+    if let Some(auth_context) = request_context
+        .control_decision
+        .as_ref()
+        .and_then(|decision| decision.auth_context.as_ref())
+    {
+        if !api_key_remote_ip_allowed(auth_context.allowed_ips.as_deref(), remote_addr.ip()) {
+            let rejection = crate::control::GatewayLocalAuthRejection::IpNotAllowed {
+                remote_ip: remote_addr.ip().to_string(),
+            };
+            let response = build_local_auth_rejection_response(
+                &trace_id,
+                request_context.control_decision.as_ref(),
+                &rejection,
+            )?;
+            return Ok(finalize_gateway_response_with_context(
+                &state,
+                response,
+                &remote_addr,
+                &request_context,
+                EXECUTION_PATH_LOCAL_AUTH_DENIED,
+                &started_at,
+                request_permit.take(),
+            ));
+        }
+    }
     let request_context_ms = request_context_started_at.elapsed().as_millis() as u64;
     if request_context
         .control_decision
@@ -1909,13 +1946,38 @@ fn local_execution_runtime_miss_route_detail(
 #[cfg(test)]
 mod tests {
     use super::{
-        diagnostic_is_auth_api_key_concurrency_limited, local_execution_runtime_miss_detail,
-        restore_redacted_stream_execution_response, restore_redacted_sync_execution_response,
-        GatewayControlDecision, LocalExecutionRuntimeMissDiagnostic,
+        api_key_remote_ip_allowed, diagnostic_is_auth_api_key_concurrency_limited,
+        local_execution_runtime_miss_detail, restore_redacted_stream_execution_response,
+        restore_redacted_sync_execution_response, GatewayControlDecision,
+        LocalExecutionRuntimeMissDiagnostic,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Response};
     use serde_json::json;
+
+    #[test]
+    fn api_key_remote_ip_allows_unrestricted_keys() {
+        let remote_ip = "203.0.113.10".parse().expect("valid ip");
+        assert!(api_key_remote_ip_allowed(None, remote_ip));
+    }
+
+    #[test]
+    fn api_key_remote_ip_matches_exact_ip_and_cidr() {
+        let allowed_ips = vec!["198.51.100.1".to_string(), "203.0.113.0/24".to_string()];
+
+        assert!(api_key_remote_ip_allowed(
+            Some(&allowed_ips),
+            "198.51.100.1".parse().expect("valid ip"),
+        ));
+        assert!(api_key_remote_ip_allowed(
+            Some(&allowed_ips),
+            "203.0.113.42".parse().expect("valid ip"),
+        ));
+        assert!(!api_key_remote_ip_allowed(
+            Some(&allowed_ips),
+            "203.0.114.42".parse().expect("valid ip"),
+        ));
+    }
 
     fn redaction_slot_for_email() -> (crate::privacy::RedactionSessionSlot, String) {
         let masked = crate::privacy::mask_chat_request_json(
