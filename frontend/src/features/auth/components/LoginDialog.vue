@@ -131,13 +131,19 @@
 
       <!-- 登录表单 -->
       <form
+        ref="loginFormEl"
+        name="login"
+        action="/api/auth/login"
+        method="post"
         class="space-y-4"
+        autocomplete="on"
+        data-form-type="login"
         @submit.prevent="handleLogin"
       >
         <div class="space-y-1.5">
           <div class="flex items-center justify-between">
             <Label
-              for="login-email"
+              for="username"
               class="text-sm"
             >
               {{ emailLabel }}
@@ -160,29 +166,35 @@
             </button>
           </div>
           <Input
-            id="login-email"
+            id="username"
             v-model="form.email"
             type="text"
+            name="username"
             required
             placeholder="用户名或邮箱"
-            autocomplete="off"
+            autocomplete="username"
+            autocapitalize="none"
+            spellcheck="false"
+            :disable-autofill="false"
           />
         </div>
 
         <div class="space-y-1.5">
           <Label
-            for="login-password"
+            for="password"
             class="text-sm"
           >
             密码
           </Label>
           <Input
-            id="login-password"
+            id="password"
             v-model="form.password"
             type="password"
+            name="password"
             required
             placeholder="输入密码"
-            autocomplete="off"
+            autocomplete="current-password"
+            :disable-autofill="false"
           />
         </div>
 
@@ -288,6 +300,7 @@ const ldapEnabled = ref(false)
 const ldapExclusive = ref(false)
 
 const oauthProviders = ref<OAuthProviderInfo[]>([])
+const loginFormEl = ref<HTMLFormElement | null>(null)
 
 // 保存用户的认证类型偏好
 watch(authType, (newType) => {
@@ -328,28 +341,67 @@ function fillDemoAccount(type: 'admin' | 'user') {
   form.value.password = account.password
 }
 
-async function handleLogin() {
-  if (!form.value.email || !form.value.password) {
+async function handleLogin(event?: Event) {
+  const { email, password } = readCurrentLoginCredentials(event)
+
+  if (!email || !password) {
     showWarning('请输入邮箱和密码')
     return
   }
 
-  const success = await authStore.login(form.value.email, form.value.password, authType.value)
+  const success = await authStore.login(email, password, authType.value)
   if (success) {
+    const targetPath = consumeStoredRedirectPath() ?? (authStore.canAccessAdmin ? '/admin/dashboard' : '/dashboard')
+
+    try {
+      const navigationFailure = await router.push(targetPath)
+      if (navigationFailure) {
+        throw navigationFailure
+      }
+    } catch {
+      showError('登录成功，但跳转失败，请刷新页面或手动进入控制台')
+      return
+    }
+
     showSuccess('登录成功，正在跳转...')
 
     // 关闭对话框
     isOpen.value = false
-
-    // 延迟一下让用户看到成功消息
-    setTimeout(() => {
-      // 根据用户角色跳转到不同的仪表盘
-      const targetPath = authStore.canAccessAdmin ? '/admin/dashboard' : '/dashboard'
-      router.push(targetPath)
-    }, 1000)
   } else {
     showError(authStore.error || '登录失败，请检查邮箱和密码')
   }
+}
+
+function readCurrentLoginCredentials(event?: Event): { email: string; password: string } {
+  const formElement = event?.currentTarget instanceof HTMLFormElement
+    ? event.currentTarget
+    : loginFormEl.value
+
+  const emailInput = formElement?.elements.namedItem('username')
+  const passwordInput = formElement?.elements.namedItem('password')
+
+  const email = emailInput instanceof HTMLInputElement
+    ? emailInput.value.trim()
+    : form.value.email.trim()
+  const password = passwordInput instanceof HTMLInputElement
+    ? passwordInput.value
+    : form.value.password
+
+  form.value.email = email
+  form.value.password = password
+
+  return { email, password }
+}
+
+function consumeStoredRedirectPath(): string | null {
+  const redirectPath = sessionStorage.getItem('redirectPath')
+  if (redirectPath) {
+    sessionStorage.removeItem('redirectPath')
+  }
+  if (!redirectPath || redirectPath === '/' || !redirectPath.startsWith('/') || redirectPath.startsWith('//')) {
+    return null
+  }
+  return redirectPath
 }
 
 function handleOAuthLogin(providerType: string) {
