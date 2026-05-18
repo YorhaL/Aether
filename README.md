@@ -48,14 +48,14 @@ cp .env.example .env
 ./generate_keys.sh
 # 编辑 .env 设置 ADMIN_PASSWORD
 
-# 3. 首次部署 / 更新 (从以下数据库、内存策略任选其一)
+# 3. 首次部署 / 更新 (从以下部署形态任选其一)
 # Postgres + Redis (适用于企业或多人使用)
 docker compose pull && docker compose up -d
-# 仅SQLite (适用于个人用户或朋友分享)
-docker compose -f docker-compose.sqlite.yml pull && docker compose -f docker-compose.sqlite.yml up -d
+# Single Node (适用于个人用户或朋友分享)
+docker compose -f docker-compose.single-node.yml pull && docker compose -f docker-compose.single-node.yml up -d
 ```
 
-### 一键安装（可选部署方式 Linux: systemd; Mac: launchd）
+### 一键安装（默认 Single Node：Linux systemd / macOS launchd + SQLite）
 
 ```bash
 cd Aether && cd Aether

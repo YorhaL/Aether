@@ -157,7 +157,9 @@ pub(crate) fn resolve_local_decision_execution_runtime_auth_context(
     decision: &GatewayControlDecision,
 ) -> Option<ExecutionRuntimeAuthContext> {
     resolve_decision_execution_runtime_auth_context(decision).filter(|auth_context| {
-        !auth_context.user_id.trim().is_empty() && !auth_context.api_key_id.trim().is_empty()
+        auth_context.access_allowed
+            && !auth_context.user_id.trim().is_empty()
+            && !auth_context.api_key_id.trim().is_empty()
     })
 }
 

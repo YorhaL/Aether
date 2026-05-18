@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-use futures_util::TryStreamExt;
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::types::{
     CreateManagementTokenRecord, ManagementTokenListQuery, ManagementTokenReadRepository,
@@ -9,8 +8,9 @@ use super::types::{
     UpdateManagementTokenRecord,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
+use aether_data_query::{push_eq, push_limit, push_limit_offset, push_optional_eq, WhereClause};
 
-const LIST_MANAGEMENT_TOKENS_SQL: &str = r#"
+const MANAGEMENT_TOKEN_WITH_USER_COLUMNS: &str = r#"
 SELECT
   mt.id,
   mt.user_id,
@@ -32,70 +32,6 @@ SELECT
   u.role::text AS user_role
 FROM management_tokens mt
 JOIN users u ON u.id = mt.user_id
-WHERE ($1::text IS NULL OR mt.user_id = $1)
-  AND ($2::boolean IS NULL OR mt.is_active = $2)
-ORDER BY mt.created_at DESC, mt.id DESC
-OFFSET $3
-LIMIT $4
-"#;
-
-const COUNT_MANAGEMENT_TOKENS_SQL: &str = r#"
-SELECT COUNT(mt.id) AS total
-FROM management_tokens mt
-WHERE ($1::text IS NULL OR mt.user_id = $1)
-  AND ($2::boolean IS NULL OR mt.is_active = $2)
-"#;
-
-const GET_MANAGEMENT_TOKEN_WITH_USER_SQL: &str = r#"
-SELECT
-  mt.id,
-  mt.user_id,
-  mt.name,
-  mt.description,
-  mt.token_prefix,
-  mt.allowed_ips,
-  mt.permissions,
-  EXTRACT(EPOCH FROM mt.expires_at)::bigint AS expires_at_unix_secs,
-  EXTRACT(EPOCH FROM mt.last_used_at)::bigint AS last_used_at_unix_secs,
-  mt.last_used_ip,
-  COALESCE(mt.usage_count, 0) AS usage_count,
-  mt.is_active,
-  EXTRACT(EPOCH FROM mt.created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM mt.updated_at)::bigint AS updated_at_unix_secs,
-  u.id AS user_row_id,
-  u.email AS user_email,
-  u.username AS user_username,
-  u.role::text AS user_role
-FROM management_tokens mt
-JOIN users u ON u.id = mt.user_id
-WHERE mt.id = $1
-LIMIT 1
-"#;
-
-const GET_MANAGEMENT_TOKEN_WITH_USER_BY_HASH_SQL: &str = r#"
-SELECT
-  mt.id,
-  mt.user_id,
-  mt.name,
-  mt.description,
-  mt.token_prefix,
-  mt.allowed_ips,
-  mt.permissions,
-  EXTRACT(EPOCH FROM mt.expires_at)::bigint AS expires_at_unix_secs,
-  EXTRACT(EPOCH FROM mt.last_used_at)::bigint AS last_used_at_unix_secs,
-  mt.last_used_ip,
-  COALESCE(mt.usage_count, 0) AS usage_count,
-  mt.is_active,
-  EXTRACT(EPOCH FROM mt.created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM mt.updated_at)::bigint AS updated_at_unix_secs,
-  u.id AS user_row_id,
-  u.email AS user_email,
-  u.username AS user_username,
-  u.role::text AS user_role
-FROM management_tokens mt
-JOIN users u ON u.id = mt.user_id
-WHERE mt.token_hash = $1
-LIMIT 1
 "#;
 
 const DELETE_MANAGEMENT_TOKEN_SQL: &str = r#"
@@ -362,24 +298,34 @@ impl ManagementTokenReadRepository for SqlxManagementTokenRepository {
         &self,
         query: &ManagementTokenListQuery,
     ) -> Result<StoredManagementTokenListPage, DataLayerError> {
-        let count_row = sqlx::query(COUNT_MANAGEMENT_TOKENS_SQL)
-            .bind(query.user_id.as_deref())
-            .bind(query.is_active)
+        let mut count_builder =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(mt.id) AS total FROM management_tokens mt");
+        let mut count_where = WhereClause::new();
+        apply_management_token_filters(&mut count_builder, &mut count_where, query);
+        let total = count_builder
+            .build_query_scalar::<i64>()
             .fetch_one(&self.pool)
             .await
             .map_postgres_err()?;
-        let total = count_row.try_get::<i64, _>("total").map_postgres_err()?;
 
-        let mut rows = sqlx::query(LIST_MANAGEMENT_TOKENS_SQL)
-            .bind(query.user_id.as_deref())
-            .bind(query.is_active)
-            .bind(i64::try_from(query.offset).unwrap_or(i64::MAX))
-            .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
-            .fetch(&self.pool);
-        let mut items = Vec::new();
-        while let Some(row) = rows.try_next().await.map_postgres_err()? {
-            items.push(map_token_with_user_row(&row)?);
-        }
+        let mut list_builder = QueryBuilder::<Postgres>::new(MANAGEMENT_TOKEN_WITH_USER_COLUMNS);
+        let mut list_where = WhereClause::new();
+        apply_management_token_filters(&mut list_builder, &mut list_where, query);
+        list_builder.push(" ORDER BY mt.created_at DESC, mt.id DESC");
+        push_limit_offset(
+            &mut list_builder,
+            i64::try_from(query.limit).unwrap_or(i64::MAX),
+            i64::try_from(query.offset).unwrap_or(i64::MAX),
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+        let items = rows
+            .iter()
+            .map(map_token_with_user_row)
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(StoredManagementTokenListPage {
             items,
@@ -391,8 +337,17 @@ impl ManagementTokenReadRepository for SqlxManagementTokenRepository {
         &self,
         token_id: &str,
     ) -> Result<Option<StoredManagementTokenWithUser>, DataLayerError> {
-        let row = sqlx::query(GET_MANAGEMENT_TOKEN_WITH_USER_SQL)
-            .bind(token_id)
+        let mut builder = QueryBuilder::<Postgres>::new(MANAGEMENT_TOKEN_WITH_USER_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "mt.id",
+            token_id.to_string(),
+        );
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -403,13 +358,31 @@ impl ManagementTokenReadRepository for SqlxManagementTokenRepository {
         &self,
         token_hash: &str,
     ) -> Result<Option<StoredManagementTokenWithUser>, DataLayerError> {
-        let row = sqlx::query(GET_MANAGEMENT_TOKEN_WITH_USER_BY_HASH_SQL)
-            .bind(token_hash)
+        let mut builder = QueryBuilder::<Postgres>::new(MANAGEMENT_TOKEN_WITH_USER_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "mt.token_hash",
+            token_hash.to_string(),
+        );
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
         row.as_ref().map(map_token_with_user_row).transpose()
     }
+}
+
+fn apply_management_token_filters<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    where_clause: &mut WhereClause,
+    query: &'a ManagementTokenListQuery,
+) {
+    push_optional_eq(builder, where_clause, "mt.user_id", query.user_id.clone());
+    push_optional_eq(builder, where_clause, "mt.is_active", query.is_active);
 }
 
 #[async_trait]

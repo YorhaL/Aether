@@ -469,6 +469,67 @@ fn admin_usage_simplify_all_candidates_skipped_client_error_message(
     Some(format!("没有可用提供商支持本次{request_mode}请求"))
 }
 
+fn admin_usage_local_runtime_miss_reason_label(reason: &str) -> &'static str {
+    match reason {
+        "all_candidates_skipped" => "所有候选均被跳过",
+        "candidate_list_empty" => "没有可调度候选",
+        "local_runtime_unavailable" => "本地执行运行时不可用",
+        "provider_transport_unavailable" => "提供商传输不可用",
+        _ => "本地调度未命中",
+    }
+}
+
+fn admin_usage_extract_local_runtime_miss_reason_summary(message: &str) -> Option<String> {
+    let without_reason_code = message
+        .split_once("（原因代码:")
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(message)
+        .trim();
+    let summary = without_reason_code
+        .rsplit_once('：')
+        .or_else(|| without_reason_code.rsplit_once(':'))
+        .map(|(_, suffix)| suffix.trim())?;
+    (!summary.is_empty()).then(|| summary.to_string())
+}
+
+fn admin_usage_scheduling_failure_json(
+    item: &StoredRequestUsageAudit,
+    client_error: &Value,
+) -> Value {
+    if item.routing_execution_path() != Some("local_execution_runtime_miss") {
+        return Value::Null;
+    }
+
+    let reason = item
+        .routing_local_execution_runtime_miss_reason()
+        .unwrap_or("local_execution_runtime_miss");
+    let message = admin_usage_error_domain_message(client_error)
+        .or_else(|| admin_usage_client_error_fallback_message(item))
+        .or_else(|| item.error_message.as_deref().map(str::to_string));
+    let raw_message = item
+        .error_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let reason_summary =
+        raw_message.and_then(admin_usage_extract_local_runtime_miss_reason_summary);
+
+    json!({
+        "source": "local_execution_runtime_miss",
+        "reason": reason,
+        "reason_label": admin_usage_local_runtime_miss_reason_label(reason),
+        "title": format!("本地调度失败：{}", admin_usage_local_runtime_miss_reason_label(reason)),
+        "message": message,
+        "reason_summary": reason_summary,
+        "status_code": item.status_code,
+        "no_upstream_attempt": item.candidate_id.is_none()
+            && item.provider_api_key_id.is_none()
+            && item.provider_request_headers.is_none()
+            && item.provider_request_body.is_none()
+            && item.provider_request_body_ref.is_none(),
+    })
+}
+
 fn admin_usage_extract_local_execution_request_mode(message: &str) -> Option<&str> {
     let rest = message.get(message.find("本次")? + "本次".len()..)?;
     let mode = rest.get(..rest.find("请求")?)?.trim();
@@ -2290,6 +2351,8 @@ pub fn build_admin_usage_detail_payload(
     payload["upstream_error"] = error_domains["upstream_error"].clone();
     payload["client_error"] = error_domains["client_error"].clone();
     payload["failure_summary"] = error_domains["failure_summary"].clone();
+    payload["scheduling_failure"] =
+        admin_usage_scheduling_failure_json(item, &error_domains["client_error"]);
     payload["error_flow"] = error_flow;
     payload["has_request_body"] = json!(admin_usage_has_body_value(
         item,
@@ -3045,6 +3108,11 @@ mod tests {
     fn detail_payload_simplifies_local_client_error_when_client_body_is_unloaded() {
         let message = "没有可用提供商支持模型 gpt-5.4 的流式请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）";
         let item = StoredRequestUsageAudit {
+            provider_api_key_id: None,
+            provider_request_headers: None,
+            provider_request_body: None,
+            provider_request_body_ref: None,
+            candidate_id: None,
             execution_path: Some("local_execution_runtime_miss".to_string()),
             local_execution_runtime_miss_reason: Some("candidate_list_empty".to_string()),
             error_category: Some("http_error".to_string()),
@@ -3077,12 +3145,31 @@ mod tests {
             payload["failure_summary"]["message"],
             "没有可用提供商支持模型 gpt-5.4 的流式请求"
         );
+        assert_eq!(
+            payload["scheduling_failure"]["title"],
+            "本地调度失败：没有可调度候选"
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["reason"],
+            "candidate_list_empty"
+        );
+        assert!(payload["scheduling_failure"]["reason_summary"].is_null());
+        assert_eq!(
+            payload["scheduling_failure"]["message"],
+            "没有可用提供商支持模型 gpt-5.4 的流式请求"
+        );
+        assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], true);
     }
 
     #[test]
     fn detail_payload_simplifies_all_candidates_skipped_when_client_body_is_unloaded() {
         let message = "找到 1 个支持模型 gpt-5.4 的候选提供商，但本次流式请求全部不可用：provider_quota_blocked 2 次（原因代码: all_candidates_skipped）";
         let item = StoredRequestUsageAudit {
+            provider_api_key_id: None,
+            provider_request_headers: None,
+            provider_request_body: None,
+            provider_request_body_ref: None,
+            candidate_id: None,
             execution_path: Some("local_execution_runtime_miss".to_string()),
             local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
             error_category: Some("http_error".to_string()),
@@ -3115,6 +3202,23 @@ mod tests {
             payload["failure_summary"]["message"],
             "没有可用提供商支持模型 gpt-5.4 的流式请求"
         );
+        assert_eq!(
+            payload["scheduling_failure"]["title"],
+            "本地调度失败：所有候选均被跳过"
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["reason"],
+            "all_candidates_skipped"
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["reason_summary"],
+            "provider_quota_blocked 2 次"
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["message"],
+            "没有可用提供商支持模型 gpt-5.4 的流式请求"
+        );
+        assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], true);
     }
 
     #[test]

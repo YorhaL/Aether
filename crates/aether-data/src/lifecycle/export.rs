@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures_util::TryStreamExt;
 use serde_json::Value;
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 
@@ -130,6 +131,41 @@ pub struct ExportRow {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DataCopyOptions {
+    pub omit_request_body_details: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqliteCopyColumn {
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    has_default: bool,
+    primary_key_position: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteCopyAffinity {
+    Integer,
+    Real,
+    Text,
+    Blob,
+    Numeric,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchemaCopyColumn {
+    sqlite: SqliteCopyColumn,
+    postgres: PostgresImportColumn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchemaCopyTable {
+    table_name: String,
+    columns: Vec<SchemaCopyColumn>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PostgresImportColumn {
     data_type: String,
@@ -140,6 +176,20 @@ struct PostgresImportColumn {
 
 type PostgresImportColumns = BTreeMap<String, PostgresImportColumn>;
 type ImportColumnNames = BTreeSet<String>;
+
+const USAGE_REQUEST_BODY_DETAIL_COLUMNS: &[&str] = &[
+    "request_body",
+    "response_body",
+    "provider_request_body",
+    "client_response_body",
+    "request_body_compressed",
+    "response_body_compressed",
+    "provider_request_body_compressed",
+    "client_response_body_compressed",
+];
+
+const REQUEST_BODY_DETAIL_TABLES: &[&str] = &["usage_body_blobs", "usage_http_audits"];
+const LIFECYCLE_TABLES: &[&str] = &["_sqlx_migrations", "schema_backfills"];
 
 pub fn encode_jsonl(records: &[DataExportRecord]) -> Result<String, DataLayerError> {
     validate_export_records(records)?;
@@ -342,6 +392,602 @@ pub async fn import_database_jsonl(
             import_postgres_jsonl(&pool, input).await
         }
     }
+}
+
+pub async fn copy_database_records(
+    source: SqlDatabaseConfig,
+    target: SqlDatabaseConfig,
+    domains: Vec<ExportDomain>,
+    created_at_unix_secs: u64,
+    options: DataCopyOptions,
+) -> Result<usize, DataLayerError> {
+    if domains.is_empty()
+        && source.driver == DatabaseDriver::Postgres
+        && target.driver == DatabaseDriver::Sqlite
+    {
+        return copy_postgres_to_sqlite_from_target_schema(source, target, options).await;
+    }
+
+    let mut records =
+        decode_jsonl(&export_database_jsonl(source, domains, created_at_unix_secs).await?)?;
+    if options.omit_request_body_details {
+        omit_request_body_details_from_records(&mut records);
+    }
+    import_database_jsonl(target, &encode_jsonl(&records)?).await
+}
+
+fn omit_request_body_details_from_records(records: &mut [DataExportRecord]) {
+    for record in records {
+        let DataExportRecord::Row {
+            domain: ExportDomain::Usage,
+            payload,
+            ..
+        } = record
+        else {
+            continue;
+        };
+
+        if let Some(object) = payload.as_object_mut() {
+            for column_name in USAGE_REQUEST_BODY_DETAIL_COLUMNS {
+                object.remove(*column_name);
+            }
+        }
+    }
+}
+
+async fn copy_postgres_to_sqlite_from_target_schema(
+    source: SqlDatabaseConfig,
+    mut target: SqlDatabaseConfig,
+    options: DataCopyOptions,
+) -> Result<usize, DataLayerError> {
+    target.pool.min_connections = 1;
+    target.pool.max_connections = 1;
+
+    let postgres_pool =
+        crate::driver::postgres::PostgresPoolFactory::new(source.to_postgres_config()?)?
+            .connect_lazy()?;
+    let sqlite_pool = crate::driver::sqlite::SqlitePoolFactory::new(target)?.connect_lazy()?;
+
+    let source_tables = load_postgres_public_table_names(&postgres_pool).await?;
+    let target_tables = load_sqlite_copy_table_names(&sqlite_pool).await?;
+
+    ensure_no_nonempty_source_tables_outside_target_schema(
+        &postgres_pool,
+        &source_tables,
+        &target_tables,
+        options,
+    )
+    .await?;
+
+    let mut imported = 0usize;
+    sqlx::raw_sql("PRAGMA foreign_keys = OFF")
+        .execute(&sqlite_pool)
+        .await
+        .map_sql_err()?;
+
+    for table_name in target_tables {
+        if copy_table_is_lifecycle(&table_name)
+            || copy_table_is_sqlite_internal(&table_name)
+            || !source_tables.contains(&table_name)
+            || (options.omit_request_body_details && copy_table_is_request_body_detail(&table_name))
+        {
+            continue;
+        }
+
+        let table_plan = build_postgres_sqlite_copy_table_plan(
+            &postgres_pool,
+            &sqlite_pool,
+            &table_name,
+            options,
+        )
+        .await?;
+        if table_plan.columns.is_empty() {
+            continue;
+        }
+        imported = imported.saturating_add(
+            copy_postgres_sqlite_table(&postgres_pool, &sqlite_pool, &table_plan).await?,
+        );
+    }
+
+    sqlx::raw_sql("PRAGMA foreign_keys = ON")
+        .execute(&sqlite_pool)
+        .await
+        .map_sql_err()?;
+    ensure_sqlite_foreign_key_check_passes(&sqlite_pool).await?;
+    Ok(imported)
+}
+
+async fn ensure_no_nonempty_source_tables_outside_target_schema(
+    postgres_pool: &crate::driver::postgres::PostgresPool,
+    source_tables: &BTreeSet<String>,
+    target_tables: &BTreeSet<String>,
+    options: DataCopyOptions,
+) -> Result<(), DataLayerError> {
+    let mut missing = Vec::new();
+    for table_name in source_tables {
+        if copy_table_is_lifecycle(table_name)
+            || (options.omit_request_body_details && copy_table_is_request_body_detail(table_name))
+            || target_tables.contains(table_name)
+        {
+            continue;
+        }
+        if postgres_public_table_has_rows(postgres_pool, table_name).await? {
+            missing.push(table_name.clone());
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(DataLayerError::InvalidInput(format!(
+            "source Postgres has non-empty public tables that do not exist in the target SQLite schema: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+async fn build_postgres_sqlite_copy_table_plan(
+    postgres_pool: &crate::driver::postgres::PostgresPool,
+    sqlite_pool: &crate::driver::sqlite::SqlitePool,
+    table_name: &str,
+    options: DataCopyOptions,
+) -> Result<SchemaCopyTable, DataLayerError> {
+    let sqlite_columns = load_sqlite_copy_columns(sqlite_pool, table_name).await?;
+    let postgres_columns =
+        load_postgres_import_columns(postgres_pool, &format!("public.{table_name}")).await?;
+    let source_has_rows = postgres_public_table_has_rows(postgres_pool, table_name).await?;
+    let mut columns = Vec::new();
+
+    for sqlite_column in sqlite_columns {
+        if options.omit_request_body_details
+            && table_name == "usage"
+            && USAGE_REQUEST_BODY_DETAIL_COLUMNS.contains(&sqlite_column.name.as_str())
+        {
+            continue;
+        }
+
+        if let Some(postgres_column) = postgres_columns.get(&sqlite_column.name) {
+            columns.push(SchemaCopyColumn {
+                sqlite: sqlite_column,
+                postgres: postgres_column.clone(),
+            });
+            continue;
+        }
+
+        if source_has_rows && sqlite_copy_column_is_required(&sqlite_column) {
+            return Err(DataLayerError::InvalidInput(format!(
+                "target SQLite table '{table_name}' has required column '{}' that does not exist in source Postgres",
+                sqlite_column.name
+            )));
+        }
+    }
+
+    if source_has_rows && columns.is_empty() {
+        return Err(DataLayerError::InvalidInput(format!(
+            "source Postgres table '{table_name}' has rows, but none of its columns exist in target SQLite"
+        )));
+    }
+
+    Ok(SchemaCopyTable {
+        table_name: table_name.to_string(),
+        columns,
+    })
+}
+
+async fn copy_postgres_sqlite_table(
+    postgres_pool: &crate::driver::postgres::PostgresPool,
+    sqlite_pool: &crate::driver::sqlite::SqlitePool,
+    table: &SchemaCopyTable,
+) -> Result<usize, DataLayerError> {
+    let source_sql = postgres_schema_copy_select_sql(table)?;
+    let target_sql = sqlite_schema_copy_insert_sql(table)?;
+    let mut rows = sqlx::query(&source_sql).fetch(postgres_pool);
+    let mut imported = 0usize;
+
+    while let Some(row) = rows.try_next().await.map_sql_err()? {
+        let payload = row.try_get::<Value, _>("payload").map_sql_err()?;
+        let object = payload.as_object().ok_or_else(|| {
+            DataLayerError::UnexpectedValue(format!(
+                "postgres copy row for table '{}' did not produce a JSON object",
+                table.table_name
+            ))
+        })?;
+        let mut query = sqlx::query(&target_sql);
+        for column in &table.columns {
+            let value = object.get(&column.sqlite.name).ok_or_else(|| {
+                DataLayerError::UnexpectedValue(format!(
+                    "postgres copy row for table '{}' is missing column '{}'",
+                    table.table_name, column.sqlite.name
+                ))
+            })?;
+            query = bind_sqlite_copy_value(query, value, &column.sqlite)?;
+        }
+        query.execute(sqlite_pool).await.map_sql_err()?;
+        imported = imported.saturating_add(1);
+    }
+
+    Ok(imported)
+}
+
+fn postgres_schema_copy_select_sql(table: &SchemaCopyTable) -> Result<String, DataLayerError> {
+    let table_sql = format!(
+        "public.{}",
+        postgres_quote_identifier(table.table_name.as_str())?
+    );
+    let mut payload_parts = Vec::new();
+    for column in &table.columns {
+        if let Some(expr) = postgres_schema_copy_override_expr(column)? {
+            payload_parts.push(sql_string_literal(&column.sqlite.name));
+            payload_parts.push(expr);
+        }
+    }
+    let payload_sql = if payload_parts.is_empty() {
+        "to_jsonb(t)".to_string()
+    } else {
+        format!(
+            "to_jsonb(t) || jsonb_build_object({})",
+            payload_parts.join(", ")
+        )
+    };
+
+    let order_by = table
+        .columns
+        .iter()
+        .filter(|column| column.sqlite.primary_key_position > 0)
+        .map(|column| {
+            postgres_quote_identifier(&column.sqlite.name).map(|quoted| format!("t.{quoted} ASC"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let order_sql = if order_by.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", order_by.join(", "))
+    };
+
+    Ok(format!(
+        "SELECT {payload_sql} AS payload FROM {table_sql} AS t{order_sql}"
+    ))
+}
+
+fn postgres_schema_copy_override_expr(
+    column: &SchemaCopyColumn,
+) -> Result<Option<String>, DataLayerError> {
+    let column_sql = format!("t.{}", postgres_quote_identifier(&column.sqlite.name)?);
+    let affinity = sqlite_copy_affinity(&column.sqlite);
+
+    if affinity == SqliteCopyAffinity::Blob && is_postgres_bytea_column(&column.postgres) {
+        return Ok(Some(format!(
+            "CASE WHEN {column_sql} IS NULL THEN NULL ELSE encode({column_sql}, 'hex') END"
+        )));
+    }
+
+    if affinity == SqliteCopyAffinity::Integer && is_postgres_boolean_column(&column.postgres) {
+        return Ok(Some(format!(
+            "CASE WHEN {column_sql} IS NULL THEN NULL WHEN {column_sql} THEN 1 ELSE 0 END"
+        )));
+    }
+
+    if affinity == SqliteCopyAffinity::Integer
+        && (is_postgres_timestamp_column(&column.postgres)
+            || is_postgres_date_column(&column.postgres))
+    {
+        let timestamp_sql = if is_postgres_date_column(&column.postgres) {
+            format!("{column_sql}::timestamp")
+        } else {
+            column_sql.clone()
+        };
+        let multiplier = if sqlite_copy_column_stores_unix_millis(&column.sqlite.name) {
+            " * 1000"
+        } else {
+            ""
+        };
+        return Ok(Some(format!(
+            "CASE WHEN {column_sql} IS NULL THEN NULL ELSE FLOOR(EXTRACT(EPOCH FROM {timestamp_sql}){multiplier})::bigint END"
+        )));
+    }
+
+    Ok(None)
+}
+
+fn sqlite_schema_copy_insert_sql(table: &SchemaCopyTable) -> Result<String, DataLayerError> {
+    let table_sql = sqlite_quote_identifier(&table.table_name)?;
+    let column_sql = table
+        .columns
+        .iter()
+        .map(|column| sqlite_quote_identifier(&column.sqlite.name))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let placeholder_sql = vec!["?"; table.columns.len()].join(", ");
+    Ok(format!(
+        "INSERT OR REPLACE INTO {table_sql} ({column_sql}) VALUES ({placeholder_sql})"
+    ))
+}
+
+async fn load_postgres_public_table_names(
+    pool: &crate::driver::postgres::PostgresPool,
+) -> Result<BTreeSet<String>, DataLayerError> {
+    let rows = sqlx::query(
+        r#"
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_type = 'BASE TABLE'
+ORDER BY table_name
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+
+    let mut tables = BTreeSet::new();
+    for row in rows {
+        tables.insert(row.try_get::<String, _>("table_name").map_sql_err()?);
+    }
+    Ok(tables)
+}
+
+async fn load_sqlite_copy_table_names(
+    pool: &crate::driver::sqlite::SqlitePool,
+) -> Result<BTreeSet<String>, DataLayerError> {
+    let rows = sqlx::query(
+        r#"
+SELECT name
+FROM sqlite_schema
+WHERE type = 'table'
+  AND name NOT LIKE 'sqlite_%'
+ORDER BY name
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+
+    let mut tables = BTreeSet::new();
+    for row in rows {
+        let table_name = row.try_get::<String, _>("name").map_sql_err()?;
+        if !copy_table_is_lifecycle(&table_name) && !copy_table_is_sqlite_internal(&table_name) {
+            tables.insert(table_name);
+        }
+    }
+    Ok(tables)
+}
+
+async fn load_sqlite_copy_columns(
+    pool: &crate::driver::sqlite::SqlitePool,
+    table_name: &str,
+) -> Result<Vec<SqliteCopyColumn>, DataLayerError> {
+    let table_sql = sqlite_quote_identifier(table_name)?;
+    let rows = sqlx::query(&format!("PRAGMA table_info({table_sql})"))
+        .fetch_all(pool)
+        .await
+        .map_sql_err()?;
+
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(SqliteCopyColumn {
+            name: row.try_get::<String, _>("name").map_sql_err()?,
+            declared_type: row
+                .try_get::<Option<String>, _>("type")
+                .map_sql_err()?
+                .unwrap_or_default(),
+            not_null: row.try_get::<i64, _>("notnull").map_sql_err()? != 0,
+            has_default: row
+                .try_get::<Option<String>, _>("dflt_value")
+                .map_sql_err()?
+                .is_some(),
+            primary_key_position: row.try_get::<i64, _>("pk").map_sql_err()?,
+        });
+    }
+
+    if columns.is_empty() {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "target SQLite table '{table_name}' has no visible columns"
+        )));
+    }
+    Ok(columns)
+}
+
+async fn postgres_public_table_has_rows(
+    pool: &crate::driver::postgres::PostgresPool,
+    table_name: &str,
+) -> Result<bool, DataLayerError> {
+    let table_sql = format!("public.{}", postgres_quote_identifier(table_name)?);
+    sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {table_sql} LIMIT 1)"
+    ))
+    .fetch_one(pool)
+    .await
+    .map_sql_err()
+}
+
+async fn ensure_sqlite_foreign_key_check_passes(
+    pool: &crate::driver::sqlite::SqlitePool,
+) -> Result<(), DataLayerError> {
+    let rows = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(pool)
+        .await
+        .map_sql_err()?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut violations = Vec::new();
+    for row in rows.iter().take(10) {
+        let table = row
+            .try_get::<Option<String>, _>("table")
+            .map_sql_err()?
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let rowid = row.try_get::<Option<i64>, _>("rowid").map_sql_err()?;
+        let parent = row
+            .try_get::<Option<String>, _>("parent")
+            .map_sql_err()?
+            .unwrap_or_else(|| "<unknown>".to_string());
+        violations.push(format!("{table} rowid={rowid:?} parent={parent}"));
+    }
+    Err(DataLayerError::InvalidInput(format!(
+        "target SQLite foreign key check failed after copy: {}",
+        violations.join("; ")
+    )))
+}
+
+fn copy_table_is_lifecycle(table_name: &str) -> bool {
+    LIFECYCLE_TABLES.contains(&table_name)
+}
+
+fn copy_table_is_sqlite_internal(table_name: &str) -> bool {
+    table_name.starts_with("sqlite_")
+}
+
+fn copy_table_is_request_body_detail(table_name: &str) -> bool {
+    REQUEST_BODY_DETAIL_TABLES.contains(&table_name)
+}
+
+fn sqlite_copy_column_is_required(column: &SqliteCopyColumn) -> bool {
+    (column.not_null || column.primary_key_position > 0) && !column.has_default
+}
+
+fn sqlite_copy_column_stores_unix_millis(column_name: &str) -> bool {
+    column_name.ends_with("_unix_ms")
+}
+
+fn sqlite_copy_affinity(column: &SqliteCopyColumn) -> SqliteCopyAffinity {
+    let declared_type = column.declared_type.to_ascii_uppercase();
+    if declared_type.contains("INT") {
+        SqliteCopyAffinity::Integer
+    } else if declared_type.contains("CHAR")
+        || declared_type.contains("CLOB")
+        || declared_type.contains("TEXT")
+    {
+        SqliteCopyAffinity::Text
+    } else if declared_type.contains("BLOB") || declared_type.trim().is_empty() {
+        SqliteCopyAffinity::Blob
+    } else if declared_type.contains("REAL")
+        || declared_type.contains("FLOA")
+        || declared_type.contains("DOUB")
+    {
+        SqliteCopyAffinity::Real
+    } else {
+        SqliteCopyAffinity::Numeric
+    }
+}
+
+fn is_postgres_bytea_column(column: &PostgresImportColumn) -> bool {
+    column.data_type == "bytea" || column.udt_name == "bytea"
+}
+
+fn is_postgres_date_column(column: &PostgresImportColumn) -> bool {
+    column.data_type == "date" || column.udt_name == "date"
+}
+
+fn bind_sqlite_copy_value<'q>(
+    query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    value: &'q Value,
+    column: &SqliteCopyColumn,
+) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>, DataLayerError>
+{
+    Ok(match sqlite_copy_affinity(column) {
+        SqliteCopyAffinity::Integer => match value {
+            Value::Null => query.bind(Option::<i64>::None),
+            Value::Bool(value) => query.bind(i64::from(*value)),
+            Value::Number(number) => {
+                let value = number
+                    .as_i64()
+                    .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok()))
+                    .ok_or_else(|| {
+                        DataLayerError::InvalidInput(format!(
+                            "sqlite copy column '{}' expected integer, got {number}",
+                            column.name
+                        ))
+                    })?;
+                query.bind(value)
+            }
+            Value::String(value) => query.bind(value.parse::<i64>().map_err(|err| {
+                DataLayerError::InvalidInput(format!(
+                    "sqlite copy column '{}' expected integer string: {err}",
+                    column.name
+                ))
+            })?),
+            Value::Array(_) | Value::Object(_) => {
+                return Err(DataLayerError::InvalidInput(format!(
+                    "sqlite copy column '{}' expected integer-compatible value",
+                    column.name
+                )));
+            }
+        },
+        SqliteCopyAffinity::Real => match value {
+            Value::Null => query.bind(Option::<f64>::None),
+            Value::Number(number) => query.bind(number.as_f64().ok_or_else(|| {
+                DataLayerError::InvalidInput(format!(
+                    "sqlite copy column '{}' expected finite real value",
+                    column.name
+                ))
+            })?),
+            Value::String(value) => query.bind(value.parse::<f64>().map_err(|err| {
+                DataLayerError::InvalidInput(format!(
+                    "sqlite copy column '{}' expected real string: {err}",
+                    column.name
+                ))
+            })?),
+            Value::Bool(value) => query.bind(if *value { 1.0 } else { 0.0 }),
+            Value::Array(_) | Value::Object(_) => {
+                return Err(DataLayerError::InvalidInput(format!(
+                    "sqlite copy column '{}' expected real-compatible value",
+                    column.name
+                )));
+            }
+        },
+        SqliteCopyAffinity::Blob => match value {
+            Value::Null => query.bind(Option::<Vec<u8>>::None),
+            Value::String(value) => query.bind(hex_decode(value, &column.name)?),
+            Value::Array(values) => {
+                let mut bytes = Vec::with_capacity(values.len());
+                for value in values {
+                    let Some(byte) = value.as_u64().and_then(|value| u8::try_from(value).ok())
+                    else {
+                        return Err(DataLayerError::InvalidInput(format!(
+                            "sqlite copy column '{}' contains non-byte array value",
+                            column.name
+                        )));
+                    };
+                    bytes.push(byte);
+                }
+                query.bind(bytes)
+            }
+            Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
+                return Err(DataLayerError::InvalidInput(format!(
+                    "sqlite copy column '{}' expected blob-compatible value",
+                    column.name
+                )));
+            }
+        },
+        SqliteCopyAffinity::Text | SqliteCopyAffinity::Numeric => {
+            bind_sqlite_json_value(query, value)?
+        }
+    })
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn hex_decode(value: &str, column_name: &str) -> Result<Vec<u8>, DataLayerError> {
+    let value = value.trim();
+    if !value.len().is_multiple_of(2) {
+        return Err(DataLayerError::InvalidInput(format!(
+            "sqlite copy column '{column_name}' has odd-length hex data"
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for index in (0..value.len()).step_by(2) {
+        let byte = u8::from_str_radix(&value[index..index + 2], 16).map_err(|err| {
+            DataLayerError::InvalidInput(format!(
+                "sqlite copy column '{column_name}' has invalid hex data at byte {}: {err}",
+                index / 2
+            ))
+        })?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 pub async fn export_sqlite_core_jsonl(

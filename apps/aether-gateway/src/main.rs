@@ -9,7 +9,10 @@ use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use tracing::{debug, info, warn};
 
 use aether_crypto::warm_python_fernet_secret;
-use aether_data::lifecycle::export::{export_database_jsonl, import_database_jsonl, ExportDomain};
+use aether_data::lifecycle::export::{
+    copy_database_records, export_database_jsonl, import_database_jsonl, DataCopyOptions,
+    ExportDomain,
+};
 use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig, DEFAULT_SQLITE_DATABASE_URL};
 use aether_gateway::{
     attach_static_frontend, build_router_with_state, set_gateway_frontdoor_app_port, AppState,
@@ -579,6 +582,8 @@ enum DataCommand {
     Export(DataExportArgs),
     /// Import database-neutral JSONL into the selected SQL database.
     Import(DataImportArgs),
+    /// Copy persistent SQL data directly between two databases without a JSONL file.
+    Copy(DataCopyArgs),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -600,6 +605,27 @@ struct DataImportArgs {
 
     #[arg(long)]
     input: PathBuf,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+struct DataCopyArgs {
+    #[arg(long, value_enum)]
+    source_driver: DatabaseDriverArg,
+
+    #[arg(long)]
+    source_url: String,
+
+    #[arg(long, value_enum)]
+    target_driver: DatabaseDriverArg,
+
+    #[arg(long)]
+    target_url: String,
+
+    #[arg(long, value_enum, value_delimiter = ',')]
+    domains: Vec<ExportDomainArg>,
+
+    #[arg(long)]
+    omit_request_body_details: bool,
 }
 
 impl GatewayLoggingArgs {
@@ -1251,6 +1277,7 @@ async fn run_data_command(command: &DataCommand) -> Result<(), Box<dyn std::erro
     match command {
         DataCommand::Export(args) => run_data_export(args).await,
         DataCommand::Import(args) => run_data_import(args).await,
+        DataCommand::Copy(args) => run_data_copy(args).await,
     }
 }
 
@@ -1267,11 +1294,11 @@ fn required_sql_database_config(
 }
 
 fn requested_export_domains(args: &DataExportArgs) -> Vec<ExportDomain> {
-    args.domains
-        .iter()
-        .copied()
-        .map(Into::into)
-        .collect::<Vec<_>>()
+    requested_domains(&args.domains)
+}
+
+fn requested_domains(domains: &[ExportDomainArg]) -> Vec<ExportDomain> {
+    domains.iter().copied().map(Into::into).collect::<Vec<_>>()
 }
 
 fn current_unix_secs() -> Result<u64, std::time::SystemTimeError> {
@@ -1320,6 +1347,61 @@ async fn run_data_import(args: &DataImportArgs) -> Result<(), Box<dyn std::error
         imported,
         driver,
         args.input.display()
+    );
+    Ok(())
+}
+
+fn copy_database_config(
+    driver: DatabaseDriverArg,
+    url: &str,
+    label: &str,
+) -> Result<SqlDatabaseConfig, Box<dyn std::error::Error>> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{label} database URL must not be empty"),
+        )
+        .into());
+    }
+    let driver = DatabaseDriver::from(driver);
+    Ok(SqlDatabaseConfig::new(
+        driver,
+        url,
+        SqlPoolConfig {
+            require_ssl: false,
+            ..SqlPoolConfig::default()
+        },
+    )?)
+}
+
+async fn run_data_copy(args: &DataCopyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let source = copy_database_config(args.source_driver, &args.source_url, "source")?;
+    let target = copy_database_config(args.target_driver, &args.target_url, "target")?;
+    let source_driver = source.driver;
+    let target_driver = target.driver;
+    let domains = requested_domains(&args.domains);
+    let created_at_unix_secs = current_unix_secs()?;
+    let imported = copy_database_records(
+        source,
+        target,
+        domains,
+        created_at_unix_secs,
+        DataCopyOptions {
+            omit_request_body_details: args.omit_request_body_details,
+        },
+    )
+    .await?;
+
+    info!(
+        source_driver = %source_driver,
+        target_driver = %target_driver,
+        imported,
+        "database copy complete"
+    );
+    println!(
+        "copied {} records from {} to {} without a JSONL file",
+        imported, source_driver, target_driver
     );
     Ok(())
 }

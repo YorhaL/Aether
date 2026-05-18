@@ -106,7 +106,7 @@ async fn balance_capacity_rejection(
     requested_model: Option<&str>,
     body: &Bytes,
 ) -> Result<Option<GatewayLocalAuthRejection>, GatewayError> {
-    if auth_context.api_key_is_standalone || auth_context.admin_bypass_limits {
+    if auth_context.api_key_is_standalone {
         return Ok(None);
     }
     if auth_context.local_rejection.is_some() {
@@ -814,6 +814,43 @@ mod tests {
 
             assert_eq!(rejection, None);
         }
+    }
+
+    #[tokio::test]
+    async fn admin_bypass_limits_does_not_skip_exhausted_daily_quota_capacity() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 1.0,
+                    "output_price_per_1m": 2.0
+                }]
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(0.0, false), context);
+        let mut decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        if let Some(auth_context) = decision.auth_context.as_mut() {
+            auth_context.admin_bypass_limits = true;
+        }
+        let uri: Uri = "/v1/chat/completions".parse().expect("uri should parse");
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        );
+
+        let rejection =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("quota rejection should resolve");
+
+        assert_eq!(
+            rejection,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(0.0),
+            })
+        );
     }
 
     #[tokio::test]

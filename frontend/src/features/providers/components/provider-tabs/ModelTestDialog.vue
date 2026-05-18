@@ -444,7 +444,27 @@
               {{ attempt.key_name || maskKey(attempt.key_id) }}
             </div>
             <div
-              v-if="attemptDetail(attempt) !== '-'"
+              v-if="attemptImagePreviews(attempt).length > 0"
+              class="mt-2 flex flex-wrap gap-2"
+            >
+              <button
+                v-for="(preview, imageIndex) in attemptImagePreviews(attempt).slice(0, 3)"
+                :key="`${preview.src}-${imageIndex}`"
+                type="button"
+                class="h-16 w-16 overflow-hidden rounded-md border border-border/60 bg-muted/30 transition-colors hover:border-primary/60"
+                :title="preview.label"
+                @click.stop="openImagePreview(preview)"
+              >
+                <img
+                  :src="preview.src"
+                  :alt="preview.label"
+                  class="h-full w-full object-contain"
+                  loading="lazy"
+                >
+              </button>
+            </div>
+            <div
+              v-else-if="attemptDetail(attempt) !== '-'"
               class="mt-1 break-all text-muted-foreground"
             >
               {{ attemptDetail(attempt) }}
@@ -519,6 +539,33 @@
               </td>
               <td class="px-3 py-2 text-muted-foreground">
                 <div
+                  v-if="attemptImagePreviews(attempt).length > 0"
+                  class="flex flex-wrap gap-2"
+                >
+                  <button
+                    v-for="(preview, imageIndex) in attemptImagePreviews(attempt).slice(0, 4)"
+                    :key="`${preview.src}-${imageIndex}`"
+                    type="button"
+                    class="h-14 w-14 overflow-hidden rounded-md border border-border/60 bg-muted/30 transition-colors hover:border-primary/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/70"
+                    :title="preview.label"
+                    @click.stop="openImagePreview(preview)"
+                  >
+                    <img
+                      :src="preview.src"
+                      :alt="preview.label"
+                      class="h-full w-full object-contain"
+                      loading="lazy"
+                    >
+                  </button>
+                  <span
+                    v-if="attemptImagePreviews(attempt).length > 4"
+                    class="flex h-14 items-center rounded-md border border-border/60 px-2 text-xs text-muted-foreground"
+                  >
+                    +{{ attemptImagePreviews(attempt).length - 4 }}
+                  </span>
+                </div>
+                <div
+                  v-else
                   class="line-clamp-2 break-all"
                   :title="attemptDetail(attempt)"
                 >
@@ -641,6 +688,36 @@
                   </TabsContent>
 
                   <TabsContent value="response-body">
+                    <div
+                      v-if="selectedInspectionImagePreviews.length > 0"
+                      class="mb-3 rounded-md border border-border/60 bg-muted/20 p-3"
+                    >
+                      <div class="mb-3 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                        <span>图片预览</span>
+                        <span>{{ selectedInspectionImagePreviews.length }} 张</span>
+                      </div>
+                      <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        <button
+                          v-for="(preview, index) in selectedInspectionImagePreviews"
+                          :key="`${preview.src}-${index}`"
+                          type="button"
+                          class="group block overflow-hidden rounded-md border border-border/60 bg-background text-left transition-colors hover:border-primary/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/70"
+                          @click="openImagePreview(preview)"
+                        >
+                          <div class="aspect-square w-full overflow-hidden bg-muted/30">
+                            <img
+                              :src="preview.src"
+                              :alt="preview.label"
+                              class="h-full w-full object-contain"
+                              loading="lazy"
+                            >
+                          </div>
+                          <div class="border-t border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+                            {{ preview.label }}
+                          </div>
+                        </button>
+                      </div>
+                    </div>
                     <JsonContent
                       :data="selectedInspectionAttempt.response_body"
                       view-mode="formatted"
@@ -673,6 +750,39 @@
       </Button>
     </template>
   </Dialog>
+
+  <Dialog
+    :open="Boolean(activeImagePreview)"
+    size="6xl"
+    :z-index="120"
+    @update:open="(val: boolean) => { if (!val) activeImagePreview = null }"
+  >
+    <template #header>
+      <div class="border-b border-border px-6 py-4">
+        <div class="text-lg font-semibold text-foreground leading-tight">
+          {{ activeImagePreview?.label || '图片预览' }}
+        </div>
+      </div>
+    </template>
+
+    <div class="flex max-h-[76vh] items-center justify-center overflow-auto rounded-md bg-muted/20 p-3">
+      <img
+        v-if="activeImagePreview"
+        :src="activeImagePreview.src"
+        :alt="activeImagePreview.label"
+        class="max-h-[72vh] max-w-full rounded-md object-contain"
+      >
+    </div>
+
+    <template #footer>
+      <Button
+        variant="outline"
+        @click="activeImagePreview = null"
+      >
+        关闭
+      </Button>
+    </template>
+  </Dialog>
 </template>
 
 <script setup lang="ts">
@@ -698,7 +808,12 @@ import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
 import JsonContent from '@/features/usage/components/RequestDetailDrawer/JsonContent.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { useDarkMode } from '@/composables/useDarkMode'
-import { extractModelTestResponsePreview, formatModelTestDiagnostic } from './model-test-request'
+import {
+  extractModelTestImagePreviews,
+  extractModelTestResponsePreview,
+  formatModelTestDiagnostic,
+} from './model-test-request'
+import type { ModelTestImagePreview } from './model-test-request'
 
 type TestEndpointOption = {
   id: string
@@ -816,6 +931,7 @@ const inspectionTab = ref<'request-headers' | 'request-body' | 'response-headers
 const selectedInspectionKey = ref<string | null>(null)
 const inspectionExpandDepth = ref(0)
 const inspectionCopiedStates = ref<Record<string, boolean>>({})
+const activeImagePreview = ref<ModelTestImagePreview | null>(null)
 
 watch(() => props.result, () => {
   showAllAttempts.value = false
@@ -1129,6 +1245,12 @@ const selectedInspectionAttempt = computed(() => {
   return inspectableAttempts.value[0] ?? resultAttempts.value[0] ?? null
 })
 
+const selectedInspectionImagePreviews = computed(() => (
+  selectedInspectionAttempt.value
+    ? extractModelTestImagePreviews(selectedInspectionAttempt.value.response_body)
+    : []
+))
+
 const resultWinningTitle = computed(() => {
   const summary = resultSummary.value
   const keyName = summary.winning_key_name || summary.winning_key_id
@@ -1238,6 +1360,7 @@ function formatAuthType(authType: string): string {
   if (lowered === 'codex') return 'Codex OAuth'
   if (lowered === 'antigravity') return 'Antigravity OAuth'
   if (lowered === 'kiro') return 'Kiro OAuth'
+  if (lowered === 'grok') return 'Grok OAuth'
   return authType
 }
 
@@ -1293,6 +1416,14 @@ function attemptDetail(attempt: TestAttemptDetail): string {
       ?? (attempt.effective_model ? `请求模型：${attempt.effective_model}` : attempt.endpoint_base_url)
   }
   return '-'
+}
+
+function attemptImagePreviews(attempt: TestAttemptDetail): ModelTestImagePreview[] {
+  return extractModelTestImagePreviews(attempt.response_body)
+}
+
+function openImagePreview(preview: ModelTestImagePreview) {
+  activeImagePreview.value = preview
 }
 
 function inspectionKey(attempt: TestAttemptDetail): string {

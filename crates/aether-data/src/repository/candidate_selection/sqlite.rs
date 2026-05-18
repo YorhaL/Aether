@@ -45,7 +45,15 @@ SELECT
   m.provider_model_mappings AS model_provider_model_mappings,
   m.supports_streaming AS model_supports_streaming,
   m.is_active AS model_is_active,
-  m.is_available AS model_is_available
+  m.is_available AS model_is_available,
+  CASE
+    WHEN json_valid(p.config) THEN
+      CASE
+        WHEN json_type(p.config, '$.pool_advanced') IS NOT NULL THEN 1
+        ELSE 0
+      END
+    ELSE 0
+  END AS provider_pool_enabled
 FROM providers p
 INNER JOIN provider_endpoints pe ON pe.provider_id = p.id
 INNER JOIN provider_api_keys pak ON pak.provider_id = p.id
@@ -67,9 +75,27 @@ pub struct SqliteMinimalCandidateSelectionReadRepository {
 #[derive(Debug, Clone)]
 struct CandidateSelectionRow {
     row: StoredMinimalCandidateSelectionRow,
-    provider_pool_enabled: bool,
     key_auth_config: Option<String>,
     key_last_used_at_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelectedRowsOrder {
+    WithGlobalModel,
+    WithoutGlobalModel,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelectedRowsFilter<'a> {
+    None,
+    GlobalModel(&'a str),
+    RequestedModel(&'a str),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SqlPage {
+    limit: i64,
+    offset: i64,
 }
 
 impl SqliteMinimalCandidateSelectionReadRepository {
@@ -77,42 +103,111 @@ impl SqliteMinimalCandidateSelectionReadRepository {
         Self { pool }
     }
 
-    async fn load_rows_for_api_format(
-        &self,
-        api_format: &str,
-    ) -> Result<Vec<CandidateSelectionRow>, DataLayerError> {
-        let canonical_api_format = normalize_api_format(api_format);
-        let storage_aliases = api_format_aliases(&canonical_api_format);
-        let match_aliases = sql_match_aliases(&storage_aliases);
-
-        let mut builder = QueryBuilder::<Sqlite>::new(CANDIDATE_SELECTION_COLUMNS);
-        builder.push(" AND LOWER(pe.api_format) IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for alias in &match_aliases {
-                separated.push_bind(alias);
-            }
-        }
-        builder.push(")");
-        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
-        let mut items = rows
-            .iter()
-            .map(map_candidate_selection_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        items.retain(|item| {
-            api_format_matches(&item.row.endpoint_api_format, &canonical_api_format)
-                && item.row.key_supports_api_format(&canonical_api_format)
-                && key_auth_channel_matches(item, &canonical_api_format)
-        });
-        Ok(items)
-    }
-
     async fn selected_rows_for_api_format(
         &self,
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        let rows = self.load_rows_for_api_format(api_format).await?;
-        Ok(sort_rows(select_pool_rows(rows), true))
+        self.load_selected_rows_for_api_format(
+            api_format,
+            SelectedRowsFilter::None,
+            SelectedRowsOrder::WithGlobalModel,
+            None,
+        )
+        .await
+    }
+
+    async fn load_selected_rows_for_api_format(
+        &self,
+        api_format: &str,
+        filter: SelectedRowsFilter<'_>,
+        order: SelectedRowsOrder,
+        page: Option<SqlPage>,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        let canonical_api_format = normalize_api_format(api_format);
+        let storage_aliases = api_format_aliases(&canonical_api_format);
+        let match_aliases = sql_match_aliases(&storage_aliases);
+        let mut rows = Vec::new();
+
+        for storage_api_format in storage_aliases {
+            let mut builder = QueryBuilder::<Sqlite>::new("WITH candidate_rows AS (");
+            builder.push(CANDIDATE_SELECTION_COLUMNS);
+            push_candidate_sql_filters(&mut builder, &storage_api_format, &match_aliases);
+            match filter {
+                SelectedRowsFilter::None => {}
+                SelectedRowsFilter::GlobalModel(global_model_name) => {
+                    builder.push(" AND gm.name = ");
+                    builder.push_bind(global_model_name);
+                }
+                SelectedRowsFilter::RequestedModel(requested_model_name) => {
+                    push_requested_model_sql_filter(
+                        &mut builder,
+                        requested_model_name,
+                        &match_aliases,
+                    );
+                }
+            }
+            builder.push(
+                r#"
+),
+pool_rows AS (
+  SELECT candidate.*
+  FROM candidate_rows candidate
+  WHERE candidate.provider_pool_enabled = 1
+    AND NOT EXISTS (
+      SELECT 1
+      FROM candidate_rows other
+      WHERE other.provider_pool_enabled = 1
+        AND other.provider_id = candidate.provider_id
+        AND other.endpoint_id = candidate.endpoint_id
+        AND other.model_id = candidate.model_id
+        AND (
+          other.key_internal_priority < candidate.key_internal_priority
+          OR (
+            other.key_internal_priority = candidate.key_internal_priority
+            AND other.key_id < candidate.key_id
+          )
+        )
+    )
+),
+selected_rows AS (
+  SELECT * FROM candidate_rows WHERE provider_pool_enabled = 0
+  UNION ALL
+  SELECT * FROM pool_rows
+)
+SELECT * FROM selected_rows
+"#,
+            );
+            push_selected_rows_order(&mut builder, order);
+            if let Some(page) = page {
+                builder.push(" LIMIT ");
+                builder.push_bind(page.limit);
+                builder.push(" OFFSET ");
+                builder.push_bind(page.offset);
+            }
+
+            let query_rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+            let mut items = query_rows
+                .iter()
+                .map(map_candidate_selection_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            items.retain(|item| {
+                api_format_matches(&item.row.endpoint_api_format, &canonical_api_format)
+                    && item.row.key_supports_api_format(&canonical_api_format)
+                    && key_auth_channel_matches(item, &canonical_api_format)
+            });
+            rows.extend(items.into_iter().map(|item| item.row));
+        }
+
+        let rows = match filter {
+            SelectedRowsFilter::RequestedModel(requested_model_name) => rows
+                .into_iter()
+                .filter(|row| {
+                    row_matches_requested_model(row, requested_model_name, &canonical_api_format)
+                })
+                .collect(),
+            _ => rows,
+        };
+        Ok(dedupe_candidate_selection_rows(rows))
     }
 }
 
@@ -130,14 +225,13 @@ impl MinimalCandidateSelectionReadRepository for SqliteMinimalCandidateSelection
         api_format: &str,
         global_model_name: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        Ok(sort_rows(
-            self.selected_rows_for_api_format(api_format)
-                .await?
-                .into_iter()
-                .filter(|row| row.global_model_name == global_model_name)
-                .collect(),
-            false,
-        ))
+        self.load_selected_rows_for_api_format(
+            api_format,
+            SelectedRowsFilter::GlobalModel(global_model_name),
+            SelectedRowsOrder::WithoutGlobalModel,
+            None,
+        )
+        .await
     }
 
     async fn list_for_exact_api_format_and_requested_model(
@@ -145,13 +239,11 @@ impl MinimalCandidateSelectionReadRepository for SqliteMinimalCandidateSelection
         api_format: &str,
         requested_model_name: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        self.list_for_exact_api_format_and_requested_model_page(
-            &StoredRequestedModelCandidateRowsQuery {
-                api_format: api_format.to_string(),
-                requested_model_name: requested_model_name.to_string(),
-                offset: 0,
-                limit: u32::MAX,
-            },
+        self.load_selected_rows_for_api_format(
+            api_format,
+            SelectedRowsFilter::RequestedModel(requested_model_name),
+            SelectedRowsOrder::WithGlobalModel,
+            None,
         )
         .await
     }
@@ -160,42 +252,74 @@ impl MinimalCandidateSelectionReadRepository for SqliteMinimalCandidateSelection
         &self,
         query: &StoredRequestedModelCandidateRowsQuery,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        let rows = self
-            .selected_rows_for_api_format(&query.api_format)
-            .await?
-            .into_iter()
-            .filter(|row| {
-                row_matches_requested_model(row, &query.requested_model_name, &query.api_format)
-            })
-            .collect::<Vec<_>>();
-        Ok(sort_rows(rows, true)
-            .into_iter()
-            .skip(query.offset as usize)
-            .take(query.limit as usize)
-            .collect())
+        self.load_selected_rows_for_api_format(
+            &query.api_format,
+            SelectedRowsFilter::RequestedModel(&query.requested_model_name),
+            SelectedRowsOrder::WithGlobalModel,
+            Some(SqlPage {
+                limit: i64::from(query.limit.max(1)),
+                offset: i64::from(query.offset),
+            }),
+        )
+        .await
     }
 
     async fn list_pool_key_rows_for_group(
         &self,
         query: &StoredPoolKeyCandidateRowsQuery,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        let rows = self
-            .load_rows_for_api_format(&query.api_format)
-            .await?
-            .into_iter()
-            .filter(|row| {
-                row.row.provider_id == query.provider_id
-                    && row.row.endpoint_id == query.endpoint_id
-                    && row.row.model_id == query.model_id
-            })
-            .collect::<Vec<_>>();
-        let mut rows = sort_pool_key_rows(rows, &query.order);
-        Ok(rows
-            .drain(..)
-            .skip(query.offset as usize)
-            .take(query.limit as usize)
-            .map(|item| item.row)
-            .collect())
+        let canonical_api_format = normalize_api_format(&query.api_format);
+        let storage_aliases = api_format_aliases(&canonical_api_format);
+        let match_aliases = sql_match_aliases(&storage_aliases);
+        let mut rows = Vec::<CandidateSelectionRow>::new();
+        let page_in_sql = !matches!(query.order, StoredPoolKeyCandidateOrder::LoadBalance { .. });
+
+        for storage_api_format in storage_aliases {
+            let mut builder = QueryBuilder::<Sqlite>::new(CANDIDATE_SELECTION_COLUMNS);
+            push_candidate_sql_filters(&mut builder, &storage_api_format, &match_aliases);
+            builder.push(" AND p.id = ");
+            builder.push_bind(&query.provider_id);
+            builder.push(" AND pe.id = ");
+            builder.push_bind(&query.endpoint_id);
+            builder.push(" AND m.id = ");
+            builder.push_bind(&query.model_id);
+            if page_in_sql {
+                push_pool_key_order(&mut builder, &query.order);
+                builder.push(" LIMIT ");
+                builder.push_bind(i64::from(query.limit.max(1)));
+                builder.push(" OFFSET ");
+                builder.push_bind(i64::from(query.offset));
+            } else {
+                builder.push(" ORDER BY pak.id ASC");
+            }
+
+            let query_rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+            let mut items = query_rows
+                .iter()
+                .map(map_candidate_selection_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            items.retain(|item| {
+                api_format_matches(&item.row.endpoint_api_format, &canonical_api_format)
+                    && item.row.key_supports_api_format(&canonical_api_format)
+                    && key_auth_channel_matches(item, &canonical_api_format)
+            });
+            rows.extend(items);
+        }
+
+        if page_in_sql {
+            Ok(dedupe_candidate_selection_rows(
+                rows.into_iter().map(|item| item.row).collect(),
+            ))
+        } else {
+            Ok(dedupe_candidate_selection_rows(
+                sort_pool_key_rows(rows, &query.order)
+                    .into_iter()
+                    .skip(query.offset as usize)
+                    .take(query.limit as usize)
+                    .map(|item| item.row)
+                    .collect(),
+            ))
+        }
     }
 
     async fn list_pool_key_rows_for_group_key_ids(
@@ -211,75 +335,330 @@ impl MinimalCandidateSelectionReadRepository for SqliteMinimalCandidateSelection
             .enumerate()
             .map(|(index, key_id)| (key_id.as_str(), index))
             .collect::<BTreeMap<_, _>>();
-        let mut rows = self
-            .load_rows_for_api_format(&query.api_format)
-            .await?
-            .into_iter()
-            .filter(|row| {
-                row.row.provider_id == query.provider_id
-                    && row.row.endpoint_id == query.endpoint_id
-                    && row.row.model_id == query.model_id
-                    && key_order.contains_key(row.row.key_id.as_str())
-            })
-            .map(|item| item.row)
-            .collect::<Vec<_>>();
+        let canonical_api_format = normalize_api_format(&query.api_format);
+        let storage_aliases = api_format_aliases(&canonical_api_format);
+        let match_aliases = sql_match_aliases(&storage_aliases);
+        let mut rows = Vec::new();
+
+        for storage_api_format in storage_aliases {
+            let mut builder = QueryBuilder::<Sqlite>::new(CANDIDATE_SELECTION_COLUMNS);
+            push_candidate_sql_filters(&mut builder, &storage_api_format, &match_aliases);
+            builder.push(" AND p.id = ");
+            builder.push_bind(&query.provider_id);
+            builder.push(" AND pe.id = ");
+            builder.push_bind(&query.endpoint_id);
+            builder.push(" AND m.id = ");
+            builder.push_bind(&query.model_id);
+            builder.push(" AND pak.id IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for key_id in &query.key_ids {
+                    separated.push_bind(key_id);
+                }
+            }
+            builder.push(")");
+            builder.push(" ORDER BY CASE pak.id");
+            for (index, key_id) in query.key_ids.iter().enumerate() {
+                builder.push(" WHEN ");
+                builder.push_bind(key_id);
+                builder.push(" THEN ");
+                builder.push_bind(i64::try_from(index).map_err(|_| {
+                    DataLayerError::UnexpectedValue("key id order index overflowed".to_string())
+                })?);
+            }
+            builder.push(" ELSE ");
+            builder.push_bind(i64::try_from(query.key_ids.len()).map_err(|_| {
+                DataLayerError::UnexpectedValue("key id order length overflowed".to_string())
+            })?);
+            builder.push(" END ASC, pak.id ASC");
+
+            let query_rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+            let mut items = query_rows
+                .iter()
+                .map(map_candidate_selection_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            items.retain(|item| {
+                api_format_matches(&item.row.endpoint_api_format, &canonical_api_format)
+                    && item.row.key_supports_api_format(&canonical_api_format)
+                    && key_auth_channel_matches(item, &canonical_api_format)
+            });
+            rows.extend(items.into_iter().map(|item| item.row));
+        }
+
+        let mut rows = dedupe_candidate_selection_rows(rows);
         rows.sort_by(|left, right| {
             key_order
                 .get(left.key_id.as_str())
                 .cmp(&key_order.get(right.key_id.as_str()))
                 .then(left.key_id.cmp(&right.key_id))
         });
-        Ok(dedupe_candidate_selection_rows(rows))
+        Ok(rows)
     }
 }
 
-fn select_pool_rows(rows: Vec<CandidateSelectionRow>) -> Vec<StoredMinimalCandidateSelectionRow> {
-    let mut selected = Vec::new();
-    let mut pool_rows =
-        BTreeMap::<(String, String, String), StoredMinimalCandidateSelectionRow>::new();
-    for item in rows {
-        if !item.provider_pool_enabled {
-            selected.push(item.row);
-            continue;
-        }
-        let key = (
-            item.row.provider_id.clone(),
-            item.row.endpoint_id.clone(),
-            item.row.model_id.clone(),
-        );
-        match pool_rows.get(&key) {
-            Some(existing)
-                if (existing.key_internal_priority, existing.key_id.as_str())
-                    <= (item.row.key_internal_priority, item.row.key_id.as_str()) => {}
-            _ => {
-                pool_rows.insert(key, item.row);
-            }
-        }
-    }
-    selected.extend(pool_rows.into_values());
-    dedupe_candidate_selection_rows(selected)
+fn push_candidate_sql_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    storage_api_format: &str,
+    match_aliases: &[String],
+) {
+    builder.push(" AND LOWER(COALESCE(pe.api_format, '')) = ");
+    builder.push_bind(storage_api_format.trim().to_ascii_lowercase());
+    push_key_api_format_sql_filter(builder, match_aliases);
+    push_key_auth_channel_sql_filter(builder, storage_api_format);
 }
 
-fn sort_rows(
-    mut rows: Vec<StoredMinimalCandidateSelectionRow>,
-    include_global_model: bool,
-) -> Vec<StoredMinimalCandidateSelectionRow> {
-    rows.sort_by(|left, right| {
-        if include_global_model {
-            let ordering = left.global_model_name.cmp(&right.global_model_name);
-            if !ordering.is_eq() {
-                return ordering;
-            }
+fn push_key_api_format_sql_filter(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    match_aliases: &[String],
+) {
+    builder.push(
+        r#"
+  AND (
+    pak.api_formats IS NULL
+    OR TRIM(pak.api_formats) = ''
+    OR CASE
+      WHEN json_valid(pak.api_formats) THEN
+      (
+        (
+          json_type(pak.api_formats) = 'array'
+          AND EXISTS (
+            SELECT 1
+            FROM json_each(pak.api_formats) AS fmt
+            WHERE LOWER(TRIM(CAST(fmt.value AS TEXT))) IN (
+"#,
+    );
+    push_bind_list(builder, match_aliases);
+    builder.push(
+        r#"
+            )
+          )
+        )
+        OR (
+          json_type(pak.api_formats) = 'text'
+          AND LOWER(TRIM(CAST(json_extract(pak.api_formats, '$') AS TEXT))) IN (
+"#,
+    );
+    push_bind_list(builder, match_aliases);
+    builder.push(
+        r#"
+          )
+        )
+        OR (
+          json_type(pak.api_formats) = 'text'
+          AND EXISTS (
+            SELECT 1
+            FROM json_each(
+              CASE
+                WHEN json_valid(CAST(json_extract(pak.api_formats, '$') AS TEXT))
+                  THEN CAST(json_extract(pak.api_formats, '$') AS TEXT)
+                ELSE '[]'
+              END
+            ) AS fmt
+            WHERE LOWER(TRIM(CAST(fmt.value AS TEXT))) IN (
+"#,
+    );
+    push_bind_list(builder, match_aliases);
+    builder.push(
+        r#"
+            )
+          )
+        )
+      )
+      ELSE 0
+    END
+    OR LOWER(TRIM(pak.api_formats)) IN (
+"#,
+    );
+    push_bind_list(builder, match_aliases);
+    builder.push(
+        r#"
+    )
+  )
+"#,
+    );
+}
+
+fn push_key_auth_channel_sql_filter(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    storage_api_format: &str,
+) {
+    let api_format = normalize_api_format(storage_api_format);
+    builder.push(
+        r#"
+  AND (
+    (
+      LOWER(TRIM(p.provider_type)) = 'codex'
+      AND LOWER(TRIM(pak.auth_type)) = 'oauth'
+      AND "#,
+    );
+    builder.push_bind(api_format.clone());
+    builder.push(
+        r#" IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+    )
+    OR (
+      LOWER(TRIM(p.provider_type)) = 'chatgpt_web'
+      AND LOWER(TRIM(pak.auth_type)) IN ('oauth', 'bearer')
+      AND "#,
+    );
+    builder.push_bind(api_format.clone());
+    builder.push(
+        r#" = 'openai:image'
+    )
+    OR (
+      LOWER(TRIM(p.provider_type)) = 'claude_code'
+      AND LOWER(TRIM(pak.auth_type)) = 'oauth'
+      AND "#,
+    );
+    builder.push_bind(api_format.clone());
+    builder.push(
+        r#" = 'claude:messages'
+    )
+    OR (
+      LOWER(TRIM(p.provider_type)) = 'kiro'
+      AND "#,
+    );
+    builder.push_bind(api_format.clone());
+    builder.push(
+        r#" = 'claude:messages'
+      AND (
+        LOWER(TRIM(pak.auth_type)) = 'oauth'
+        OR (
+          LOWER(TRIM(pak.auth_type)) = 'bearer'
+          AND pak.auth_config IS NOT NULL
+          AND TRIM(pak.auth_config) <> ''
+        )
+      )
+    )
+    OR (
+      LOWER(TRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+      AND LOWER(TRIM(pak.auth_type)) = 'oauth'
+      AND "#,
+    );
+    builder.push_bind(api_format.clone());
+    builder.push(
+        r#" = 'gemini:generate_content'
+    )
+    OR (
+      LOWER(TRIM(p.provider_type)) = 'vertex_ai'
+      AND (
+        (
+          LOWER(TRIM(pak.auth_type)) = 'api_key'
+          AND "#,
+    );
+    builder.push_bind(api_format.clone());
+    builder.push(
+        r#" = 'gemini:generate_content'
+        )
+        OR (
+          LOWER(TRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
+          AND "#,
+    );
+    builder.push_bind(api_format.clone());
+    builder.push(
+        r#" IN ('claude:messages', 'gemini:generate_content')
+        )
+      )
+    )
+    OR (
+      LOWER(TRIM(p.provider_type)) NOT IN (
+        'chatgpt_web',
+        'claude_code',
+        'codex',
+        'gemini_cli',
+        'vertex_ai',
+        'antigravity',
+        'kiro'
+      )
+      AND LOWER(TRIM(pak.auth_type)) <> 'oauth'
+    )
+  )
+"#,
+    );
+}
+
+fn push_requested_model_sql_filter(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    requested_model_name: &str,
+    _match_aliases: &[String],
+) {
+    builder.push(
+        r#"
+  AND (
+    gm.name = "#,
+    );
+    builder.push_bind(requested_model_name.to_string());
+    builder.push(
+        r#"
+    OR m.provider_model_name = "#,
+    );
+    builder.push_bind(requested_model_name.to_string());
+    builder.push(
+        r#"
+    OR (
+      m.provider_model_mappings IS NOT NULL
+      AND m.provider_model_mappings LIKE "#,
+    );
+    builder.push_bind(format!(
+        "%{}%",
+        requested_model_name
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    ));
+    builder.push(
+        r#"
+      ESCAPE '\'
+    )
+  )
+"#,
+    );
+}
+
+fn push_selected_rows_order(builder: &mut QueryBuilder<'_, Sqlite>, order: SelectedRowsOrder) {
+    builder.push(" ORDER BY ");
+    if matches!(order, SelectedRowsOrder::WithGlobalModel) {
+        builder.push("global_model_name ASC, ");
+    }
+    builder.push(
+        "provider_priority ASC, key_internal_priority ASC, provider_id ASC, endpoint_id ASC, key_id ASC, model_id ASC",
+    );
+}
+
+fn push_pool_key_order(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    order: &StoredPoolKeyCandidateOrder,
+) {
+    match order {
+        StoredPoolKeyCandidateOrder::InternalPriority => {
+            builder.push(" ORDER BY pak.internal_priority ASC, pak.id ASC");
         }
-        left.provider_priority
-            .cmp(&right.provider_priority)
-            .then(left.key_internal_priority.cmp(&right.key_internal_priority))
-            .then(left.provider_id.cmp(&right.provider_id))
-            .then(left.endpoint_id.cmp(&right.endpoint_id))
-            .then(left.key_id.cmp(&right.key_id))
-            .then(left.model_id.cmp(&right.model_id))
-    });
-    rows
+        StoredPoolKeyCandidateOrder::Lru => {
+            builder.push(
+                " ORDER BY pak.last_used_at IS NOT NULL ASC, pak.last_used_at ASC, pak.internal_priority ASC, pak.id ASC",
+            );
+        }
+        StoredPoolKeyCandidateOrder::CacheAffinity => {
+            builder.push(
+                " ORDER BY pak.last_used_at IS NULL ASC, pak.last_used_at DESC, pak.internal_priority ASC, pak.id ASC",
+            );
+        }
+        StoredPoolKeyCandidateOrder::SingleAccount => {
+            builder.push(
+                " ORDER BY pak.internal_priority ASC, pak.last_used_at IS NULL ASC, pak.last_used_at DESC, pak.id ASC",
+            );
+        }
+        StoredPoolKeyCandidateOrder::LoadBalance { seed } => {
+            let _ = seed;
+            builder.push(" ORDER BY pak.id ASC");
+        }
+    }
+}
+
+fn push_bind_list(builder: &mut QueryBuilder<'_, Sqlite>, values: &[String]) {
+    let mut separated = builder.separated(", ");
+    for value in values {
+        separated.push_bind(value.clone());
+    }
 }
 
 fn sort_pool_key_rows(
@@ -473,9 +852,8 @@ fn dedupe_candidate_selection_rows(
 }
 
 fn map_candidate_selection_row(row: &SqliteRow) -> Result<CandidateSelectionRow, DataLayerError> {
-    let provider_config = parse_json(row.try_get("provider_config").ok().flatten())?;
+    let _provider_config = parse_json(row.try_get("provider_config").ok().flatten())?;
     let global_model_config = parse_json(row.try_get("global_model_config").ok().flatten())?;
-    let provider_pool_enabled = json_object_field_present(&provider_config, "pool_advanced");
     let global_model_mappings = global_model_config
         .as_ref()
         .and_then(|value| value.get("model_mappings").cloned());
@@ -528,7 +906,6 @@ fn map_candidate_selection_row(row: &SqliteRow) -> Result<CandidateSelectionRow,
             model_is_active: row.try_get("model_is_active").map_sql_err()?,
             model_is_available: row.try_get("model_is_available").map_sql_err()?,
         },
-        provider_pool_enabled,
         key_auth_config: row.try_get("key_auth_config").map_sql_err()?,
         key_last_used_at_unix_secs: row
             .try_get::<Option<i64>, _>("key_last_used_at_unix_secs")
@@ -548,13 +925,6 @@ fn parse_json(value: Option<String>) -> Result<Option<serde_json::Value>, DataLa
             })
         })
         .transpose()
-}
-
-fn json_object_field_present(value: &Option<serde_json::Value>, field: &str) -> bool {
-    value
-        .as_ref()
-        .and_then(|value| value.get(field))
-        .is_some_and(|value| !value.is_null())
 }
 
 fn json_bool(value: &serde_json::Value) -> Option<bool> {

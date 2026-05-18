@@ -374,6 +374,7 @@ import {
   isModelTestableEndpoint,
   parseModelTestRequestHeadersDraft,
   parseModelTestRequestBodyDraft,
+  selectPreferredModelTestEndpoint,
   syncModelTestRequestBodyDraft,
 } from './model-test-request'
 
@@ -428,6 +429,7 @@ const deletingGroup = ref<AliasGroup | null>(null)
 const testingMapping = ref<string | null>(null)
 const pendingMappingKey = ref<string | null>(null)
 const testingModelName = ref<string | null>(null)
+const testingSourceModel = ref<Model | null>(null)
 const preselectedModelId = ref<string | null>(null)
 const selectedTestEndpoint = ref<ProviderEndpoint | null>(null)
 const testRequestHeadersDraft = ref('')
@@ -715,6 +717,7 @@ function handleTestDialogClose() {
   modelTest.resetState()
   pendingMappingKey.value = null
   testingModelName.value = null
+  testingSourceModel.value = null
   testingMapping.value = null
   selectedTestEndpoint.value = null
   mappingTestEndpoints.value = null
@@ -737,8 +740,25 @@ function handleSelectTestEndpoint(endpointId: string) {
   syncMappingTestRequestBody()
 }
 
+function findMappingTestModel(modelName: string): Model | null {
+  const normalized = modelName.trim()
+  if (!normalized) return null
+
+  return models.value.find(model => (
+    model.provider_model_name === normalized
+    || model.global_model_name === normalized
+    || model.global_model_display_name === normalized
+    || (model.provider_model_mappings ?? []).some(alias => alias.name === normalized)
+  )) ?? null
+}
+
 // 测试映射（直连测试，带故障转移和实时进度）
-function runMappingTest(testingKey: string, modelName: string, endpointsOverride?: ProviderEndpoint[]) {
+function runMappingTest(
+  testingKey: string,
+  modelName: string,
+  endpointsOverride?: ProviderEndpoint[],
+  sourceModel?: Model | null,
+) {
   const endpoints = endpointsOverride ?? activeEndpoints.value
   if (endpoints.length === 0) {
     showError('暂无可用于测试的活跃端点')
@@ -749,8 +769,12 @@ function runMappingTest(testingKey: string, modelName: string, endpointsOverride
   modelTest.dialogOpen.value = true
   testingMapping.value = null
   testingModelName.value = modelName
+  testingSourceModel.value = sourceModel ?? findMappingTestModel(modelName)
   mappingTestEndpoints.value = endpointsOverride ?? null
-  selectedTestEndpoint.value = endpoints[0] ?? null
+  selectedTestEndpoint.value = selectPreferredModelTestEndpoint(
+    testingSourceModel.value,
+    endpoints,
+  )
   testRequestHeadersResetValue.value = buildDefaultModelTestRequestHeaders()
   testRequestHeadersDraft.value = testRequestHeadersResetValue.value
   resetMappingTestRequestBody()
@@ -762,6 +786,7 @@ function resetMappingTestRequestBody() {
   testRequestBodyResetValue.value = buildDefaultModelTestRequestBody(
     testingModelName.value,
     selectedTestEndpoint.value?.api_format,
+    testingSourceModel.value,
   )
   testRequestBodyDraft.value = testRequestBodyResetValue.value
 }
@@ -772,6 +797,7 @@ function syncMappingTestRequestBody() {
   const nextResetValue = buildDefaultModelTestRequestBody(
     testingModelName.value,
     selectedTestEndpoint.value?.api_format,
+    testingSourceModel.value,
   )
   const next = syncModelTestRequestBodyDraft(
     testRequestBodyDraft.value,
@@ -839,7 +865,7 @@ function scopedMappingEndpoints(item: CombinedMapping): ProviderEndpoint[] {
 
 // 测试精确映射
 function testMapping(item: CombinedMapping, mapping: MappingItem) {
-  runMappingTest(`${item.key}-${mapping.name}`, mapping.name, scopedMappingEndpoints(item))
+  runMappingTest(`${item.key}-${mapping.name}`, mapping.name, scopedMappingEndpoints(item), item.group?.model)
 }
 
 // 测试正则映射

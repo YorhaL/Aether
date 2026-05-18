@@ -260,7 +260,8 @@ jobs:
               root="package/${bundle}"
               mkdir -p \
                 "${root}/bin" \
-                "${root}/frontend"
+                "${root}/frontend" \
+                "${root}/scripts"
 
               install -m 0755 "artifacts/aether-gateway-${platform}-${arch}/aether-gateway" "${root}/bin/aether-gateway"
               cp -R artifacts/frontend-dist/. "${root}/frontend/"
@@ -270,7 +271,9 @@ jobs:
                 install.sh > "${root}/install.sh"
               chmod 0755 "${root}/install.sh"
               install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
-              install -m 0644 docker-compose.sqlite.yml "${root}/docker-compose.sqlite.yml"
+              install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
+              install -m 0755 scripts/migrate-pg-compose-to-single-node.sh "${root}/scripts/migrate-pg-compose-to-single-node.sh"
+              install -m 0755 scripts/migrate-pg-to-single-node.sh "${root}/scripts/migrate-pg-to-single-node.sh"
               install -m 0644 .env.example "${root}/.env.example"
               install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
               install -m 0644 README.md "${root}/README.md"

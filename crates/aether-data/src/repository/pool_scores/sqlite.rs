@@ -12,6 +12,7 @@ use super::{
 use crate::error::SqlResultExt;
 use crate::repository::pool_scores::merge_score_reason_patch;
 use crate::DataLayerError;
+use aether_data_query::{push_eq, push_in, push_limit, push_limit_offset, WhereClause};
 
 const SCORE_COLUMNS: &str = r#"
 SELECT
@@ -57,25 +58,54 @@ impl SqlitePoolMemberScoreRepository {
         scope: Option<&PoolScoreScope>,
     ) -> Result<Vec<StoredPoolMemberScore>, DataLayerError> {
         let mut builder = QueryBuilder::<Sqlite>::new(SCORE_COLUMNS);
-        builder
-            .push(" WHERE pool_kind = ")
-            .push_bind(identity.pool_kind.clone())
-            .push(" AND pool_id = ")
-            .push_bind(identity.pool_id.clone())
-            .push(" AND member_kind = ")
-            .push_bind(identity.member_kind.clone())
-            .push(" AND member_id = ")
-            .push_bind(identity.member_id.clone());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_kind",
+            identity.pool_kind.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_id",
+            identity.pool_id.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "member_kind",
+            identity.member_kind.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "member_id",
+            identity.member_id.clone(),
+        );
         if let Some(scope) = scope {
-            builder
-                .push(" AND capability = ")
-                .push_bind(scope.capability.clone())
-                .push(" AND scope_kind = ")
-                .push_bind(scope.scope_kind.clone());
+            push_eq(
+                &mut builder,
+                &mut where_clause,
+                "capability",
+                scope.capability.clone(),
+            );
+            push_eq(
+                &mut builder,
+                &mut where_clause,
+                "scope_kind",
+                scope.scope_kind.clone(),
+            );
             if let Some(scope_id) = &scope.scope_id {
-                builder.push(" AND scope_id = ").push_bind(scope_id.clone());
+                push_eq(
+                    &mut builder,
+                    &mut where_clause,
+                    "scope_id",
+                    scope_id.clone(),
+                );
             } else {
-                builder.push(" AND scope_id IS NULL");
+                where_clause.push_next(&mut builder);
+                builder.push("scope_id IS NULL");
             }
         }
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
@@ -90,44 +120,65 @@ impl PoolScoreReadRepository for SqlitePoolMemberScoreRepository {
         query: &ListRankedPoolMembersQuery,
     ) -> Result<Vec<StoredPoolMemberScore>, DataLayerError> {
         let mut builder = QueryBuilder::<Sqlite>::new(SCORE_COLUMNS);
-        builder
-            .push(" WHERE pool_kind = ")
-            .push_bind(query.pool_kind.clone())
-            .push(" AND pool_id = ")
-            .push_bind(query.pool_id.clone())
-            .push(" AND capability = ")
-            .push_bind(query.capability.clone())
-            .push(" AND scope_kind = ")
-            .push_bind(query.scope_kind.clone());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_kind",
+            query.pool_kind.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_id",
+            query.pool_id.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "capability",
+            query.capability.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "scope_kind",
+            query.scope_kind.clone(),
+        );
         if let Some(scope_id) = &query.scope_id {
-            builder.push(" AND scope_id = ").push_bind(scope_id.clone());
+            push_eq(
+                &mut builder,
+                &mut where_clause,
+                "scope_id",
+                scope_id.clone(),
+            );
         } else {
-            builder.push(" AND scope_id IS NULL");
+            where_clause.push_next(&mut builder);
+            builder.push("scope_id IS NULL");
         }
         if !query.hard_states.is_empty() {
-            builder.push(" AND hard_state IN (");
-            let mut separated = builder.separated(", ");
-            for state in &query.hard_states {
-                separated.push_bind(state.as_database());
-            }
-            separated.push_unseparated(")");
+            let states = query
+                .hard_states
+                .iter()
+                .map(|state| state.as_database())
+                .collect::<Vec<_>>();
+            push_in(&mut builder, &mut where_clause, "hard_state", &states);
         }
         if let Some(statuses) = &query.probe_statuses {
             if !statuses.is_empty() {
-                builder.push(" AND probe_status IN (");
-                let mut separated = builder.separated(", ");
-                for status in statuses {
-                    separated.push_bind(status.as_database());
-                }
-                separated.push_unseparated(")");
+                let statuses = statuses
+                    .iter()
+                    .map(|status| status.as_database())
+                    .collect::<Vec<_>>();
+                push_in(&mut builder, &mut where_clause, "probe_status", &statuses);
             }
         }
-        builder
-            .push(" ORDER BY score DESC, last_ranked_at DESC, member_id ASC, id ASC")
-            .push(" LIMIT ")
-            .push_bind(i64_from_usize(query.limit.max(1), "pool score limit")?)
-            .push(" OFFSET ")
-            .push_bind(i64_from_usize(query.offset, "pool score offset")?);
+        builder.push(" ORDER BY score DESC, last_ranked_at DESC, member_id ASC, id ASC");
+        push_limit_offset(
+            &mut builder,
+            i64_from_usize(query.limit.max(1), "pool score limit")?,
+            i64_from_usize(query.offset, "pool score offset")?,
+        );
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_score_row).collect()
     }
@@ -137,48 +188,66 @@ impl PoolScoreReadRepository for SqlitePoolMemberScoreRepository {
         query: &ListPoolMemberScoresQuery,
     ) -> Result<Vec<StoredPoolMemberScore>, DataLayerError> {
         let mut builder = QueryBuilder::<Sqlite>::new(SCORE_COLUMNS);
-        builder
-            .push(" WHERE pool_kind = ")
-            .push_bind(query.pool_kind.clone())
-            .push(" AND pool_id = ")
-            .push_bind(query.pool_id.clone());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_kind",
+            query.pool_kind.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_id",
+            query.pool_id.clone(),
+        );
         if let Some(capability) = &query.capability {
-            builder
-                .push(" AND capability = ")
-                .push_bind(capability.clone());
+            push_eq(
+                &mut builder,
+                &mut where_clause,
+                "capability",
+                capability.clone(),
+            );
         }
         if let Some(scope_kind) = &query.scope_kind {
-            builder
-                .push(" AND scope_kind = ")
-                .push_bind(scope_kind.clone());
+            push_eq(
+                &mut builder,
+                &mut where_clause,
+                "scope_kind",
+                scope_kind.clone(),
+            );
         }
         if let Some(scope_id) = &query.scope_id {
-            builder.push(" AND scope_id = ").push_bind(scope_id.clone());
+            push_eq(
+                &mut builder,
+                &mut where_clause,
+                "scope_id",
+                scope_id.clone(),
+            );
         }
         if !query.hard_states.is_empty() {
-            builder.push(" AND hard_state IN (");
-            let mut separated = builder.separated(", ");
-            for state in &query.hard_states {
-                separated.push_bind(state.as_database());
-            }
-            separated.push_unseparated(")");
+            let states = query
+                .hard_states
+                .iter()
+                .map(|state| state.as_database())
+                .collect::<Vec<_>>();
+            push_in(&mut builder, &mut where_clause, "hard_state", &states);
         }
         if let Some(statuses) = &query.probe_statuses {
             if !statuses.is_empty() {
-                builder.push(" AND probe_status IN (");
-                let mut separated = builder.separated(", ");
-                for status in statuses {
-                    separated.push_bind(status.as_database());
-                }
-                separated.push_unseparated(")");
+                let statuses = statuses
+                    .iter()
+                    .map(|status| status.as_database())
+                    .collect::<Vec<_>>();
+                push_in(&mut builder, &mut where_clause, "probe_status", &statuses);
             }
         }
-        builder
-            .push(" ORDER BY score DESC, last_ranked_at DESC, member_id ASC, id ASC")
-            .push(" LIMIT ")
-            .push_bind(i64_from_usize(query.limit.max(1), "pool score limit")?)
-            .push(" OFFSET ")
-            .push_bind(i64_from_usize(query.offset, "pool score offset")?);
+        builder.push(" ORDER BY score DESC, last_ranked_at DESC, member_id ASC, id ASC");
+        push_limit_offset(
+            &mut builder,
+            i64_from_usize(query.limit.max(1), "pool score limit")?,
+            i64_from_usize(query.offset, "pool score offset")?,
+        );
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_score_row).collect()
     }
@@ -188,18 +257,30 @@ impl PoolScoreReadRepository for SqlitePoolMemberScoreRepository {
         query: &ListPoolMemberProbeCandidatesQuery,
     ) -> Result<Vec<StoredPoolMemberScore>, DataLayerError> {
         let mut builder = QueryBuilder::<Sqlite>::new(SCORE_COLUMNS);
-        builder
-            .push(" WHERE pool_kind = ")
-            .push_bind(query.pool_kind.clone())
-            .push(" AND pool_id = ")
-            .push_bind(query.pool_id.clone());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_kind",
+            query.pool_kind.clone(),
+        );
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "pool_id",
+            query.pool_id.clone(),
+        );
         if let Some(capability) = &query.capability {
-            builder
-                .push(" AND capability = ")
-                .push_bind(capability.clone());
+            push_eq(
+                &mut builder,
+                &mut where_clause,
+                "capability",
+                capability.clone(),
+            );
         }
+        where_clause.push_next(&mut builder);
         builder
-            .push(" AND hard_state IN ('available','unknown','cooldown','quota_exhausted')")
+            .push("hard_state IN ('available','unknown','cooldown','quota_exhausted')")
             .push(" AND (probe_status IN ('never','failed','stale')")
             .push(" OR (probe_status = 'ok' AND (last_probe_success_at IS NULL OR last_probe_success_at <= ")
             .push_bind(i64_from_u64(
@@ -228,12 +309,11 @@ impl PoolScoreReadRepository for SqlitePoolMemberScoreRepository {
    COALESCE(last_scheduled_at, 0) DESC,
    member_id ASC
 "#,
-            )
-            .push(" LIMIT ")
-            .push_bind(i64_from_usize(
-                query.limit.max(1),
-                "pool probe candidate limit",
-            )?);
+            );
+        push_limit(
+            &mut builder,
+            i64_from_usize(query.limit.max(1), "pool probe candidate limit")?,
+        );
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_score_row).collect()
     }
@@ -246,12 +326,8 @@ impl PoolScoreReadRepository for SqlitePoolMemberScoreRepository {
             return Ok(Vec::new());
         }
         let mut builder = QueryBuilder::<Sqlite>::new(SCORE_COLUMNS);
-        builder.push(" WHERE id IN (");
-        let mut separated = builder.separated(", ");
-        for id in &query.ids {
-            separated.push_bind(id.clone());
-        }
-        separated.push_unseparated(")");
+        let mut where_clause = WhereClause::new();
+        push_in(&mut builder, &mut where_clause, "id", &query.ids);
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_score_row).collect()
     }

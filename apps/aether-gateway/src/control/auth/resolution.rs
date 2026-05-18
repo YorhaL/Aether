@@ -433,7 +433,14 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
     let _ = trace_id;
 
     if let Some(auth_context) = decision.auth_context.clone() {
-        return Ok(Some(auth_context));
+        return Ok(Some(
+            refresh_execution_runtime_auth_context(
+                state,
+                auth_context,
+                decision.auth_endpoint_signature.as_deref(),
+            )
+            .await?,
+        ));
     }
 
     let Some(auth_endpoint_signature) = decision.auth_endpoint_signature.as_deref() else {
@@ -445,7 +452,14 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
     };
 
     if let Some(auth_context) = get_cached_auth_context(state, &cache_key) {
-        return Ok(Some(auth_context));
+        let refreshed = refresh_execution_runtime_auth_context(
+            state,
+            auth_context,
+            Some(auth_endpoint_signature),
+        )
+        .await?;
+        put_cached_auth_context(state, cache_key, refreshed.clone());
+        return Ok(Some(refreshed));
     }
 
     if let Some(auth_context) =
@@ -459,6 +473,56 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
     }
 
     Ok(None)
+}
+
+pub(crate) async fn refresh_execution_runtime_auth_context(
+    state: &AppState,
+    auth_context: GatewayControlAuthContext,
+    auth_endpoint_signature: Option<&str>,
+) -> Result<GatewayControlAuthContext, GatewayError> {
+    if auth_context.local_rejection.is_some() || !auth_context.access_allowed {
+        return Ok(auth_context);
+    }
+    let Some(auth_endpoint_signature) = auth_endpoint_signature
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(auth_context);
+    };
+    if !state.has_auth_api_key_reader()
+        || auth_context.user_id.trim().is_empty()
+        || auth_context.api_key_id.trim().is_empty()
+    {
+        return Ok(auth_context);
+    }
+
+    let snapshot = state
+        .data
+        .read_auth_api_key_snapshot(
+            &auth_context.user_id,
+            &auth_context.api_key_id,
+            current_unix_secs(),
+        )
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let Some(snapshot) = snapshot else {
+        let mut denied = auth_context;
+        denied.access_allowed = false;
+        denied.local_rejection = Some(GatewayLocalAuthRejection::InvalidApiKey);
+        denied.balance_remaining = None;
+        return Ok(denied);
+    };
+
+    let wallet_access = resolve_wallet_auth_gate(state, &snapshot).await?;
+    Ok(build_data_backed_auth_context(
+        state,
+        snapshot,
+        auth_endpoint_signature,
+        Some(true),
+        auth_context.balance_remaining,
+        wallet_access,
+    )
+    .await)
 }
 
 fn put_cached_auth_context(
@@ -609,7 +673,7 @@ async fn build_data_backed_auth_context(
             .api_key_expires_at_unix_secs
             .is_some_and(|expires_at| expires_at < current_unix_secs());
     let locked_api_key = snapshot.api_key_is_locked && !snapshot.api_key_is_standalone;
-    let access_allowed = header_access_allowed
+    let key_access_allowed = header_access_allowed
         .map(|value| value && snapshot.currently_usable)
         .unwrap_or(snapshot.currently_usable);
     let wallet_remaining = wallet_access
@@ -656,7 +720,7 @@ async fn build_data_backed_auth_context(
         user_id: snapshot.user_id,
         api_key_id: snapshot.api_key_id,
         balance_remaining: wallet_remaining.or(balance_remaining),
-        access_allowed,
+        access_allowed: key_access_allowed && local_rejection.is_none(),
         user_rate_limit: snapshot.user_rate_limit,
         api_key_rate_limit: snapshot.api_key_rate_limit,
         api_key_is_standalone: snapshot.api_key_is_standalone,
@@ -835,13 +899,20 @@ mod tests {
         InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
     };
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data::repository::wallet::{
+        InMemoryWalletRepository, StoredWalletSnapshot, WalletReadRepository,
+    };
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
     };
     use axum::http::{HeaderMap, Uri};
 
-    use super::{resolve_data_backed_auth_context, GatewayLocalAuthRejection};
+    use super::{
+        resolve_data_backed_auth_context, resolve_execution_runtime_auth_context,
+        GatewayLocalAuthRejection,
+    };
     use crate::control::auth::credentials::hash_api_key;
+    use crate::control::GatewayControlDecision;
     use crate::data::GatewayDataState;
     use crate::AppState;
 
@@ -944,6 +1015,154 @@ mod tests {
         .expect("auth context should exist");
         assert_eq!(second.api_key_id, "key-1");
         assert_eq!(repository.touch_count("key-1"), 1);
+    }
+
+    #[tokio::test]
+    async fn data_backed_auth_context_marks_wallet_denial_as_not_allowed() {
+        let api_key = "sk-test-empty-wallet";
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            sample_snapshot("key-empty-wallet", "user-empty-wallet"),
+        )]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![
+            StoredWalletSnapshot::new(
+                "wallet-empty".to_string(),
+                Some("user-empty-wallet".to_string()),
+                None,
+                0.0,
+                0.0,
+                "finite".to_string(),
+                "USD".to_string(),
+                "active".to_string(),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                100,
+            )
+            .expect("wallet should build"),
+        ]));
+        let data =
+            GatewayDataState::with_auth_and_wallet_for_tests(auth_repository, wallet_repository);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {api_key}").parse().unwrap(),
+        );
+
+        let auth_context = resolve_data_backed_auth_context(
+            &state,
+            &headers,
+            &uri("/v1/chat/completions"),
+            Some("openai:chat"),
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert_eq!(
+            auth_context.local_rejection,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(0.0),
+            })
+        );
+        assert!(!auth_context.access_allowed);
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_auth_context_revalidates_cached_wallet_state() {
+        let api_key = "sk-test-runtime-wallet-cache";
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            sample_snapshot("key-runtime-wallet-cache", "user-runtime-wallet-cache"),
+        )]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![
+            StoredWalletSnapshot::new(
+                "wallet-runtime-cache".to_string(),
+                Some("user-runtime-wallet-cache".to_string()),
+                None,
+                10.0,
+                0.0,
+                "finite".to_string(),
+                "USD".to_string(),
+                "active".to_string(),
+                10.0,
+                0.0,
+                0.0,
+                0.0,
+                100,
+            )
+            .expect("wallet should build"),
+        ]));
+        let data = GatewayDataState::with_auth_and_wallet_for_tests(
+            auth_repository,
+            Arc::clone(&wallet_repository),
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+
+        let first = resolve_execution_runtime_auth_context(
+            &state,
+            &decision,
+            &headers,
+            &uri("/v1/chat/completions"),
+            "trace-runtime-wallet-cache",
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+        assert!(first.access_allowed);
+
+        wallet_repository
+            .update_auth_user_wallet_snapshot(
+                "user-runtime-wallet-cache",
+                0.0,
+                0.0,
+                "finite",
+                "USD",
+                "active",
+                10.0,
+                10.0,
+                0.0,
+                0.0,
+                Some(101),
+            )
+            .await
+            .expect("wallet update should succeed")
+            .expect("wallet should exist");
+
+        let second = resolve_execution_runtime_auth_context(
+            &state,
+            &decision,
+            &headers,
+            &uri("/v1/chat/completions"),
+            "trace-runtime-wallet-cache",
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert_eq!(
+            second.local_rejection,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(0.0),
+            })
+        );
+        assert!(!second.access_allowed);
     }
 
     #[tokio::test]

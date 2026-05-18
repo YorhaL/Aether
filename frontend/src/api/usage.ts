@@ -105,6 +105,7 @@ export interface UsageFilters {
   user_id?: string // UUID
   provider_id?: string // UUID
   model?: string
+  search?: string
   start_date?: string
   end_date?: string
   preset?: string
@@ -114,6 +115,172 @@ export interface UsageFilters {
   client_family?: string
   page?: number
   page_size?: number
+}
+
+type UsageListResponse = {
+  records?: unknown
+  pagination?: {
+    total?: unknown
+    limit?: unknown
+    offset?: unknown
+  }
+  total?: unknown
+  limit?: unknown
+  offset?: unknown
+}
+
+function assertPositiveInteger(value: number, field: string): number {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${field} must be a positive integer`)
+  }
+  return value
+}
+
+function assertNonNegativeInteger(value: number, field: string): number {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative integer`)
+  }
+  return value
+}
+
+function assertNumber(value: unknown, field: string): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    throw new Error(`Usage response is missing numeric ${field}`)
+  }
+  return value
+}
+
+function assertUsageRecords(value: unknown): UsageRecord[] {
+  if (!Array.isArray(value)) {
+    throw new Error('Usage response is missing records array')
+  }
+  return value as UsageRecord[]
+}
+
+function compactParams(params: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  )
+}
+
+function offsetPaginationFromPage(filters?: Pick<UsageFilters, 'page' | 'page_size'>): {
+  page: number
+  pageSize: number | undefined
+  offset: number | undefined
+} {
+  const page = assertPositiveInteger(filters?.page ?? 1, 'page')
+  if (filters?.page_size === undefined) {
+    return { page, pageSize: undefined, offset: undefined }
+  }
+
+  const pageSize = assertPositiveInteger(filters.page_size, 'page_size')
+  return {
+    page,
+    pageSize,
+    offset: assertNonNegativeInteger((page - 1) * pageSize, 'offset'),
+  }
+}
+
+function normalizeUsageRecordPage(
+  payload: UsageListResponse,
+  requested: { page: number; pageSize?: number; offset?: number }
+): {
+  records: UsageRecord[]
+  total: number
+  page: number
+  page_size: number
+} {
+  const records = assertUsageRecords(payload.records)
+  const pagination = payload.pagination
+  const total = assertNumber(pagination?.total ?? payload.total, 'pagination.total')
+  const limit = assertPositiveInteger(
+    assertNumber(pagination?.limit ?? payload.limit, 'pagination.limit'),
+    'pagination.limit'
+  )
+  const offset = assertNonNegativeInteger(
+    assertNumber(pagination?.offset ?? payload.offset, 'pagination.offset'),
+    'pagination.offset'
+  )
+  const resolvedPage = requested.pageSize !== undefined
+    ? requested.page
+    : Math.floor(offset / limit) + 1
+
+  return {
+    records,
+    total,
+    page: resolvedPage,
+    page_size: limit,
+  }
+}
+
+function buildCurrentUserUsageParams(filters?: UsageFilters): {
+  params: Record<string, unknown>
+  pagination: { page: number; pageSize?: number; offset?: number }
+} {
+  if (filters?.user_id || filters?.provider_id || filters?.model || filters?.granularity) {
+    throw new Error('getUsageRecords only supports current-user usage filters; use admin usage APIs for user/model/provider filters')
+  }
+
+  const pagination = offsetPaginationFromPage(filters)
+  return {
+    pagination,
+    params: compactParams({
+      start_date: filters?.start_date,
+      end_date: filters?.end_date,
+      preset: filters?.preset,
+      timezone: filters?.timezone,
+      tz_offset_minutes: filters?.tz_offset_minutes,
+      search: filters?.search,
+      limit: pagination.pageSize,
+      offset: pagination.offset,
+    }),
+  }
+}
+
+function buildAdminUsageRecordParams(userId: string, filters?: UsageFilters): {
+  params: Record<string, unknown>
+} {
+  if (!userId.trim()) {
+    throw new Error('getUserUsage requires a non-empty user id')
+  }
+  if (filters?.provider_id || filters?.granularity) {
+    throw new Error('getUserUsage does not support provider_id or granularity filters')
+  }
+
+  const pagination = offsetPaginationFromPage(filters)
+  return {
+    params: compactParams({
+      user_id: userId,
+      start_date: filters?.start_date,
+      end_date: filters?.end_date,
+      preset: filters?.preset,
+      timezone: filters?.timezone,
+      tz_offset_minutes: filters?.tz_offset_minutes,
+      search: filters?.search,
+      model: filters?.model,
+      limit: pagination.pageSize,
+      offset: pagination.offset,
+    }),
+  }
+}
+
+function buildAdminUsageStatsParams(userId: string, filters?: UsageFilters): Record<string, unknown> {
+  if (!userId.trim()) {
+    throw new Error('getUserUsage requires a non-empty user id')
+  }
+  if (filters?.provider_id || filters?.granularity) {
+    throw new Error('getUserUsage stats does not support provider_id or granularity filters')
+  }
+
+  return compactParams({
+    user_id: userId,
+    start_date: filters?.start_date,
+    end_date: filters?.end_date,
+    preset: filters?.preset,
+    timezone: filters?.timezone,
+    tz_offset_minutes: filters?.tz_offset_minutes,
+    model: filters?.model,
+  })
 }
 
 function normalizeActivityHeatmapResponse(payload: unknown): ActivityHeatmap {
@@ -190,8 +357,9 @@ export const usageApi = {
     page: number
     page_size: number
   }> {
-    const response = await apiClient.get('/api/usage', { params: filters })
-    return response.data
+    const { params, pagination } = buildCurrentUserUsageParams(filters)
+    const response = await apiClient.get<UsageListResponse>('/api/users/me/usage', { params })
+    return normalizeUsageRecordPage(response.data, pagination)
   },
 
   async getUsageStats(filters?: UsageFilters): Promise<UsageStats> {
@@ -250,16 +418,17 @@ export const usageApi = {
     records: UsageRecord[]
     stats: UsageStats
   }> {
-    const response = await apiClient.get(`/api/users/${userId}/usage`, { params: filters })
-    return response.data
-  },
+    const statsParams = buildAdminUsageStatsParams(userId, filters)
+    const { params: recordParams } = buildAdminUsageRecordParams(userId, filters)
+    const [statsResponse, recordsResponse] = await Promise.all([
+      apiClient.get<UsageStats>('/api/admin/usage/stats', { params: statsParams }),
+      apiClient.get<UsageListResponse>('/api/admin/usage/records', { params: recordParams }),
+    ])
 
-  async exportUsage(format: 'csv' | 'json', filters?: UsageFilters): Promise<Blob> {
-    const response = await apiClient.get('/api/usage/export', {
-      params: { ...filters, format },
-      responseType: 'blob'
-    })
-    return response.data
+    return {
+      records: assertUsageRecords(recordsResponse.data.records),
+      stats: statsResponse.data,
+    }
   },
 
   async getAllUsageRecords(params?: {

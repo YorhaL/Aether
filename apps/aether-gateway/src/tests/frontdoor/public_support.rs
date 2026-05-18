@@ -4133,13 +4133,7 @@ async fn gateway_handles_wallet_balance_locally_without_proxying_upstream() {
 #[tokio::test]
 async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
     let auth_now = Utc::now();
-    let usage_now = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-        auth_now
-            .date_naive()
-            .and_hms_opt(12, 0, 0)
-            .expect("midday should be valid"),
-        chrono::Utc,
-    );
+    let usage_now = auth_now - chrono::Duration::minutes(30);
     let user = sample_auth_user(auth_now);
     let access_token = build_test_auth_token(
         "access",
@@ -4205,6 +4199,72 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
     assert_eq!(payload["input_tokens"], 120);
     assert_eq!(payload["cache_read_tokens"], 15);
     assert_eq!(payload["total_cost"], 1.25);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_wallet_flow_today_entry_uses_live_settled_usage() {
+    let auth_now = Utc::now();
+    let user = sample_auth_user(auth_now);
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id)),
+            ("role".to_string(), json!(user.role)),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            ("session_id".to_string(), json!("session-wallet-flow-today")),
+        ]),
+        auth_now + chrono::Duration::hours(1),
+    );
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_user_usage_audit(
+            "usage-wallet-flow-today",
+            "req-wallet-flow-today",
+            "user-auth-1",
+            "gpt-4.1",
+            "OpenAI",
+            "completed",
+            auth_now - chrono::Duration::minutes(5),
+        ),
+    ]));
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_usage_state(
+            user,
+            sample_auth_wallet("user-auth-1", auth_now),
+            [sample_auth_session(
+                "user-auth-1",
+                "session-wallet-flow-today",
+                "device-wallet-flow-today",
+                "refresh-token-placeholder",
+                auth_now,
+            )],
+            usage_repository,
+        )
+        .await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/wallet/flow?limit=20&offset=0"))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-wallet-flow-today")
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["today_entry"]["is_today"], true);
+    assert_eq!(payload["today_entry"]["timezone"], "Asia/Shanghai");
+    assert_eq!(payload["today_entry"]["total_requests"], 1);
+    assert_eq!(payload["today_entry"]["input_tokens"], 120);
+    assert_eq!(payload["today_entry"]["cache_read_tokens"], 15);
+    assert_eq!(payload["today_entry"]["total_cost"], 1.25);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

@@ -49,6 +49,19 @@ ADMIN_PASSWORD_SOURCE=""
 UI_LANG="${AETHER_LANG:-${AETHER_LANGUAGE:-auto}}"
 RELEASE_KEEP="${AETHER_RELEASE_KEEP:-3}"
 RELEASE_ARCHIVE_URL="${AETHER_RELEASE_ARCHIVE_URL:-${AETHER_DOWNLOAD_URL:-}}"
+MIGRATE_FROM_COMPOSE=""
+MIGRATE_TARGET_COMPOSE=""
+MIGRATE_TARGET_ENV=""
+MIGRATE_TARGET_DB=""
+MIGRATE_WORK_DIR=""
+MIGRATE_APP_SERVICE=""
+MIGRATE_POSTGRES_SERVICE=""
+MIGRATE_SINGLE_NODE_SERVICE=""
+MIGRATE_REPLACE_EXISTING="false"
+MIGRATE_REPLACE_TARGET_COMPOSE="false"
+MIGRATE_KEEP_SOURCE_STOPPED_ON_ERROR="false"
+MIGRATE_INTERACTIVE="false"
+MIGRATE_REQUEST_BODY_MODE=""
 
 usage() {
     cat <<'EOF'
@@ -57,10 +70,10 @@ Usage: install.sh [options]
 Install Aether Gateway.
 
 Options:
-  --mode MODE          Deployment mode: compose, compose-sqlite, or single
+  --mode MODE          Deployment mode: compose, compose-single-node, or single-node
                       compose: Docker Compose app + Postgres + Redis
-                      compose-sqlite: Docker Compose app + SQLite
-                      single: system service with SQLite
+                      compose-single-node: Docker Compose single-node app
+                      single-node: single-node system service
                       Linux services use systemd; macOS services use launchd
   --channel CHANNEL    Release channel to resolve when --version is omitted: stable, latest, rc, or beta
                       stable/latest resolves the latest stable tag (default)
@@ -79,7 +92,30 @@ Options:
   --lang LANG          Installer language: zh or en
   --skip-start         Install files, but do not start Docker Compose or restart the service
   --keep-releases N    Keep the latest N releases, prune older ones (default: 3, 0=disable)
+  --migrate-from-compose PATH
+                      Migrate an existing Postgres Compose deployment into the selected single-node mode
+  --target-compose PATH
+                      Migration target compose file for --mode compose-single-node
+  --target-env PATH    Migration target env file for --mode compose-single-node
+  --target-db PATH     Migration target SQLite DB path
+  --work-dir PATH      Migration working directory
+  --app-service NAME   Source compose app service for migration
+  --postgres-service NAME
+                      Source compose Postgres service for migration
+  --single-node-service NAME
+                      Target compose service for --mode compose-single-node migration
+  --replace-existing   Allow replacing an existing target SQLite DB during migration
+  --replace-target-compose
+                      Overwrite target compose file from the single-node template during migration
+  --request-body-mode MODE
+                      Request/response body detail handling during migration: full/1 or omit/2
+  --keep-source-stopped-on-error
+                      Do not auto-restart source app if migration fails after stopping it
   -h, --help           Show this help
+
+Migration examples:
+  install.sh --mode compose-single-node --migrate-from-compose /root/Aether/docker-compose.yml --compose-dir /opt/aether-single --replace-existing
+  sudo install.sh --mode single-node --migrate-from-compose /root/Aether/docker-compose.yml --replace-existing
 
 Environment overrides:
   AETHER_REPO, AETHER_SOURCE_REF, AETHER_INSTALL_MODE, AETHER_CHANNEL, AETHER_VERSION
@@ -158,7 +194,7 @@ select_language() {
 
 请选择安装语言 / Choose installer language:
   1) 中文
-  2) 英语 / English
+  2) English
 
 请输入选项 / Enter choice [1]:
 EOF
@@ -263,6 +299,63 @@ parse_args() {
                 [[ $# -ge 2 ]] || die "--keep-releases requires a number"
                 RELEASE_KEEP="$2"
                 shift 2
+                ;;
+            --migrate-from-compose)
+                [[ $# -ge 2 ]] || die "--migrate-from-compose requires a path"
+                MIGRATE_FROM_COMPOSE="$2"
+                shift 2
+                ;;
+            --target-compose)
+                [[ $# -ge 2 ]] || die "--target-compose requires a path"
+                MIGRATE_TARGET_COMPOSE="$2"
+                shift 2
+                ;;
+            --target-env)
+                [[ $# -ge 2 ]] || die "--target-env requires a path"
+                MIGRATE_TARGET_ENV="$2"
+                shift 2
+                ;;
+            --target-db)
+                [[ $# -ge 2 ]] || die "--target-db requires a path"
+                MIGRATE_TARGET_DB="$2"
+                shift 2
+                ;;
+            --work-dir)
+                [[ $# -ge 2 ]] || die "--work-dir requires a path"
+                MIGRATE_WORK_DIR="$2"
+                shift 2
+                ;;
+            --app-service)
+                [[ $# -ge 2 ]] || die "--app-service requires a service name"
+                MIGRATE_APP_SERVICE="$2"
+                shift 2
+                ;;
+            --postgres-service)
+                [[ $# -ge 2 ]] || die "--postgres-service requires a service name"
+                MIGRATE_POSTGRES_SERVICE="$2"
+                shift 2
+                ;;
+            --single-node-service)
+                [[ $# -ge 2 ]] || die "--single-node-service requires a service name"
+                MIGRATE_SINGLE_NODE_SERVICE="$2"
+                shift 2
+                ;;
+            --replace-existing)
+                MIGRATE_REPLACE_EXISTING="true"
+                shift
+                ;;
+            --replace-target-compose)
+                MIGRATE_REPLACE_TARGET_COMPOSE="true"
+                shift
+                ;;
+            --request-body-mode)
+                [[ $# -ge 2 ]] || die "--request-body-mode requires a value"
+                MIGRATE_REQUEST_BODY_MODE="$2"
+                shift 2
+                ;;
+            --keep-source-stopped-on-error)
+                MIGRATE_KEEP_SOURCE_STOPPED_ON_ERROR="true"
+                shift
                 ;;
             -h|--help)
                 usage
@@ -441,25 +534,25 @@ select_mode() {
             MODE="compose"
             return
             ;;
-        compose-sqlite|sqlite-compose|compose-solo|solo|docker-solo|docker-solo-compose)
-            MODE="compose-sqlite"
+        compose-single-node|docker-single-node|docker-single-node-compose)
+            MODE="compose-single-node"
             return
             ;;
-        single|service|systemd|launchd|sqlite)
-            MODE="single"
+        single-node|service|systemd|launchd|sqlite)
+            MODE="single-node"
             return
             ;;
         cluster|multi|multi-node)
             if ui_is_zh; then
-                die "集群部署模式暂未开放；请先选择 compose、compose-sqlite 或 single"
+                die "集群部署模式暂未开放；请先选择 compose、compose-single-node 或 single-node"
             else
-                die "cluster deployment mode is temporarily disabled; choose compose, compose-sqlite, or single"
+                die "cluster deployment mode is temporarily disabled; choose compose, compose-single-node, or single-node"
             fi
             ;;
         auto|"")
             ;;
         *)
-            die "unsupported install mode: ${MODE}; expected compose, compose-sqlite, or single"
+            die "unsupported install mode: ${MODE}; expected compose, compose-single-node, or single-node"
             ;;
     esac
 
@@ -468,34 +561,34 @@ select_mode() {
             cat >/dev/tty <<EOF
 
 请选择 Aether 部署模式:
-  1) Docker Compose 应用: Postgres + Redis
-  3) Docker Compose 应用: 仅SQLite
-  4) 系统服务: 仅SQLite
+  1) Docker Compose 标准部署（Postgres + Redis）
+  2) Docker Compose 单节点部署（SQLite）
+  3) 系统服务单节点部署（SQLite）
 
-请输入选项 [4]:
+请输入选项 [3]:
 EOF
         else
             cat >/dev/tty <<EOF
 
 Choose Aether deployment mode:
-  1) Docker Compose app: Postgres + Redis
-  3) Docker Compose app: SQLite only
-  4) System service: SQLite only
+  1) Docker Compose standard deployment (Postgres + Redis)
+  2) Docker Compose single-node deployment (SQLite)
+  3) System service single-node deployment (SQLite)
 
-Enter choice [4]:
+Enter choice [3]:
 EOF
         fi
         local choice
         IFS= read -r choice </dev/tty || choice=""
-        case "${choice:-4}" in
+        case "${choice:-3}" in
             1)
                 MODE="compose"
                 ;;
-            3)
-                MODE="compose-sqlite"
+            2)
+                MODE="compose-single-node"
                 ;;
-            4)
-                MODE="single"
+            3)
+                MODE="single-node"
                 ;;
             *)
                 if ui_is_zh; then
@@ -505,8 +598,45 @@ EOF
                 fi
                 ;;
         esac
+        if [[ -z "${MIGRATE_FROM_COMPOSE}" && "${MODE}" != "compose" ]]; then
+            if ui_is_zh; then
+                cat >/dev/tty <<'EOF'
+
+请选择数据初始化方式:
+  1) 全新初始化（不迁移现有数据）
+  2) 从现有 Docker Compose PG 数据库迁移
+
+请输入选项 [1]:
+EOF
+            else
+                cat >/dev/tty <<'EOF'
+
+Choose data initialization mode:
+  1) Fresh initialization (do not migrate existing data)
+  2) Migrate from an existing Docker Compose PG database
+
+Enter choice [1]:
+EOF
+            fi
+            local init_choice
+            IFS= read -r init_choice </dev/tty || init_choice=""
+            case "${init_choice:-1}" in
+                1)
+                    ;;
+                2)
+                    MIGRATE_INTERACTIVE="true"
+                    ;;
+                *)
+                    if ui_is_zh; then
+                        die "无效的数据初始化方式选项: ${init_choice}"
+                    else
+                        die "invalid data initialization choice: ${init_choice}"
+                    fi
+                    ;;
+            esac
+        fi
     else
-        MODE="single"
+        MODE="single-node"
     fi
 }
 
@@ -857,6 +987,434 @@ start_compose_deployment() {
     fi
 }
 
+migration_options_requested() {
+    [[ -n "${MIGRATE_TARGET_COMPOSE}" ]] && return 0
+    [[ -n "${MIGRATE_TARGET_ENV}" ]] && return 0
+    [[ -n "${MIGRATE_TARGET_DB}" ]] && return 0
+    [[ -n "${MIGRATE_WORK_DIR}" ]] && return 0
+    [[ -n "${MIGRATE_APP_SERVICE}" ]] && return 0
+    [[ -n "${MIGRATE_POSTGRES_SERVICE}" ]] && return 0
+    [[ -n "${MIGRATE_SINGLE_NODE_SERVICE}" ]] && return 0
+    [[ "${MIGRATE_REPLACE_EXISTING}" == "true" ]] && return 0
+    [[ "${MIGRATE_REPLACE_TARGET_COMPOSE}" == "true" ]] && return 0
+    [[ -n "${MIGRATE_REQUEST_BODY_MODE}" ]] && return 0
+    [[ "${MIGRATE_KEEP_SOURCE_STOPPED_ON_ERROR}" == "true" ]] && return 0
+    return 1
+}
+
+normalize_migration_request_body_mode() {
+    case "${MIGRATE_REQUEST_BODY_MODE}" in
+        ""|1|full|all|include)
+            MIGRATE_REQUEST_BODY_MODE="full"
+            ;;
+        2|omit|skip)
+            MIGRATE_REQUEST_BODY_MODE="omit"
+            ;;
+        *)
+            die "--request-body-mode must be full/1 or omit/2"
+            ;;
+    esac
+}
+
+prompt_with_default() {
+    local prompt="$1"
+    local default_value="$2"
+    local value
+
+    if [[ -n "${default_value}" ]]; then
+        printf '%s [%s]: ' "${prompt}" "${default_value}" >/dev/tty
+    else
+        printf '%s: ' "${prompt}" >/dev/tty
+    fi
+    IFS= read -r value </dev/tty || value=""
+    if [[ -z "${value}" ]]; then
+        printf '%s\n' "${default_value}"
+    else
+        printf '%s\n' "${value}"
+    fi
+}
+
+prompt_yes_no() {
+    local prompt="$1"
+    local default_value="$2"
+    local suffix choice
+
+    case "${default_value}" in
+        yes)
+            if ui_is_zh; then
+                suffix="[y/n，默认 y]"
+            else
+                suffix="[y/n, default y]"
+            fi
+            ;;
+        *)
+            default_value="no"
+            if ui_is_zh; then
+                suffix="[y/n，默认 n]"
+            else
+                suffix="[y/n, default n]"
+            fi
+            ;;
+    esac
+
+    while true; do
+        printf '%s %s: ' "${prompt}" "${suffix}" >/dev/tty
+        IFS= read -r choice </dev/tty || choice=""
+        choice="$(printf '%s' "${choice}" | tr '[:upper:]' '[:lower:]')"
+        case "${choice:-${default_value}}" in
+            y|yes)
+                return 0
+                ;;
+            n|no)
+                return 1
+                ;;
+            *)
+                if ui_is_zh; then
+                    echo "请输入 y 或 n。" >/dev/tty
+                else
+                    echo "Enter y or n." >/dev/tty
+                fi
+                ;;
+        esac
+    done
+}
+
+docker_compose_ls_config_files() {
+    local output
+
+    output="$(docker compose ls --format json 2>/dev/null || true)"
+    if [[ -n "${output}" && "${output}" == *ConfigFiles* ]]; then
+        printf '%s' "${output}" |
+            tr '{' '\n' |
+            sed -n 's/.*"ConfigFiles"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+        return
+    fi
+
+    docker compose ls 2>/dev/null | awk 'NR > 1 && NF > 0 { print $NF }'
+}
+
+compose_file_has_source_services() {
+    local compose_file="$1"
+    local app_service="${MIGRATE_APP_SERVICE:-app}"
+    local postgres_service="${MIGRATE_POSTGRES_SERVICE:-postgres}"
+    local services
+
+    services="$(docker compose -f "${compose_file}" config --services 2>/dev/null || true)"
+    [[ -n "${services}" ]] || return 1
+    printf '%s\n' "${services}" | grep -Fxq "${app_service}" || return 1
+    printf '%s\n' "${services}" | grep -Fxq "${postgres_service}" || return 1
+}
+
+append_unique_candidate() {
+    local candidate="$1"
+    shift
+    local existing
+
+    for existing in "$@"; do
+        [[ "${existing}" != "${candidate}" ]] || return 1
+    done
+    printf '%s\n' "${candidate}"
+}
+
+detect_source_compose_from_docker_compose_ls() {
+    local config_files compose_file candidate
+    local -a candidates=()
+
+    command -v docker >/dev/null 2>&1 || return 0
+    docker compose version >/dev/null 2>&1 || return 0
+
+    while IFS= read -r config_files || [[ -n "${config_files}" ]]; do
+        config_files="$(trim_whitespace "${config_files}")"
+        [[ -n "${config_files}" ]] || continue
+
+        # The migration scripts currently accept one source compose file. If the
+        # source project was launched with multiple compose files, ask explicitly.
+        [[ "${config_files}" != *,* ]] || continue
+
+        compose_file="${config_files}"
+        [[ -f "${compose_file}" ]] || continue
+        compose_file="$(absolute_path "${compose_file}")"
+        compose_file_has_source_services "${compose_file}" || continue
+        candidate="$(append_unique_candidate "${compose_file}" "${candidates[@]}" || true)"
+        [[ -z "${candidate}" ]] || candidates+=("${candidate}")
+    done < <(docker_compose_ls_config_files)
+
+    case "${#candidates[@]}" in
+        0)
+            return 0
+            ;;
+        1)
+            printf '%s\n' "${candidates[0]}"
+            ;;
+        *)
+            if interactive_tty_available; then
+                if ui_is_zh; then
+                    echo "从 docker compose ls 找到多个可能的源 Compose，无法安全自动选择：" >/dev/tty
+                else
+                    echo "docker compose ls found multiple possible source Compose files and cannot choose safely:" >/dev/tty
+                fi
+                printf '  %s\n' "${candidates[@]}" >/dev/tty
+            fi
+            return 0
+            ;;
+    esac
+}
+
+collect_interactive_migration_options() {
+    local detected_source
+    local prompt
+    local source_compose_abs
+    local source_compose_dir
+
+    [[ "${MIGRATE_INTERACTIVE}" == "true" ]] || return
+    interactive_tty_available || die "interactive migration selection requires a terminal"
+
+    if ui_is_zh; then
+        cat >/dev/tty <<'EOF'
+
+迁移会先做预检并拉取/安装目标 single-node，再在切换窗口停止源 app。
+源 Postgres 和 Redis 会保留，便于回滚。
+
+EOF
+    else
+        cat >/dev/tty <<'EOF'
+
+Migration will preflight and pull/install the target single-node release first.
+During cutover it stops only the source app. Source Postgres and Redis remain for rollback.
+
+EOF
+    fi
+
+    if [[ -z "${MIGRATE_FROM_COMPOSE}" ]]; then
+        detected_source="$(detect_source_compose_from_docker_compose_ls || true)"
+        if [[ -z "${detected_source}" ]]; then
+            if ui_is_zh; then
+                die "未能通过 docker compose ls 唯一识别源 PG Compose；请使用 --migrate-from-compose 显式指定"
+            else
+                die "could not uniquely detect source PG Compose from docker compose ls; pass --migrate-from-compose explicitly"
+            fi
+        fi
+        if ui_is_zh; then
+            printf '已通过 docker compose ls 探测到源 Compose: %s\n' "${detected_source}" >/dev/tty
+        else
+            printf 'Detected source Compose from docker compose ls: %s\n' "${detected_source}" >/dev/tty
+        fi
+        if ui_is_zh; then
+            prompt="确认使用该源 Compose 进行迁移"
+        else
+            prompt="Use this source Compose for migration"
+        fi
+        if prompt_yes_no "${prompt}" "yes"; then
+            MIGRATE_FROM_COMPOSE="${detected_source}"
+        else
+            if ui_is_zh; then
+                die "已取消迁移；如需指定其他源 Compose，请使用 --migrate-from-compose"
+            else
+                die "migration cancelled; pass --migrate-from-compose to use another source Compose"
+            fi
+        fi
+    fi
+    [[ -n "${MIGRATE_FROM_COMPOSE}" ]] || die "--migrate-from-compose cannot be empty"
+    source_compose_abs="$(absolute_path "${MIGRATE_FROM_COMPOSE}")"
+    source_compose_dir="$(dirname "${source_compose_abs}")"
+
+    if [[ "${MODE}" == "compose-single-node" ]]; then
+        if [[ "${COMPOSE_DIR_EXPLICIT}" != "true" ]]; then
+            COMPOSE_DIR="${source_compose_dir}-single-node"
+        fi
+        if ui_is_zh; then
+            printf '已自动选择目标 single-node Compose 目录: %s\n' "${COMPOSE_DIR}" >/dev/tty
+            prompt="确认使用该目标目录"
+        else
+            printf 'Selected target single-node Compose directory: %s\n' "${COMPOSE_DIR}" >/dev/tty
+            prompt="Use this target directory"
+        fi
+        if ! prompt_yes_no "${prompt}" "yes"; then
+            if ui_is_zh; then
+                die "已取消迁移；如需指定其他目标目录，请使用 --compose-dir"
+            else
+                die "migration cancelled; pass --compose-dir to use another target directory"
+            fi
+        fi
+    fi
+
+    if [[ "${MIGRATE_REPLACE_EXISTING}" != "true" ]]; then
+        if ui_is_zh; then
+            prompt="如果目标 SQLite 已存在，是否允许备份后替换"
+        else
+            prompt="If the target SQLite DB already exists, allow backup and replacement"
+        fi
+        if prompt_yes_no "${prompt}" "no"; then
+            MIGRATE_REPLACE_EXISTING="true"
+        fi
+    fi
+
+    if [[ -z "${MIGRATE_REQUEST_BODY_MODE}" ]]; then
+        if ui_is_zh; then
+            cat >/dev/tty <<'EOF'
+
+请求体明细迁移策略:
+  1) 全部迁移：迁移所有可迁移数据，包括请求体明细
+  2) 不迁移请求体：迁移其他所有数据；仅跳过请求体大字段和 HTTP 请求体明细，源 PG 不清除
+
+请输入选项 [1]:
+EOF
+        else
+            cat >/dev/tty <<'EOF'
+
+Request/response body detail migration mode:
+  1) Full migration: migrate all migratable data, including request body details
+  2) Skip request bodies: migrate all other data; skip only request body large fields and HTTP body detail tables; source PG is unchanged
+
+Enter choice [1]:
+EOF
+        fi
+        local body_choice
+        IFS= read -r body_choice </dev/tty || body_choice=""
+        MIGRATE_REQUEST_BODY_MODE="${body_choice:-1}"
+    fi
+    normalize_migration_request_body_mode
+}
+
+install_migration_project_file() {
+    local source_path="$1"
+    local mode="$2"
+    local target_path
+
+    ensure_tmp_root
+    target_path="${TMP_ROOT}/$(basename "${source_path}")"
+    install_project_file "${source_path}" "${target_path}" "${mode}"
+    printf '%s\n' "${target_path}"
+}
+
+run_compose_single_node_migration() {
+    local migration_script
+    local target_template
+    local source_compose_abs
+    local source_compose_dir
+    local compose_dir_abs
+    local target_compose
+    local target_compose_abs
+    local target_compose_dir
+    local target_env
+    local target_env_abs
+    local table
+    local -a migrate_args
+
+    source_compose_abs="$(absolute_path "${MIGRATE_FROM_COMPOSE}")"
+    [[ -f "${source_compose_abs}" ]] || die "source compose file not found: ${MIGRATE_FROM_COMPOSE}"
+    source_compose_dir="$(dirname "${source_compose_abs}")"
+    compose_dir_abs="$(absolute_path_maybe_missing "${COMPOSE_DIR}")"
+
+    if [[ -n "${MIGRATE_TARGET_COMPOSE}" ]]; then
+        target_compose="${MIGRATE_TARGET_COMPOSE}"
+    elif [[ "${compose_dir_abs}" == "${source_compose_dir}" ]]; then
+        target_compose="${compose_dir_abs}/docker-compose.single-node.yml"
+    else
+        target_compose="${compose_dir_abs}/docker-compose.yml"
+    fi
+    target_compose_abs="$(absolute_path_maybe_missing "${target_compose}")"
+    target_compose_dir="$(dirname "${target_compose_abs}")"
+
+    if [[ -n "${MIGRATE_TARGET_ENV}" ]]; then
+        target_env="${MIGRATE_TARGET_ENV}"
+    elif [[ "$(basename "${target_compose_abs}")" == "docker-compose.yml" ]]; then
+        target_env="${target_compose_dir}/.env"
+    else
+        target_env="${target_compose_dir}/.env.single-node"
+    fi
+    target_env_abs="$(absolute_path_maybe_missing "${target_env}")"
+
+    [[ "${target_compose_abs}" != "${source_compose_abs}" ]] || die "target compose would overwrite the source compose file; pass --target-compose or --compose-dir"
+    [[ "${target_env_abs}" != "${source_compose_dir}/.env" ]] || die "target env would overwrite the source .env; pass --target-env or --compose-dir"
+
+    migration_script="$(install_migration_project_file "scripts/migrate-pg-compose-to-single-node.sh" "0755")"
+    target_template="$(install_migration_project_file "docker-compose.single-node.yml" "0644")"
+
+    migrate_args=(
+        "${migration_script}"
+        --source-compose "${source_compose_abs}"
+        --target-compose "${target_compose_abs}"
+        --target-template "${target_template}"
+        --target-env "${target_env_abs}"
+        --app-image "$(compose_image)"
+    )
+    [[ -z "${MIGRATE_TARGET_DB}" ]] || migrate_args+=(--target-db "${MIGRATE_TARGET_DB}")
+    [[ -z "${MIGRATE_WORK_DIR}" ]] || migrate_args+=(--work-dir "${MIGRATE_WORK_DIR}")
+    [[ -z "${MIGRATE_APP_SERVICE}" ]] || migrate_args+=(--app-service "${MIGRATE_APP_SERVICE}")
+    [[ -z "${MIGRATE_POSTGRES_SERVICE}" ]] || migrate_args+=(--postgres-service "${MIGRATE_POSTGRES_SERVICE}")
+    [[ -z "${MIGRATE_SINGLE_NODE_SERVICE}" ]] || migrate_args+=(--single-node-service "${MIGRATE_SINGLE_NODE_SERVICE}")
+    [[ "${MIGRATE_REPLACE_EXISTING}" != "true" ]] || migrate_args+=(--replace-existing)
+    [[ "${MIGRATE_REPLACE_TARGET_COMPOSE}" != "true" ]] || migrate_args+=(--replace-target-compose)
+    [[ -z "${MIGRATE_REQUEST_BODY_MODE}" ]] || migrate_args+=(--request-body-mode "${MIGRATE_REQUEST_BODY_MODE}")
+    [[ "${MIGRATE_KEEP_SOURCE_STOPPED_ON_ERROR}" != "true" ]] || migrate_args+=(--keep-source-stopped-on-error)
+
+    bash "${migrate_args[@]}"
+}
+
+run_single_node_service_migration() {
+    local migration_script
+    local installer
+    local table
+    local -a migrate_args
+
+    [[ -z "${MIGRATE_TARGET_COMPOSE}" ]] || die "--target-compose is only valid with --mode compose-single-node"
+    [[ -z "${MIGRATE_TARGET_ENV}" ]] || die "--target-env is only valid with --mode compose-single-node"
+    [[ -z "${MIGRATE_SINGLE_NODE_SERVICE}" ]] || die "--single-node-service is only valid with --mode compose-single-node"
+    [[ "${MIGRATE_REPLACE_TARGET_COMPOSE}" != "true" ]] || die "--replace-target-compose is only valid with --mode compose-single-node"
+
+    migration_script="$(install_migration_project_file "scripts/migrate-pg-to-single-node.sh" "0755")"
+    installer="$(install_migration_project_file "install.sh" "0755")"
+
+    migrate_args=(
+        "${migration_script}"
+        --source-compose "${MIGRATE_FROM_COMPOSE}"
+        --installer "${installer}"
+        --install-root "${INSTALL_ROOT}"
+        --config-dir "${CONFIG_DIR}"
+        --service-name "${SERVICE_NAME}"
+        --service-user "${SERVICE_USER}"
+        --service-group "${SERVICE_GROUP}"
+        --app-image "$(compose_image)"
+        --install-channel "${CHANNEL}"
+        --install-repo "${REPO}"
+        --install-source-ref "${SOURCE_REF}"
+    )
+    [[ -z "${VERSION}" ]] || migrate_args+=(--install-version "${VERSION}")
+    [[ -z "${ARCHIVE_PATH}" ]] || migrate_args+=(--install-archive "${ARCHIVE_PATH}")
+    [[ -z "${RELEASE_ARCHIVE_URL}" ]] || migrate_args+=(--install-download-url "${RELEASE_ARCHIVE_URL}")
+    [[ -z "${MIGRATE_TARGET_DB}" ]] || migrate_args+=(--target-db "${MIGRATE_TARGET_DB}")
+    [[ -z "${MIGRATE_WORK_DIR}" ]] || migrate_args+=(--work-dir "${MIGRATE_WORK_DIR}")
+    [[ -z "${MIGRATE_APP_SERVICE}" ]] || migrate_args+=(--app-service "${MIGRATE_APP_SERVICE}")
+    [[ -z "${MIGRATE_POSTGRES_SERVICE}" ]] || migrate_args+=(--postgres-service "${MIGRATE_POSTGRES_SERVICE}")
+    [[ "${MIGRATE_REPLACE_EXISTING}" != "true" ]] || migrate_args+=(--replace-existing)
+    [[ -z "${MIGRATE_REQUEST_BODY_MODE}" ]] || migrate_args+=(--request-body-mode "${MIGRATE_REQUEST_BODY_MODE}")
+    [[ "${MIGRATE_KEEP_SOURCE_STOPPED_ON_ERROR}" != "true" ]] || migrate_args+=(--keep-source-stopped-on-error)
+
+    bash "${migrate_args[@]}"
+}
+
+run_migration_from_compose() {
+    if [[ -n "${MIGRATE_REQUEST_BODY_MODE}" ]]; then
+        normalize_migration_request_body_mode
+    fi
+
+    case "${MODE}" in
+        compose-single-node)
+            run_compose_single_node_migration
+            ;;
+        single-node)
+            run_single_node_service_migration
+            ;;
+        compose)
+            die "--migrate-from-compose target mode must be compose-single-node or single-node"
+            ;;
+        *)
+            die "unsupported migration target mode: ${MODE}"
+            ;;
+    esac
+}
+
 resolve_version() {
     if [[ -n "${VERSION}" ]]; then
         echo "${VERSION}"
@@ -896,6 +1454,36 @@ current_script_dir() {
         cd -- "$(dirname -- "${source}")" && pwd
     else
         pwd
+    fi
+}
+
+ensure_tmp_root() {
+    if [[ -z "${TMP_ROOT}" ]]; then
+        TMP_ROOT="$(mktemp -d)"
+    fi
+}
+
+absolute_path() {
+    local path="$1"
+    local dir
+    local base
+
+    if [[ "${path}" == /* ]]; then
+        printf '%s\n' "${path}"
+        return
+    fi
+
+    dir="$(dirname "${path}")"
+    base="$(basename "${path}")"
+    printf '%s/%s\n' "$(cd "${dir}" && pwd -P)" "${base}"
+}
+
+absolute_path_maybe_missing() {
+    local path="$1"
+    if [[ "${path}" == /* ]]; then
+        printf '%s\n' "${path}"
+    else
+        printf '%s/%s\n' "$(pwd -P)" "${path}"
     fi
 }
 
@@ -1092,6 +1680,8 @@ AETHER_GATEWAY_AUTO_PREPARE_DATABASE=true
 AETHER_RUNTIME_BACKEND=memory
 API_KEY_PREFIX=sk
 
+AETHER_DATABASE_DRIVER=sqlite
+AETHER_DATABASE_URL=sqlite://${INSTALL_ROOT}/data/aether.db
 DATABASE_URL=sqlite://${INSTALL_ROOT}/data/aether.db
 
 JWT_SECRET_KEY=${jwt_key}
@@ -1192,7 +1782,7 @@ generate_compose_env() {
     replace_or_append_env "${output}" "AETHER_GATEWAY_AUTO_PREPARE_DATABASE" "true"
 }
 
-generate_compose_sqlite_env() {
+generate_compose_single_node_env() {
     local output="$1"
     local jwt_key encryption_key
     prompt_admin_password
@@ -1218,6 +1808,8 @@ AETHER_GATEWAY_AUTO_PREPARE_DATABASE=true
 AETHER_RUNTIME_BACKEND=memory
 API_KEY_PREFIX=sk
 
+AETHER_DATABASE_DRIVER=sqlite
+AETHER_DATABASE_URL=sqlite:///app/data/aether.db
 DATABASE_URL=sqlite:///app/data/aether.db
 
 JWT_SECRET_KEY=${JWT_SECRET_KEY:-${jwt_key}}
@@ -1374,9 +1966,9 @@ ensure_env_matches_requested_mode() {
     topology="${topology:-single-node}"
 
     if [[ "${mode}" == "cluster" ]]; then
-        [[ "${topology}" == "multi-node" ]] || die "existing env ${file} is ${topology}; set AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY=multi-node or use --mode single"
+        [[ "${topology}" == "multi-node" ]] || die "existing env ${file} is ${topology}; set AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY=multi-node or use --mode single-node"
         cluster_env_has_required_backends "${file}" || die "existing multi-node env ${file} must define DATABASE_URL and REDIS_URL"
-    elif [[ "${mode}" == "single" && "${topology}" == "multi-node" ]]; then
+    elif [[ "${mode}" == "single-node" && "${topology}" == "multi-node" ]]; then
         die "existing env ${file} is multi-node; cluster mode is temporarily disabled, edit the env file"
     fi
 }
@@ -1580,7 +2172,7 @@ EOF
             exit 1
         fi
     else
-        info "generating first-install SQLite env file"
+        info "generating first-install single-node env file"
         generate_first_install_env "${GENERATED_ENV}"
     fi
     echo "${GENERATED_ENV}"
@@ -1624,14 +2216,14 @@ EOF
     compose_next_steps
 }
 
-install_compose_sqlite_mode() {
+install_compose_single_node_mode() {
     resolve_compose_dir
-    info "preparing Docker Compose SQLite deployment in ${COMPOSE_DIR}"
+    info "preparing Docker Compose single-node deployment in ${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}/logs"
     ensure_directory "${COMPOSE_DIR}/data"
 
-    install_project_file "docker-compose.sqlite.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
+    install_project_file "docker-compose.single-node.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
 
@@ -1639,13 +2231,13 @@ install_compose_sqlite_mode() {
         warn "keeping existing ${COMPOSE_DIR}/.env"
     else
         info "generating ${COMPOSE_DIR}/.env"
-        generate_compose_sqlite_env "${COMPOSE_DIR}/.env"
+        generate_compose_single_node_env "${COMPOSE_DIR}/.env"
         chmod 0600 "${COMPOSE_DIR}/.env"
     fi
 
     cat <<EOF
 
-Docker Compose SQLite files are ready:
+Docker Compose single-node files are ready:
   ${COMPOSE_DIR}/docker-compose.yml
   ${COMPOSE_DIR}/.env
   ${COMPOSE_DIR}/.env.example
@@ -2077,11 +2669,20 @@ main() {
     apply_platform_defaults
     select_version
     select_mode
+    collect_interactive_migration_options
+
+    if [[ -n "${MIGRATE_FROM_COMPOSE}" ]]; then
+        run_migration_from_compose
+        return
+    fi
+    if migration_options_requested; then
+        die "migration options require --migrate-from-compose"
+    fi
 
     if [[ "${MODE}" == "compose" ]]; then
         install_compose_mode
-    elif [[ "${MODE}" == "compose-sqlite" ]]; then
-        install_compose_sqlite_mode
+    elif [[ "${MODE}" == "compose-single-node" ]]; then
+        install_compose_single_node_mode
     else
         require_root
         require_service_manager

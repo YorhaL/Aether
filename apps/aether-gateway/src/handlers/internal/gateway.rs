@@ -30,6 +30,25 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::json;
 
+async fn apply_supplied_auth_context(
+    state: &AppState,
+    decision: &mut GatewayControlDecision,
+    auth_context: Option<crate::control::GatewayControlAuthContext>,
+) -> Result<bool, GatewayError> {
+    let Some(auth_context) = auth_context else {
+        return Ok(false);
+    };
+    let refreshed = crate::control::refresh_execution_runtime_auth_context(
+        state,
+        auth_context,
+        decision.auth_endpoint_signature.as_deref(),
+    )
+    .await?;
+    decision.local_auth_rejection = refreshed.local_rejection.clone();
+    decision.auth_context = Some(refreshed);
+    Ok(true)
+}
+
 pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
     state: &AppState,
     request_context: &GatewayPublicRequestContext,
@@ -206,11 +225,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         Json(build_internal_gateway_fallback_plan_payload(None)).into_response(),
                     ));
                 };
-                let provided_auth_context = payload.auth_context.is_some();
-                if let Some(auth_context) = payload.auth_context {
-                    resolved.auth_context = Some(auth_context);
-                    resolved.local_auth_rejection = None;
-                }
+                let provided_auth_context =
+                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 let auth_context = resolved.auth_context.as_ref();
                 if auth_context
                     .map(|value| !value.access_allowed)
@@ -308,11 +324,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         Json(build_internal_gateway_fallback_plan_payload(None)).into_response(),
                     ));
                 };
-                let provided_auth_context = payload.auth_context.is_some();
-                if let Some(auth_context) = payload.auth_context {
-                    resolved.auth_context = Some(auth_context);
-                    resolved.local_auth_rejection = None;
-                }
+                let provided_auth_context =
+                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 let auth_context = resolved.auth_context.as_ref();
                 if auth_context
                     .map(|value| !value.access_allowed)
@@ -407,11 +420,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(Some(build_internal_gateway_proxy_public_response()));
                 };
-                let provided_auth_context = payload.auth_context.is_some();
-                if let Some(auth_context) = payload.auth_context {
-                    resolved.auth_context = Some(auth_context);
-                    resolved.local_auth_rejection = None;
-                }
+                let provided_auth_context =
+                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(mut planned) = api::maybe_build_sync_plan_payload(
                     state,
                     &parts,
@@ -474,11 +484,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(Some(build_internal_gateway_proxy_public_response()));
                 };
-                let provided_auth_context = payload.auth_context.is_some();
-                if let Some(auth_context) = payload.auth_context {
-                    resolved.auth_context = Some(auth_context);
-                    resolved.local_auth_rejection = None;
-                }
+                let provided_auth_context =
+                    apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(mut planned) = api::maybe_build_stream_plan_payload(
                     state,
                     &parts,
@@ -546,10 +553,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(None);
                 };
-                if let Some(auth_context) = payload.auth_context {
-                    resolved.auth_context = Some(auth_context);
-                    resolved.local_auth_rejection = None;
-                }
+                apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(plan_payload) = api::maybe_build_sync_plan_payload(
                     state,
                     &parts,
@@ -630,10 +634,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(None);
                 };
-                if let Some(auth_context) = payload.auth_context {
-                    resolved.auth_context = Some(auth_context);
-                    resolved.local_auth_rejection = None;
-                }
+                apply_supplied_auth_context(state, &mut resolved, payload.auth_context).await?;
                 if let Some(plan_payload) = api::maybe_build_stream_plan_payload(
                     state,
                     &parts,

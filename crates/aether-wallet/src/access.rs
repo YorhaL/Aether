@@ -63,10 +63,7 @@ impl WalletSnapshot {
         }
     }
 
-    pub fn access_decision(&self, is_admin: bool) -> WalletAccessDecision {
-        if is_admin {
-            return WalletAccessDecision::allowed(None);
-        }
+    pub fn access_decision(&self, _is_admin: bool) -> WalletAccessDecision {
         if self.status != WalletStatus::Active {
             return WalletAccessDecision::wallet_unavailable(self.balance_snapshot());
         }

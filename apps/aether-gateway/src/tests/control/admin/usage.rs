@@ -388,6 +388,71 @@ async fn gateway_handles_admin_usage_stats_locally_with_trusted_admin_principal(
 }
 
 #[tokio::test]
+async fn gateway_filters_admin_usage_stats_by_query_fields_locally() {
+    let (upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/stats").await;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage_row(
+            "usage-1",
+            "req-1",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "OpenAI",
+            "gpt-5",
+            "completed",
+            120,
+            30,
+            0.3,
+            0.36,
+            DAY_1_UNIX_SECS,
+        ),
+        sample_usage_row(
+            "usage-2",
+            "req-2",
+            Some("user-2"),
+            Some("key-2"),
+            Some("secondary"),
+            "Anthropic",
+            "claude-3-7",
+            "failed",
+            40,
+            10,
+            0.1,
+            0.12,
+            DAY_2_UNIX_SECS,
+        ),
+    ]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/stats?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&user_id=user-2&provider=Anthropic&model=claude-3-7"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total_requests"], 1);
+    assert_eq!(payload["total_tokens"], 70);
+    assert_eq!(payload["error_count"], 1);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_defaults_admin_usage_stats_to_bounded_recent_window_when_query_missing() {
     let (upstream_url, upstream_hits, upstream_handle) =
         start_usage_upstream("/api/admin/usage/stats").await;

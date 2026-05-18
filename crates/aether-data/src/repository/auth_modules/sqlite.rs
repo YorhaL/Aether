@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, Row};
+use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::types::{
     AuthModuleReadRepository, AuthModuleWriteRepository, StoredLdapModuleConfig,
@@ -8,8 +8,9 @@ use super::types::{
 use crate::driver::sqlite::SqlitePool;
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
+use aether_data_query::{push_eq, push_limit, WhereClause};
 
-const LIST_ENABLED_OAUTH_PROVIDERS_SQL: &str = r#"
+const OAUTH_PROVIDER_COLUMNS: &str = r#"
 SELECT
   provider_type,
   display_name,
@@ -17,11 +18,9 @@ SELECT
   client_secret_encrypted,
   redirect_uri
 FROM oauth_providers
-WHERE is_enabled = 1
-ORDER BY provider_type ASC
 "#;
 
-const GET_LDAP_CONFIG_SQL: &str = r#"
+const LDAP_CONFIG_COLUMNS: &str = r#"
 SELECT
   server_url,
   bind_dn,
@@ -36,8 +35,6 @@ SELECT
   use_starttls,
   connect_timeout
 FROM ldap_configs
-ORDER BY id ASC
-LIMIT 1
 "#;
 
 #[derive(Debug, Clone)]
@@ -62,24 +59,37 @@ impl SqliteAuthModuleRepository {
     }
 }
 
+async fn list_enabled_oauth_providers(
+    pool: &SqlitePool,
+) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
+    let mut builder = QueryBuilder::<Sqlite>::new(OAUTH_PROVIDER_COLUMNS);
+    let mut where_clause = WhereClause::new();
+    push_eq(&mut builder, &mut where_clause, "is_enabled", true);
+    builder.push(" ORDER BY provider_type ASC");
+    let rows = builder.build().fetch_all(pool).await.map_sql_err()?;
+    rows.iter().map(map_oauth_row).collect()
+}
+
+async fn get_ldap_config(
+    pool: &SqlitePool,
+) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
+    let mut builder = QueryBuilder::<Sqlite>::new(LDAP_CONFIG_COLUMNS);
+    builder.push(" ORDER BY id ASC");
+    push_limit(&mut builder, 1);
+    let row = builder.build().fetch_optional(pool).await.map_sql_err()?;
+    row.as_ref().map(map_ldap_row).transpose()
+}
+
 #[async_trait]
 impl AuthModuleReadRepository for SqliteAuthModuleReadRepository {
     async fn list_enabled_oauth_providers(
         &self,
     ) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
-        let rows = sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_sql_err()?;
-        rows.iter().map(map_oauth_row).collect()
+        list_enabled_oauth_providers(&self.pool).await
     }
 
     async fn get_ldap_config(&self) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
-        let row = sqlx::query(GET_LDAP_CONFIG_SQL)
-            .fetch_optional(&self.pool)
-            .await
-            .map_sql_err()?;
-        row.as_ref().map(map_ldap_row).transpose()
+        get_ldap_config(&self.pool).await
     }
 }
 
@@ -88,19 +98,11 @@ impl AuthModuleReadRepository for SqliteAuthModuleRepository {
     async fn list_enabled_oauth_providers(
         &self,
     ) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
-        let rows = sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_sql_err()?;
-        rows.iter().map(map_oauth_row).collect()
+        list_enabled_oauth_providers(&self.pool).await
     }
 
     async fn get_ldap_config(&self) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
-        let row = sqlx::query(GET_LDAP_CONFIG_SQL)
-            .fetch_optional(&self.pool)
-            .await
-            .map_sql_err()?;
-        row.as_ref().map(map_ldap_row).transpose()
+        get_ldap_config(&self.pool).await
     }
 }
 

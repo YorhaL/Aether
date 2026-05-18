@@ -22,6 +22,19 @@ export interface GlobalModelFormPayloadState {
   is_active?: boolean
 }
 
+export interface ModelDirectoryEmptyTextState {
+  searchQuery: string
+  manualModelMode: boolean
+  modelListLoadFailed: boolean
+}
+
+export function getModelDirectoryEmptyText(state: ModelDirectoryEmptyTextState): string {
+  if (state.searchQuery) return '未找到模型'
+  if (state.modelListLoadFailed) return '模型目录加载失败，请使用手动添加继续创建'
+  if (state.manualModelMode) return '已切换到手动添加，可在右侧填写模型信息'
+  return '加载中...'
+}
+
 function cleanGlobalModelConfig(form: GlobalModelFormPayloadState): Record<string, unknown> | undefined {
   return form.config && Object.keys(form.config).length > 0 ? form.config : undefined
 }

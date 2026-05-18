@@ -16,6 +16,27 @@
         v-if="!isEditMode"
         class="w-[260px] shrink-0 flex flex-col h-full"
       >
+        <!-- 手动添加入口 -->
+        <button
+          type="button"
+          class="mb-3 w-full rounded-lg border px-3 py-2 text-left transition-colors"
+          :class="manualModelMode
+            ? 'border-primary bg-primary/10 text-primary'
+            : 'border-border/60 bg-muted/20 hover:bg-muted/40'"
+          @click="enableManualModelMode"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm font-medium">手动添加模型</span>
+            <Plus class="h-4 w-4 shrink-0" />
+          </div>
+          <p
+            class="mt-1 text-xs"
+            :class="manualModelMode ? 'text-primary/80' : 'text-muted-foreground'"
+          >
+            无法联网获取目录时，直接填写模型 ID 继续创建。
+          </p>
+        </button>
+
         <!-- 搜索框 -->
         <div class="relative mb-3">
           <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -88,7 +109,7 @@
               v-if="groupedModels.length === 0"
               class="text-center py-8 text-sm text-muted-foreground"
             >
-              {{ searchQuery ? '未找到模型' : '加载中...' }}
+              {{ emptyModelListText }}
             </div>
           </template>
         </div>
@@ -108,6 +129,12 @@
             <h4 class="font-medium text-sm">
               基本信息
             </h4>
+            <div
+              v-if="manualModelMode && !isEditMode"
+              class="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground"
+            >
+              当前为手动添加模式。填写模型 ID、名称和价格后即可离线创建统一模型；稍后可在模型详情中关联 Provider。
+            </div>
             <div class="grid grid-cols-2 gap-3">
               <div class="space-y-1.5">
                 <Label
@@ -343,7 +370,7 @@
         {{ isEditMode ? '保存' : '添加' }}
       </Button>
       <Button
-        v-if="selectedModel && !isEditMode"
+        v-if="(selectedModel || manualModelMode) && !isEditMode"
         type="button"
         variant="ghost"
         @click="clearSelection"
@@ -382,6 +409,7 @@ import {
   EMBEDDING_API_FORMATS,
   buildGlobalModelCreatePayload,
   buildGlobalModelUpdatePayload,
+  getModelDirectoryEmptyText,
 } from './global-model-form-helpers'
 
 const props = defineProps<{
@@ -404,6 +432,8 @@ const searchQuery = ref('')
 const allModelsCache = ref<ModelsDevModelItem[]>([]) // 全部模型（缓存）
 const selectedModel = ref<ModelsDevModelItem | null>(null)
 const expandedProvider = ref<string | null>(null)
+const manualModelMode = ref(false)
+const modelListLoadFailed = ref(false)
 
 // 当前显示的模型列表：有搜索词时用全部，否则只用官方
 const allModels = computed(() => {
@@ -466,6 +496,14 @@ const groupedModels = computed(() => {
   return result
 })
 
+const emptyModelListText = computed(() => {
+  return getModelDirectoryEmptyText({
+    searchQuery: searchQuery.value,
+    manualModelMode: manualModelMode.value,
+    modelListLoadFailed: modelListLoadFailed.value,
+  })
+})
+
 // 搜索时如果只有一个提供商，自动展开
 watch(groupedModels, (groups) => {
   if (searchQuery.value && groups.length === 1) {
@@ -476,6 +514,16 @@ watch(groupedModels, (groups) => {
 // 切换提供商展开状态
 function toggleProvider(providerId: string) {
   expandedProvider.value = expandedProvider.value === providerId ? null : providerId
+}
+
+function enableManualModelMode() {
+  manualModelMode.value = true
+  selectedModel.value = null
+  expandedProvider.value = null
+  searchQuery.value = ''
+  if (!form.value.name && !form.value.display_name) {
+    form.value = defaultForm()
+  }
 }
 
 // 阶梯计费配置
@@ -710,11 +758,15 @@ function fillVideoResolutionPricePreset(preset: 'common' | 'sora' | 'veo') {
 async function loadModels() {
   if (allModelsCache.value.length > 0) return
   loading.value = true
+  modelListLoadFailed.value = false
   try {
     // 只加载一次全部模型，过滤在 computed 中完成
     allModelsCache.value = await getModelsDevList(false)
   } catch (err) {
     log.error('Failed to load models:', err)
+    modelListLoadFailed.value = true
+    enableManualModelMode()
+    showError('模型目录加载失败，已切换到手动添加模式，可离线继续创建')
   } finally {
     loading.value = false
   }
@@ -729,6 +781,7 @@ watch(() => props.open, (isOpen) => {
 
 // 选择模型并填充表单
 function selectModel(model: ModelsDevModelItem) {
+  manualModelMode.value = false
   selectedModel.value = model
   expandedProvider.value = model.providerId
   form.value.name = model.modelId
@@ -774,6 +827,7 @@ function selectModel(model: ModelsDevModelItem) {
 
 // 清除选择（手动填写）
 function clearSelection() {
+  manualModelMode.value = false
   selectedModel.value = null
   form.value = defaultForm()
   tieredPricing.value = null
@@ -793,6 +847,8 @@ function resetForm() {
   searchQuery.value = ''
   selectedModel.value = null
   expandedProvider.value = null
+  manualModelMode.value = false
+  modelListLoadFailed.value = false
 }
 
 // 加载模型数据（编辑模式）
@@ -826,6 +882,14 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
   onClose: () => emit('update:open', false),
   loadData: loadModelData,
   resetForm,
+})
+
+watch(() => form.value.name, (name) => {
+  if (!manualModelMode.value || isEditMode.value) return
+  const modelName = name.trim()
+  if (modelName && !form.value.display_name.trim()) {
+    form.value.display_name = modelName
+  }
 })
 
 async function handleSubmit() {

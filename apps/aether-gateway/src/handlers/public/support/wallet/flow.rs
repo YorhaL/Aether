@@ -1,9 +1,10 @@
 use super::{
     build_auth_error_response, build_auth_json_response, build_wallet_daily_usage_payload,
-    build_wallet_payload, build_wallet_zero_today_entry, http, parse_wallet_limit,
-    parse_wallet_offset, resolve_authenticated_local_user, unix_secs_to_rfc3339,
-    wallet_fixed_offset, wallet_today_billing_date_string, wallet_transaction_payload_from_record,
-    AppState, Body, GatewayPublicRequestContext, Response, WALLET_LEGACY_TIMEZONE,
+    build_wallet_live_today_usage_payload_for_user, build_wallet_payload,
+    build_wallet_zero_today_entry, http, parse_wallet_limit, parse_wallet_offset,
+    resolve_authenticated_local_user, unix_secs_to_rfc3339, wallet_fixed_offset,
+    wallet_transaction_payload_from_record, AppState, Body, GatewayPublicRequestContext, Response,
+    WALLET_LEGACY_TIMEZONE,
 };
 use serde_json::json;
 
@@ -98,32 +99,43 @@ pub(super) async fn handle_wallet_flow(
         return build_auth_json_response(http::StatusCode::OK, payload, None);
     };
 
-    let mut today_entry = build_wallet_zero_today_entry();
-    if let Ok(Some(today_usage)) = state
-        .find_wallet_today_usage(&wallet.id, WALLET_LEGACY_TIMEZONE)
-        .await
+    let mut today_entry =
+        match build_wallet_live_today_usage_payload_for_user(state, &auth.user.id).await {
+            Ok(Some(today_usage)) => today_usage,
+            _ => build_wallet_zero_today_entry(),
+        };
+    if today_entry
+        .get("total_requests")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default()
+        == 0
     {
-        today_entry = build_wallet_daily_usage_payload(
-            today_usage.id,
-            today_usage.billing_date,
-            today_usage.billing_timezone,
-            today_usage.total_cost_usd,
-            today_usage.total_requests,
-            today_usage.input_tokens,
-            today_usage.output_tokens,
-            today_usage.cache_creation_tokens,
-            today_usage.cache_read_tokens,
-            today_usage
-                .first_finalized_at_unix_secs
-                .and_then(unix_secs_to_rfc3339),
-            today_usage
-                .last_finalized_at_unix_secs
-                .and_then(unix_secs_to_rfc3339),
-            today_usage
-                .aggregated_at_unix_secs
-                .and_then(unix_secs_to_rfc3339),
-            true,
-        );
+        if let Ok(Some(today_usage)) = state
+            .find_wallet_today_usage(&wallet.id, WALLET_LEGACY_TIMEZONE)
+            .await
+        {
+            today_entry = build_wallet_daily_usage_payload(
+                today_usage.id,
+                today_usage.billing_date,
+                today_usage.billing_timezone,
+                today_usage.total_cost_usd,
+                today_usage.total_requests,
+                today_usage.input_tokens,
+                today_usage.output_tokens,
+                today_usage.cache_creation_tokens,
+                today_usage.cache_read_tokens,
+                today_usage
+                    .first_finalized_at_unix_secs
+                    .and_then(unix_secs_to_rfc3339),
+                today_usage
+                    .last_finalized_at_unix_secs
+                    .and_then(unix_secs_to_rfc3339),
+                today_usage
+                    .aggregated_at_unix_secs
+                    .and_then(unix_secs_to_rfc3339),
+                true,
+            );
+        }
     }
 
     let fetch_size = offset.saturating_add(limit).min(5200);

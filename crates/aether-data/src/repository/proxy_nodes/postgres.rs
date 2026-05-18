@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::types::{
     bucket_start_unix_secs, build_tunnel_error_event_detail, build_tunnel_metrics_sample,
@@ -17,6 +17,7 @@ use crate::{
     error::{postgres_error, SqlxResultExt},
     DataLayerError,
 };
+use aether_data_query::{push_eq, push_limit, WhereClause};
 
 const FIND_PROXY_NODE_SQL: &str = r#"
 SELECT
@@ -54,41 +55,6 @@ WHERE id = $1
 LIMIT 1
 "#;
 
-const LIST_PROXY_NODES_SQL: &str = r#"
-SELECT
-  id,
-  name,
-  ip,
-  port,
-  region,
-  is_manual,
-  proxy_url,
-  proxy_username,
-  proxy_password,
-  CAST(status AS TEXT) AS status,
-  registered_by,
-  EXTRACT(EPOCH FROM last_heartbeat_at)::bigint AS last_heartbeat_at_unix_secs,
-  heartbeat_interval,
-  active_connections,
-  total_requests,
-  CAST(avg_latency_ms AS DOUBLE PRECISION) AS avg_latency_ms,
-  failed_requests,
-  dns_failures,
-  stream_errors,
-  proxy_metadata,
-  hardware_info,
-  estimated_max_concurrency,
-  tunnel_mode,
-  tunnel_connected,
-  EXTRACT(EPOCH FROM tunnel_connected_at)::bigint AS tunnel_connected_at_unix_secs,
-  remote_config,
-  config_version,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
-FROM proxy_nodes
-ORDER BY name ASC, id ASC
-"#;
-
 const LIST_PROXY_NODE_EVENTS_SQL: &str = r#"
 SELECT
   id,
@@ -101,23 +67,6 @@ FROM proxy_node_events
 WHERE node_id = $1
 ORDER BY created_at DESC, id DESC
 LIMIT $2
-"#;
-
-const LIST_PROXY_NODE_EVENTS_FILTERED_SQL: &str = r#"
-SELECT
-  id,
-  node_id,
-  CAST(event_type AS TEXT) AS event_type,
-  detail,
-  event_metadata,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms
-FROM proxy_node_events
-WHERE node_id = $1
-  AND ($2::double precision IS NULL OR created_at >= TO_TIMESTAMP($2::double precision))
-  AND ($3::double precision IS NULL OR created_at <= TO_TIMESTAMP($3::double precision))
-  AND ($4::text IS NULL OR LOWER(CAST(event_type AS TEXT)) = LOWER($4::text))
-ORDER BY created_at DESC, id DESC
-LIMIT $5
 "#;
 
 const APPLY_HEARTBEAT_SQL: &str = r#"
@@ -870,7 +819,9 @@ impl SqlxProxyNodeRepository {
 #[async_trait]
 impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
     async fn list_proxy_nodes(&self) -> Result<Vec<StoredProxyNode>, DataLayerError> {
-        let mut rows = sqlx::query(LIST_PROXY_NODES_SQL).fetch(&self.pool);
+        let mut builder = QueryBuilder::<Postgres>::new(proxy_node_columns());
+        builder.push(" ORDER BY name ASC, id ASC");
+        let mut rows = builder.build().fetch(&self.pool);
         let mut items = Vec::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
             items.push(Self::row_to_stored(&row)?);
@@ -882,8 +833,12 @@ impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
         &self,
         node_id: &str,
     ) -> Result<Option<StoredProxyNode>, DataLayerError> {
-        let row = sqlx::query(FIND_PROXY_NODE_SQL)
-            .bind(node_id)
+        let mut builder = QueryBuilder::<Postgres>::new(proxy_node_columns());
+        let mut where_clause = WhereClause::new();
+        push_eq(&mut builder, &mut where_clause, "id", node_id.to_string());
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -895,10 +850,17 @@ impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
         node_id: &str,
         limit: usize,
     ) -> Result<Vec<StoredProxyNodeEvent>, DataLayerError> {
-        let mut rows = sqlx::query(LIST_PROXY_NODE_EVENTS_SQL)
-            .bind(node_id)
-            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-            .fetch(&self.pool);
+        let mut builder = QueryBuilder::<Postgres>::new(proxy_node_event_columns());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "node_id",
+            node_id.to_string(),
+        );
+        builder.push(" ORDER BY created_at DESC, id DESC");
+        push_limit(&mut builder, i64::try_from(limit).unwrap_or(i64::MAX));
+        let mut rows = builder.build().fetch(&self.pool);
         let mut items = Vec::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
             items.push(Self::row_to_event(&row)?);
@@ -911,13 +873,38 @@ impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
         node_id: &str,
         query: &ProxyNodeEventQuery,
     ) -> Result<Vec<StoredProxyNodeEvent>, DataLayerError> {
-        let mut rows = sqlx::query(LIST_PROXY_NODE_EVENTS_FILTERED_SQL)
-            .bind(node_id)
-            .bind(query.from_unix_secs.map(|value| value as f64))
-            .bind(query.to_unix_secs.map(|value| value as f64))
-            .bind(query.event_type.as_deref())
-            .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
-            .fetch(&self.pool);
+        let mut builder = QueryBuilder::<Postgres>::new(proxy_node_event_columns());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "node_id",
+            node_id.to_string(),
+        );
+        if let Some(from_unix_secs) = query.from_unix_secs {
+            where_clause.push_next(&mut builder);
+            builder
+                .push("created_at >= TO_TIMESTAMP(")
+                .push_bind(from_unix_secs as f64)
+                .push("::double precision)");
+        }
+        if let Some(to_unix_secs) = query.to_unix_secs {
+            where_clause.push_next(&mut builder);
+            builder
+                .push("created_at <= TO_TIMESTAMP(")
+                .push_bind(to_unix_secs as f64)
+                .push("::double precision)");
+        }
+        if let Some(event_type) = query.event_type.as_deref() {
+            where_clause.push_next(&mut builder);
+            builder
+                .push("LOWER(CAST(event_type AS TEXT)) = LOWER(")
+                .push_bind(event_type.to_string())
+                .push("::text)");
+        }
+        builder.push(" ORDER BY created_at DESC, id DESC");
+        push_limit(&mut builder, i64::try_from(query.limit).unwrap_or(i64::MAX));
+        let mut rows = builder.build().fetch(&self.pool);
         let mut items = Vec::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
             items.push(Self::row_to_event(&row)?);
@@ -972,6 +959,20 @@ impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
         }
         Ok(items)
     }
+}
+
+fn proxy_node_columns() -> &'static str {
+    FIND_PROXY_NODE_SQL
+        .split_once("WHERE id = $1")
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(FIND_PROXY_NODE_SQL)
+}
+
+fn proxy_node_event_columns() -> &'static str {
+    LIST_PROXY_NODE_EVENTS_SQL
+        .split_once("WHERE node_id = $1")
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(LIST_PROXY_NODE_EVENTS_SQL)
 }
 
 #[async_trait]

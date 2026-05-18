@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, Row};
+use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::types::{
     AnnouncementListQuery, AnnouncementReadRepository, AnnouncementWriteRepository,
@@ -8,6 +8,7 @@ use super::types::{
 use crate::driver::sqlite::SqlitePool;
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
+use aether_data_query::{push_eq, push_limit, push_limit_offset, WhereClause};
 
 const ANNOUNCEMENT_SELECT: &str = r#"
 SELECT
@@ -44,6 +45,27 @@ impl SqliteAnnouncementRepository {
     ) -> Result<Option<StoredAnnouncement>, DataLayerError> {
         self.find_by_id(announcement_id).await
     }
+
+    fn apply_active_filter(
+        builder: &mut QueryBuilder<'_, Sqlite>,
+        where_clause: &mut WhereClause,
+        active_only: bool,
+        now_unix_secs: u64,
+    ) -> Result<(), DataLayerError> {
+        if !active_only {
+            return Ok(());
+        }
+
+        let now = i64_from_u64(now_unix_secs, "announcements.now")?;
+        where_clause.push_next(builder);
+        builder
+            .push("a.is_active = 1 AND (a.start_time IS NULL OR a.start_time <= ")
+            .push_bind(now)
+            .push(") AND (a.end_time IS NULL OR a.end_time >= ")
+            .push_bind(now)
+            .push(")");
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -52,8 +74,17 @@ impl AnnouncementReadRepository for SqliteAnnouncementRepository {
         &self,
         announcement_id: &str,
     ) -> Result<Option<StoredAnnouncement>, DataLayerError> {
-        let row = sqlx::query(&format!("{ANNOUNCEMENT_SELECT} WHERE a.id = ? LIMIT 1"))
-            .bind(announcement_id)
+        let mut builder = QueryBuilder::<Sqlite>::new(ANNOUNCEMENT_SELECT);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "a.id",
+            announcement_id.to_string(),
+        );
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
@@ -65,49 +96,38 @@ impl AnnouncementReadRepository for SqliteAnnouncementRepository {
         query: &AnnouncementListQuery,
     ) -> Result<StoredAnnouncementPage, DataLayerError> {
         let now_unix_secs = query.now_unix_secs.unwrap_or_else(current_unix_secs);
-        let total_row = sqlx::query(
-            r#"
-SELECT COUNT(a.id) AS total
-FROM announcements a
-WHERE (
-  NOT ? OR (
-    a.is_active = 1
-    AND (a.start_time IS NULL OR a.start_time <= ?)
-    AND (a.end_time IS NULL OR a.end_time >= ?)
-  )
-)
-"#,
-        )
-        .bind(query.active_only)
-        .bind(now_unix_secs as i64)
-        .bind(now_unix_secs as i64)
-        .fetch_one(&self.pool)
-        .await
-        .map_sql_err()?;
-        let total = total_row.try_get::<i64, _>("total").map_sql_err()?.max(0) as u64;
+        let mut count_builder =
+            QueryBuilder::<Sqlite>::new("SELECT COUNT(a.id) AS total FROM announcements a");
+        let mut count_where = WhereClause::new();
+        Self::apply_active_filter(
+            &mut count_builder,
+            &mut count_where,
+            query.active_only,
+            now_unix_secs,
+        )?;
+        let total = count_builder
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?
+            .max(0) as u64;
 
-        let rows = sqlx::query(&format!(
-            r#"
-{ANNOUNCEMENT_SELECT}
-WHERE (
-  NOT ? OR (
-    a.is_active = 1
-    AND (a.start_time IS NULL OR a.start_time <= ?)
-    AND (a.end_time IS NULL OR a.end_time >= ?)
-  )
-)
-ORDER BY a.is_pinned DESC, a.priority DESC, a.created_at DESC, a.id ASC
-LIMIT ? OFFSET ?
-"#
-        ))
-        .bind(query.active_only)
-        .bind(now_unix_secs as i64)
-        .bind(now_unix_secs as i64)
-        .bind(query.limit as i64)
-        .bind(query.offset as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
+        let mut list_builder = QueryBuilder::<Sqlite>::new(ANNOUNCEMENT_SELECT);
+        let mut list_where = WhereClause::new();
+        Self::apply_active_filter(
+            &mut list_builder,
+            &mut list_where,
+            query.active_only,
+            now_unix_secs,
+        )?;
+        list_builder
+            .push(" ORDER BY a.is_pinned DESC, a.priority DESC, a.created_at DESC, a.id ASC");
+        push_limit_offset(&mut list_builder, query.limit as i64, query.offset as i64);
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
         let items = rows
             .iter()
             .map(map_announcement_row)
@@ -121,28 +141,22 @@ LIMIT ? OFFSET ?
         user_id: &str,
         now_unix_secs: u64,
     ) -> Result<u64, DataLayerError> {
-        let row = sqlx::query(
-            r#"
-SELECT COUNT(a.id) AS total
-FROM announcements a
-WHERE a.is_active = 1
-  AND (a.start_time IS NULL OR a.start_time <= ?)
-  AND (a.end_time IS NULL OR a.end_time >= ?)
-  AND NOT EXISTS (
-    SELECT 1
-    FROM announcement_reads r
-    WHERE r.user_id = ?
-      AND r.announcement_id = a.id
-  )
-"#,
-        )
-        .bind(now_unix_secs as i64)
-        .bind(now_unix_secs as i64)
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_sql_err()?;
-        Ok(row.try_get::<i64, _>("total").map_sql_err()?.max(0) as u64)
+        let mut builder =
+            QueryBuilder::<Sqlite>::new("SELECT COUNT(a.id) AS total FROM announcements a");
+        let mut where_clause = WhereClause::new();
+        Self::apply_active_filter(&mut builder, &mut where_clause, true, now_unix_secs)?;
+        where_clause.push_next(&mut builder);
+        builder
+            .push("NOT EXISTS (SELECT 1 FROM announcement_reads r WHERE r.user_id = ")
+            .push_bind(user_id.to_string())
+            .push(" AND r.announcement_id = a.id)");
+        let total = builder
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?
+            .max(0) as u64;
+        Ok(total)
     }
 }
 

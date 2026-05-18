@@ -1,14 +1,14 @@
 use async_trait::async_trait;
-use futures_util::TryStreamExt;
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::types::{
     OAuthProviderReadRepository, OAuthProviderWriteRepository, StoredOAuthProviderConfig,
     UpsertOAuthProviderConfigRecord,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
+use aether_data_query::{push_eq, push_limit, WhereClause};
 
-const LIST_OAUTH_PROVIDER_CONFIGS_SQL: &str = r#"
+const OAUTH_PROVIDER_COLUMNS: &str = r#"
 SELECT
   provider_type,
   display_name,
@@ -26,29 +26,6 @@ SELECT
   EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
   EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
 FROM oauth_providers
-ORDER BY provider_type ASC
-"#;
-
-const GET_OAUTH_PROVIDER_CONFIG_SQL: &str = r#"
-SELECT
-  provider_type,
-  display_name,
-  client_id,
-  client_secret_encrypted,
-  authorization_url_override,
-  token_url_override,
-  userinfo_url_override,
-  scopes,
-  redirect_uri,
-  frontend_callback_url,
-  attribute_mapping,
-  extra_config,
-  is_enabled,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
-FROM oauth_providers
-WHERE provider_type = $1
-LIMIT 1
 "#;
 
 const COUNT_LOCKED_USERS_IF_PROVIDER_DISABLED_SQL: &str = r#"
@@ -182,20 +159,31 @@ impl OAuthProviderReadRepository for SqlxOAuthProviderRepository {
     async fn list_oauth_provider_configs(
         &self,
     ) -> Result<Vec<StoredOAuthProviderConfig>, DataLayerError> {
-        let mut rows = sqlx::query(LIST_OAUTH_PROVIDER_CONFIGS_SQL).fetch(&self.pool);
-        let mut items = Vec::new();
-        while let Some(row) = rows.try_next().await.map_postgres_err()? {
-            items.push(map_oauth_provider_row(&row)?);
-        }
-        Ok(items)
+        let mut builder = QueryBuilder::<Postgres>::new(OAUTH_PROVIDER_COLUMNS);
+        builder.push(" ORDER BY provider_type ASC");
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+        rows.iter().map(map_oauth_provider_row).collect()
     }
 
     async fn get_oauth_provider_config(
         &self,
         provider_type: &str,
     ) -> Result<Option<StoredOAuthProviderConfig>, DataLayerError> {
-        let row = sqlx::query(GET_OAUTH_PROVIDER_CONFIG_SQL)
-            .bind(provider_type)
+        let mut builder = QueryBuilder::<Postgres>::new(OAUTH_PROVIDER_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "provider_type",
+            provider_type.to_string(),
+        );
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;

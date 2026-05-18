@@ -112,6 +112,8 @@ SELECT
   CASE
     WHEN NULLIF(BTRIM("usage".request_metadata->>'client_ip'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'user_agent'), '') IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'request_path'), '') IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), '') IS NOT NULL
       OR ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
       OR ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
       THEN jsonb_strip_nulls(jsonb_build_object(
@@ -119,6 +121,10 @@ SELECT
         NULLIF(BTRIM("usage".request_metadata->>'client_ip'), ''),
         'user_agent',
         NULLIF(BTRIM("usage".request_metadata->>'user_agent'), ''),
+        'request_path',
+        NULLIF(BTRIM("usage".request_metadata->>'request_path'), ''),
+        'request_path_and_query',
+        NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), ''),
         'client_requested_stream',
         CASE
           WHEN ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')

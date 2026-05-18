@@ -8,6 +8,7 @@ use super::types::{
     StoredGeminiFileMappingListPage, UpsertGeminiFileMappingRecord,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
+use aether_data_query::{push_ci_contains_any, push_limit_offset, SqlDialect, WhereClause};
 
 #[derive(Debug, Clone)]
 pub struct SqlxGeminiFileMappingRepository {
@@ -283,10 +284,10 @@ WHERE expires_at <= TO_TIMESTAMP($1::double precision)
 }
 
 fn build_list_count_query(query: &GeminiFileMappingListQuery) -> QueryBuilder<'_, Postgres> {
-    let mut builder = QueryBuilder::<Postgres>::new(
-        "SELECT COUNT(*)::bigint AS total FROM gemini_file_mappings WHERE 1=1",
-    );
-    apply_list_filters(&mut builder, query);
+    let mut builder =
+        QueryBuilder::<Postgres>::new("SELECT COUNT(*)::bigint AS total FROM gemini_file_mappings");
+    let mut where_clause = WhereClause::new();
+    apply_list_filters(&mut builder, &mut where_clause, query);
     builder
 }
 
@@ -304,23 +305,27 @@ SELECT
   EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
   EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_secs
 FROM gemini_file_mappings
-WHERE 1=1
 "#,
     );
-    apply_list_filters(&mut builder, query);
-    builder.push(" ORDER BY created_at DESC, file_name ASC LIMIT ");
-    builder.push_bind(i64::try_from(query.limit).unwrap_or(i64::MAX));
-    builder.push(" OFFSET ");
-    builder.push_bind(i64::try_from(query.offset).unwrap_or(i64::MAX));
+    let mut where_clause = WhereClause::new();
+    apply_list_filters(&mut builder, &mut where_clause, query);
+    builder.push(" ORDER BY created_at DESC, file_name ASC");
+    push_limit_offset(
+        &mut builder,
+        i64::try_from(query.limit).unwrap_or(i64::MAX),
+        i64::try_from(query.offset).unwrap_or(i64::MAX),
+    );
     builder
 }
 
 fn apply_list_filters(
     builder: &mut QueryBuilder<'_, Postgres>,
+    where_clause: &mut WhereClause,
     query: &GeminiFileMappingListQuery,
 ) {
     if !query.include_expired {
-        builder.push(" AND expires_at > TO_TIMESTAMP(");
+        where_clause.push_next(builder);
+        builder.push("expires_at > TO_TIMESTAMP(");
         builder.push_bind(query.now_unix_secs as f64);
         builder.push("::double precision)");
     }
@@ -330,11 +335,12 @@ fn apply_list_filters(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let pattern = format!("%{search}%");
-        builder.push(" AND (file_name ILIKE ");
-        builder.push_bind(pattern.clone());
-        builder.push(" OR COALESCE(display_name, '') ILIKE ");
-        builder.push_bind(pattern);
-        builder.push(")");
+        push_ci_contains_any(
+            builder,
+            where_clause,
+            SqlDialect::Postgres,
+            &["file_name", "COALESCE(display_name, '')"],
+            search,
+        );
     }
 }

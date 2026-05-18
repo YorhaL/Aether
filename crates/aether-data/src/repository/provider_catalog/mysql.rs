@@ -669,6 +669,11 @@ WHERE id = ?
                 "provider_api_keys.last_probe_increase_at",
             )?)
             .bind(optional_i64_from_u32(key.last_rpm_peak))
+            .bind(optional_i64_from_u64(
+                key.last_models_fetch_at_unix_secs,
+                "provider_api_keys.last_models_fetch_at",
+            )?)
+            .bind(&key.last_models_fetch_error)
             .bind(updated_at)
             .bind(&key.id)
             .execute(&self.pool)
@@ -1208,6 +1213,8 @@ SET
   utilization_samples = ?,
   last_probe_increase_at = ?,
   last_rpm_peak = ?,
+  last_models_fetch_at = ?,
+  last_models_fetch_error = ?,
   updated_at = ?
 WHERE id = ?
 "#

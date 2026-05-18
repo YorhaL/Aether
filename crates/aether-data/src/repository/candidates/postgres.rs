@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures_util::{future::BoxFuture, stream::TryStream, TryStreamExt};
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use super::{
@@ -10,6 +10,7 @@ use super::{
 };
 use crate::driver::postgres::PostgresTransactionRunner;
 use crate::{error::SqlxResultExt, DataLayerError};
+use aether_data_query::{push_eq, push_in, push_limit, WhereClause};
 
 const LIST_BY_REQUEST_ID_SQL: &str = r#"
 SELECT
@@ -40,115 +41,6 @@ SELECT
 FROM request_candidates
 WHERE request_id = $1
 ORDER BY candidate_index ASC, retry_index ASC, created_at ASC
-"#;
-
-const LIST_RECENT_SQL: &str = r#"
-SELECT
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  candidate_index,
-  retry_index,
-  provider_id,
-  endpoint_id,
-  key_id,
-  status,
-  skip_reason,
-  is_cached,
-  status_code,
-  error_type,
-  error_message,
-  latency_ms,
-  concurrent_requests,
-  extra_data,
-  required_capabilities,
-  CAST(EXTRACT(EPOCH FROM created_at) * 1000 AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM started_at) * 1000 AS BIGINT) AS started_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM finished_at) * 1000 AS BIGINT) AS finished_at_unix_ms
-FROM request_candidates
-ORDER BY created_at DESC
-LIMIT $1
-"#;
-
-const LIST_BY_PROVIDER_ID_SQL: &str = r#"
-SELECT
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  candidate_index,
-  retry_index,
-  provider_id,
-  endpoint_id,
-  key_id,
-  status,
-  skip_reason,
-  is_cached,
-  status_code,
-  error_type,
-  error_message,
-  latency_ms,
-  concurrent_requests,
-  extra_data,
-  required_capabilities,
-  CAST(EXTRACT(EPOCH FROM created_at) * 1000 AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM started_at) * 1000 AS BIGINT) AS started_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM finished_at) * 1000 AS BIGINT) AS finished_at_unix_ms
-FROM request_candidates
-WHERE provider_id = $1
-ORDER BY created_at DESC
-LIMIT $2
-"#;
-
-const LIST_FINALIZED_BY_ENDPOINT_IDS_SINCE_SQL: &str = r#"
-SELECT
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  candidate_index,
-  retry_index,
-  provider_id,
-  endpoint_id,
-  key_id,
-  status,
-  skip_reason,
-  is_cached,
-  status_code,
-  error_type,
-  error_message,
-  latency_ms,
-  concurrent_requests,
-  extra_data,
-  required_capabilities,
-  CAST(EXTRACT(EPOCH FROM created_at) * 1000 AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM started_at) * 1000 AS BIGINT) AS started_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM finished_at) * 1000 AS BIGINT) AS finished_at_unix_ms
-FROM request_candidates
-WHERE endpoint_id = ANY($1)
-  AND created_at >= TO_TIMESTAMP($2)
-  AND status IN ('success', 'failed', 'skipped')
-ORDER BY created_at DESC
-LIMIT $3
-"#;
-
-const COUNT_FINALIZED_STATUSES_BY_ENDPOINT_IDS_SINCE_SQL: &str = r#"
-SELECT
-  endpoint_id,
-  status,
-  COUNT(id) AS count
-FROM request_candidates
-WHERE endpoint_id = ANY($1)
-  AND created_at >= TO_TIMESTAMP($2)
-  AND status IN ('success', 'failed', 'skipped')
-GROUP BY endpoint_id, status
 "#;
 
 const AGGREGATE_FINALIZED_TIMELINE_BY_ENDPOINT_IDS_SINCE_SQL: &str = r#"
@@ -325,13 +217,16 @@ impl SqlxRequestCandidateReadRepository {
         &self,
         request_id: &str,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
-        collect_query_rows(
-            sqlx::query(LIST_BY_REQUEST_ID_SQL)
-                .bind(request_id)
-                .fetch(&self.pool),
-            map_request_candidate_row,
-        )
-        .await
+        let mut builder = QueryBuilder::<Postgres>::new(candidate_columns());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "request_id",
+            request_id.to_string(),
+        );
+        builder.push(" ORDER BY candidate_index ASC, retry_index ASC, created_at ASC");
+        collect_query_rows(builder.build().fetch(&self.pool), map_request_candidate_row).await
     }
 
     pub async fn list_recent(
@@ -342,17 +237,17 @@ impl SqlxRequestCandidateReadRepository {
             return Ok(Vec::new());
         }
 
-        collect_query_rows(
-            sqlx::query(LIST_RECENT_SQL)
-                .bind(i64::try_from(limit).map_err(|_| {
-                    DataLayerError::UnexpectedValue(format!(
-                        "invalid recent request candidate limit: {limit}"
-                    ))
-                })?)
-                .fetch(&self.pool),
-            map_request_candidate_row,
-        )
-        .await
+        let mut builder = QueryBuilder::<Postgres>::new(candidate_columns());
+        builder.push(" ORDER BY created_at DESC");
+        push_limit(
+            &mut builder,
+            i64::try_from(limit).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!(
+                    "invalid recent request candidate limit: {limit}"
+                ))
+            })?,
+        );
+        collect_query_rows(builder.build().fetch(&self.pool), map_request_candidate_row).await
     }
 
     pub async fn list_by_provider_id(
@@ -364,20 +259,24 @@ impl SqlxRequestCandidateReadRepository {
             return Ok(Vec::new());
         }
 
-        let limit_value = i64::try_from(limit).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "invalid provider request candidate limit: {limit}"
-            ))
-        })?;
-
-        collect_query_rows(
-            sqlx::query(LIST_BY_PROVIDER_ID_SQL)
-                .bind(provider_id)
-                .bind(limit_value)
-                .fetch(&self.pool),
-            map_request_candidate_row,
-        )
-        .await
+        let mut builder = QueryBuilder::<Postgres>::new(candidate_columns());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "provider_id",
+            provider_id.to_string(),
+        );
+        builder.push(" ORDER BY created_at DESC");
+        push_limit(
+            &mut builder,
+            i64::try_from(limit).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!(
+                    "invalid provider request candidate limit: {limit}"
+                ))
+            })?,
+        );
+        collect_query_rows(builder.build().fetch(&self.pool), map_request_candidate_row).await
     }
 
     pub async fn list_finalized_by_endpoint_ids_since(
@@ -390,19 +289,22 @@ impl SqlxRequestCandidateReadRepository {
             return Ok(Vec::new());
         }
 
-        collect_query_rows(
-            sqlx::query(LIST_FINALIZED_BY_ENDPOINT_IDS_SINCE_SQL)
-                .bind(endpoint_ids)
-                .bind(since_unix_secs as f64)
-                .bind(i64::try_from(limit).map_err(|_| {
-                    DataLayerError::UnexpectedValue(format!(
-                        "invalid finalized request candidate limit: {limit}"
-                    ))
-                })?)
-                .fetch(&self.pool),
-            map_request_candidate_row,
-        )
-        .await
+        let mut builder = QueryBuilder::<Postgres>::new(candidate_columns());
+        let mut where_clause = WhereClause::new();
+        push_in(&mut builder, &mut where_clause, "endpoint_id", endpoint_ids);
+        builder
+            .push(" AND created_at >= TO_TIMESTAMP(")
+            .push_bind(since_unix_secs as f64)
+            .push(") AND status IN ('success', 'failed', 'skipped') ORDER BY created_at DESC");
+        push_limit(
+            &mut builder,
+            i64::try_from(limit).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!(
+                    "invalid finalized request candidate limit: {limit}"
+                ))
+            })?,
+        );
+        collect_query_rows(builder.build().fetch(&self.pool), map_request_candidate_row).await
     }
 
     pub async fn count_finalized_statuses_by_endpoint_ids_since(
@@ -414,29 +316,35 @@ impl SqlxRequestCandidateReadRepository {
             return Ok(Vec::new());
         }
 
-        let mut rows = sqlx::query(COUNT_FINALIZED_STATUSES_BY_ENDPOINT_IDS_SINCE_SQL)
-            .bind(endpoint_ids)
-            .bind(since_unix_secs as f64)
-            .fetch(&self.pool);
-        let mut counts = Vec::new();
-        while let Some(row) = rows.try_next().await.map_postgres_err()? {
-            let entry = {
-                let status = RequestCandidateStatus::from_database(
-                    row_get::<String>(&row, "status")?.as_str(),
-                )?;
-                PublicHealthStatusCount {
-                    endpoint_id: row_get(&row, "endpoint_id")?,
-                    status,
-                    count: u64::try_from(row_get::<i64>(&row, "count")?).map_err(|_| {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "SELECT endpoint_id, status, COUNT(id) AS count FROM request_candidates",
+        );
+        let mut where_clause = WhereClause::new();
+        push_in(&mut builder, &mut where_clause, "endpoint_id", endpoint_ids);
+        builder
+            .push(" AND created_at >= TO_TIMESTAMP(")
+            .push_bind(since_unix_secs as f64)
+            .push(") AND status IN ('success', 'failed', 'skipped') GROUP BY endpoint_id, status");
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(PublicHealthStatusCount {
+                    endpoint_id: row_get(row, "endpoint_id")?,
+                    status: RequestCandidateStatus::from_database(
+                        row_get::<String>(row, "status")?.as_str(),
+                    )?,
+                    count: u64::try_from(row_get::<i64>(row, "count")?).map_err(|_| {
                         DataLayerError::UnexpectedValue(
                             "public health status count out of range".to_string(),
                         )
                     })?,
-                }
-            };
-            counts.push(entry);
-        }
-        Ok(counts)
+                })
+            })
+            .collect()
     }
 
     pub async fn aggregate_finalized_timeline_by_endpoint_ids_since(
@@ -723,6 +631,13 @@ where
     for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
     row.try_get(column).map_postgres_err()
+}
+
+fn candidate_columns() -> &'static str {
+    LIST_BY_REQUEST_ID_SQL
+        .split_once("WHERE request_id = $1")
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(LIST_BY_REQUEST_ID_SQL)
 }
 
 fn status_to_database(status: RequestCandidateStatus) -> &'static str {

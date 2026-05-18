@@ -9,6 +9,9 @@ use super::{
 };
 use crate::error::SqlxResultExt;
 use crate::DataLayerError;
+use aether_data_query::{
+    push_ci_contains, push_eq, push_limit, push_limit_offset, SqlDialect, WhereClause,
+};
 
 const RUN_COLUMNS: &str = r#"
 SELECT
@@ -60,35 +63,33 @@ impl SqlxBackgroundTaskRepository {
         query: &BackgroundTaskListQuery,
         include_where: bool,
     ) {
-        let mut has_where = include_where;
-        let mut push_where = |builder: &mut QueryBuilder<'_, Postgres>| {
-            if has_where {
-                builder.push(" AND ");
-            } else {
-                builder.push(" WHERE ");
-                has_where = true;
-            }
+        let mut where_clause = if include_where {
+            WhereClause::with_existing_clause()
+        } else {
+            WhereClause::new()
         };
-
         if let Some(kind) = query.kind {
-            push_where(builder);
-            builder.push("kind = ").push_bind(kind.as_database());
+            push_eq(builder, &mut where_clause, "kind", kind.as_database());
         }
         if let Some(status) = query.status {
-            push_where(builder);
-            builder.push("status = ").push_bind(status.as_database());
+            push_eq(builder, &mut where_clause, "status", status.as_database());
         }
         if let Some(trigger) = query.trigger.as_deref() {
-            push_where(builder);
-            builder
-                .push("\"trigger\" = ")
-                .push_bind(trigger.to_string());
+            push_eq(
+                builder,
+                &mut where_clause,
+                &SqlDialect::Postgres.quote_ident("trigger"),
+                trigger.to_string(),
+            );
         }
         if let Some(task_key_substring) = query.task_key_substring.as_deref() {
-            push_where(builder);
-            builder
-                .push("task_key ILIKE ")
-                .push_bind(format!("%{}%", task_key_substring.trim()));
+            push_ci_contains(
+                builder,
+                &mut where_clause,
+                SqlDialect::Postgres,
+                "task_key",
+                task_key_substring,
+            );
         }
     }
 }
@@ -99,8 +100,12 @@ impl BackgroundTaskReadRepository for SqlxBackgroundTaskRepository {
         &self,
         run_id: &str,
     ) -> Result<Option<StoredBackgroundTaskRun>, DataLayerError> {
-        let row = sqlx::query(&format!("{RUN_COLUMNS} WHERE id = $1 LIMIT 1"))
-            .bind(run_id)
+        let mut builder = QueryBuilder::<Postgres>::new(RUN_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(&mut builder, &mut where_clause, "id", run_id.to_string());
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -124,12 +129,12 @@ impl BackgroundTaskReadRepository for SqlxBackgroundTaskRepository {
 
         let mut builder = QueryBuilder::<Postgres>::new(RUN_COLUMNS);
         Self::apply_run_filter(&mut builder, query, false);
-        builder
-            .push(" ORDER BY created_at_unix_secs DESC, updated_at_unix_secs DESC")
-            .push(" LIMIT ")
-            .push_bind(i64_from_usize(limit, "background task run limit")?)
-            .push(" OFFSET ")
-            .push_bind(i64_from_usize(query.offset, "background task run offset")?);
+        builder.push(" ORDER BY created_at_unix_secs DESC, updated_at_unix_secs DESC");
+        push_limit_offset(
+            &mut builder,
+            i64_from_usize(limit, "background task run limit")?,
+            i64_from_usize(query.offset, "background task run offset")?,
+        );
         let rows = builder
             .build()
             .fetch_all(&self.pool)
@@ -153,15 +158,25 @@ impl BackgroundTaskReadRepository for SqlxBackgroundTaskRepository {
         limit: usize,
     ) -> Result<Vec<StoredBackgroundTaskEvent>, DataLayerError> {
         let limit = limit.max(1);
-        let rows = sqlx::query(&format!(
-            "{EVENT_COLUMNS} WHERE run_id = $1 ORDER BY created_at_unix_secs ASC, id ASC LIMIT $2 OFFSET $3"
-        ))
-        .bind(run_id)
-        .bind(i64_from_usize(limit, "background task event limit")?)
-        .bind(i64_from_usize(offset, "background task event offset")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_postgres_err()?;
+        let mut builder = QueryBuilder::<Postgres>::new(EVENT_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "run_id",
+            run_id.to_string(),
+        );
+        builder.push(" ORDER BY created_at_unix_secs ASC, id ASC");
+        push_limit_offset(
+            &mut builder,
+            i64_from_usize(limit, "background task event limit")?,
+            i64_from_usize(offset, "background task event offset")?,
+        );
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
         rows.iter().map(map_event_row).collect()
     }
 

@@ -961,7 +961,7 @@ ORDER BY expires_at ASC, created_at ASC, id ASC
             allow_wallet_overage &= grant.allow_wallet_overage;
             let used = sqlx::query_scalar::<_, f64>(
                 r#"
-SELECT COALESCE(SUM(amount_usd), 0)
+SELECT CAST(COALESCE(SUM(amount_usd), 0) AS REAL)
 FROM entitlement_usage_ledgers
 WHERE user_entitlement_id = ?
   AND usage_date = ?

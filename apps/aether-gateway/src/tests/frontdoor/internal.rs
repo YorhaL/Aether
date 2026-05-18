@@ -11,6 +11,9 @@ use crate::tests::{
     EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
     EXECUTION_PATH_HEADER,
 };
+use aether_data::repository::billing::InMemoryBillingReadRepository;
+use aether_data::repository::usage::InMemoryUsageReadRepository;
+use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use base64::Engine as _;
 
 #[tokio::test]
@@ -1147,6 +1150,118 @@ async fn gateway_handles_internal_gateway_decision_sync_locally_with_supplied_au
     assert_eq!(payload["provider_api_format"], "openai:chat");
     assert_eq!(payload["client_api_format"], "openai:chat");
     assert_eq!(payload["model_name"], "gpt-5");
+    assert_eq!(payload["auth_context"], serde_json::Value::Null);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_internal_decision_sync_revalidates_supplied_auth_context_wallet() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("proxied"))
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        None,
+        unrestricted_models_snapshot("api-key-empty-wallet", "user-empty-wallet"),
+    )]));
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_models_candidate_row("provider-1", "openai", "openai:chat", "gpt-5", 10),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-1", "openai", 10)],
+        vec![sample_endpoint(
+            "endpoint-provider-1",
+            "provider-1",
+            "openai:chat",
+            "https://api.openai.example",
+        )],
+        vec![sample_key(
+            "key-provider-1",
+            "provider-1",
+            "openai:chat",
+            "sk-upstream-openai",
+        )],
+    ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+    let billing_repository = Arc::new(InMemoryBillingReadRepository::seed(Vec::new()));
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![
+        StoredWalletSnapshot::new(
+            "wallet-empty".to_string(),
+            Some("user-empty-wallet".to_string()),
+            None,
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            100,
+        )
+        .expect("wallet should build"),
+    ]));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_usage_billing_and_wallet_for_tests(
+                    auth_repository,
+                    candidate_repository,
+                    provider_catalog_repository,
+                    request_candidate_repository,
+                    usage_repository,
+                    billing_repository,
+                    wallet_repository,
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/internal/gateway/decision-sync"))
+        .json(&json!({
+            "trace_id": "trace-internal-decision-sync-empty-wallet",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": {
+                "content-type": "application/json",
+            },
+            "body_json": {
+                "model": "gpt-5",
+                "messages": [],
+            },
+            "auth_context": {
+                "user_id": "user-empty-wallet",
+                "api_key_id": "api-key-empty-wallet",
+                "access_allowed": true,
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["action"], "fallback_plan");
     assert_eq!(payload["auth_context"], serde_json::Value::Null);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 

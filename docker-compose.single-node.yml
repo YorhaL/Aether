@@ -3,7 +3,7 @@ services:
     image: ${APP_IMAGE:-ghcr.io/fawney19/aether:latest}
     container_name: aether-app
     env_file:
-      - .env
+      - ${AETHER_ENV_FILE:-.env}
     environment:
       TZ: Asia/Shanghai
       AETHER_DATABASE_DRIVER: sqlite

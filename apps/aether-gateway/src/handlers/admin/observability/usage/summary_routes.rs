@@ -516,7 +516,9 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 .summarize_usage_audits(&UsageAuditSummaryQuery {
                     created_from_unix_secs,
                     created_until_unix_secs,
-                    ..Default::default()
+                    user_id: query_param_value(query, "user_id"),
+                    provider_name: query_param_value(query, "provider"),
+                    model: query_param_value(query, "model"),
                 })
                 .await?;
             return Ok(Some(build_admin_usage_summary_stats_response_from_summary(

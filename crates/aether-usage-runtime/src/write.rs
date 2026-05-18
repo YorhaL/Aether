@@ -2529,6 +2529,9 @@ mod tests {
         assert!(record.request_body.is_none());
         assert!(record.provider_request_headers.is_none());
         assert!(record.provider_request_body.is_none());
+        assert_eq!(record.provider_id.as_deref(), Some("provider-1"));
+        assert_eq!(record.provider_endpoint_id.as_deref(), Some("endpoint-1"));
+        assert_eq!(record.provider_api_key_id.as_deref(), Some("key-1"));
         assert_eq!(record.candidate_id.as_deref(), Some("cand-pending-usage-1"));
         assert_eq!(record.candidate_index, Some(0));
         assert_eq!(record.key_name.as_deref(), Some("codex-upstream"));

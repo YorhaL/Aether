@@ -1,50 +1,20 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, Row};
+use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::{
     metadata_supports_embedding, AdminGlobalModelListQuery, AdminProviderModelListQuery,
     CreateAdminGlobalModelRecord, GlobalModelReadRepository, GlobalModelWriteRepository,
-    InMemoryGlobalModelReadRepository, PublicCatalogModelListQuery, PublicCatalogModelSearchQuery,
-    PublicGlobalModelQuery, StoredAdminGlobalModel, StoredAdminGlobalModelPage,
-    StoredAdminProviderModel, StoredProviderActiveGlobalModel, StoredProviderModelStats,
-    StoredPublicCatalogModel, StoredPublicGlobalModel, StoredPublicGlobalModelPage,
-    UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
+    PublicCatalogModelListQuery, PublicCatalogModelSearchQuery, PublicGlobalModelQuery,
+    StoredAdminGlobalModel, StoredAdminGlobalModelPage, StoredAdminProviderModel,
+    StoredProviderActiveGlobalModel, StoredProviderModelStats, StoredPublicCatalogModel,
+    StoredPublicGlobalModel, StoredPublicGlobalModelPage, UpdateAdminGlobalModelRecord,
+    UpsertAdminProviderModelRecord,
 };
 use crate::driver::sqlite::{sqlite_optional_real, SqlitePool};
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
 
-#[derive(Debug, Clone)]
-pub struct SqliteGlobalModelReadRepository {
-    pool: SqlitePool,
-}
-
-impl SqliteGlobalModelReadRepository {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
-    }
-
-    async fn load_memory(&self) -> Result<InMemoryGlobalModelReadRepository, DataLayerError> {
-        let public_models = self.load_public_global_models().await?;
-        let admin_global_models = self.load_admin_global_models().await?;
-        let admin_provider_models = self.load_admin_provider_models().await?;
-        let public_catalog_models = self.load_public_catalog_models().await?;
-        let provider_model_stats = self.load_provider_model_stats().await?;
-        let active_global_model_refs = self.load_active_global_model_refs().await?;
-
-        Ok(InMemoryGlobalModelReadRepository::seed(public_models)
-            .with_admin_global_models(admin_global_models)
-            .with_admin_provider_models(admin_provider_models)
-            .with_public_catalog_models(public_catalog_models)
-            .with_provider_model_stats(provider_model_stats)
-            .with_active_global_model_refs(active_global_model_refs))
-    }
-
-    async fn load_public_global_models(
-        &self,
-    ) -> Result<Vec<StoredPublicGlobalModel>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const LIST_PUBLIC_GLOBAL_MODELS_PREFIX: &str = r#"
 SELECT
   id,
   name,
@@ -54,47 +24,73 @@ SELECT
   default_tiered_pricing,
   supported_capabilities,
   config,
-  usage_count
+  0 AS usage_count
 FROM global_models
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_public_global_model_row).collect()
-    }
+"#;
 
-    async fn load_admin_global_models(
-        &self,
-    ) -> Result<Vec<StoredAdminGlobalModel>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const COUNT_PUBLIC_GLOBAL_MODELS_PREFIX: &str = r#"
+SELECT COUNT(id) AS total
+FROM global_models
+"#;
+
+const LIST_PUBLIC_CATALOG_MODELS_PREFIX: &str = r#"
 SELECT
-  id,
-  name,
-  COALESCE(NULLIF(display_name, ''), name) AS display_name,
-  is_active,
-  CAST(default_price_per_request AS REAL) AS default_price_per_request,
-  default_tiered_pricing,
-  supported_capabilities,
-  config,
-  usage_count,
-  created_at AS created_at_unix_ms,
-  updated_at AS updated_at_unix_secs
-FROM global_models
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_admin_global_model_row).collect()
-    }
+  m.id,
+  m.provider_id,
+  p.name AS provider_name,
+  p.is_active AS provider_is_active,
+  m.provider_model_name,
+  COALESCE(gm.name, m.provider_model_name) AS name,
+  COALESCE(NULLIF(gm.display_name, ''), m.provider_model_name) AS display_name,
+  gm.config AS global_model_config,
+  gm.supported_capabilities AS global_model_supported_capabilities,
+  m.config AS model_config,
+  m.tiered_pricing,
+  gm.default_tiered_pricing,
+  COALESCE(
+    m.supports_vision,
+    CASE
+      WHEN json_extract(gm.config, '$.vision') IS NULL THEN NULL
+      WHEN LOWER(CAST(json_extract(gm.config, '$.vision') AS TEXT)) IN ('true', '1') THEN 1
+      ELSE 0
+    END,
+    0
+  ) AS supports_vision,
+  COALESCE(
+    m.supports_function_calling,
+    CASE
+      WHEN json_extract(gm.config, '$.function_calling') IS NULL THEN NULL
+      WHEN LOWER(CAST(json_extract(gm.config, '$.function_calling') AS TEXT)) IN ('true', '1') THEN 1
+      ELSE 0
+    END,
+    0
+  ) AS supports_function_calling,
+  COALESCE(
+    m.supports_streaming,
+    CASE
+      WHEN json_extract(gm.config, '$.streaming') IS NULL THEN NULL
+      WHEN LOWER(CAST(json_extract(gm.config, '$.streaming') AS TEXT)) IN ('true', '1') THEN 1
+      ELSE 0
+    END,
+    1
+  ) AS supports_streaming,
+  m.is_active,
+  gm.is_active AS global_model_is_active
+FROM models m
+JOIN providers p ON p.id = m.provider_id
+LEFT JOIN global_models gm ON gm.id = m.global_model_id
+"#;
 
-    async fn load_admin_provider_models(
-        &self,
-    ) -> Result<Vec<StoredAdminProviderModel>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const LIST_PROVIDER_MODEL_STATS_PREFIX: &str = r#"
+SELECT
+  provider_id,
+  COUNT(id) AS total_models,
+  COALESCE(SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END), 0) AS active_models
+FROM models
+WHERE provider_id IN (
+"#;
+
+const LIST_ADMIN_PROVIDER_MODELS_PREFIX: &str = r#"
 SELECT
   m.id,
   m.provider_id,
@@ -109,7 +105,7 @@ SELECT
   m.supports_extended_thinking,
   m.supports_image_generation,
   m.is_active,
-  m.is_available,
+  COALESCE(m.is_available, 1) AS is_available,
   m.config,
   m.created_at AS created_at_unix_ms,
   m.updated_at AS updated_at_unix_secs,
@@ -121,85 +117,61 @@ SELECT
   gm.config AS global_model_config
 FROM models m
 LEFT JOIN global_models gm ON gm.id = m.global_model_id
-WHERE m.global_model_id IS NOT NULL
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_admin_provider_model_row).collect()
-    }
+"#;
 
-    async fn load_public_catalog_models(
-        &self,
-    ) -> Result<Vec<StoredPublicCatalogModel>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const LIST_ADMIN_GLOBAL_MODELS_PREFIX: &str = r#"
 SELECT
-  m.id,
-  m.provider_id,
-  p.name AS provider_name,
-  p.is_active AS provider_is_active,
-  m.provider_model_name,
-  COALESCE(gm.name, m.provider_model_name) AS name,
-  COALESCE(NULLIF(gm.display_name, ''), m.provider_model_name) AS display_name,
-  gm.config AS global_model_config,
-  gm.supported_capabilities AS global_model_supported_capabilities,
-  m.config AS model_config,
-  m.tiered_pricing,
+  gm.id,
+  gm.name,
+  COALESCE(NULLIF(gm.display_name, ''), gm.name) AS display_name,
+  gm.is_active,
+  CAST(gm.default_price_per_request AS REAL) AS default_price_per_request,
   gm.default_tiered_pricing,
-  m.supports_vision,
-  m.supports_function_calling,
-  m.supports_streaming,
-  m.is_active,
-  gm.is_active AS global_model_is_active
-FROM models m
-JOIN providers p ON p.id = m.provider_id
-LEFT JOIN global_models gm ON gm.id = m.global_model_id
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_public_catalog_model_row).collect()
-    }
+  gm.supported_capabilities,
+  gm.config,
+  COALESCE(gm_stats.provider_count, 0) AS provider_count,
+  COALESCE(gm_stats.active_provider_count, 0) AS active_provider_count,
+  COALESCE(gm.usage_count, 0) AS usage_count,
+  gm.created_at AS created_at_unix_ms,
+  gm.updated_at AS updated_at_unix_secs
+FROM global_models gm
+LEFT JOIN (
+  SELECT
+    m.global_model_id,
+    COUNT(DISTINCT m.provider_id) AS provider_count,
+    COUNT(
+      DISTINCT CASE
+        WHEN m.is_active = 1 AND COALESCE(m.is_available, 1) = 1 AND p.is_active = 1 THEN m.provider_id
+        ELSE NULL
+      END
+    ) AS active_provider_count
+  FROM models m
+  JOIN providers p ON p.id = m.provider_id
+  GROUP BY m.global_model_id
+) gm_stats ON gm_stats.global_model_id = gm.id
+"#;
 
-    async fn load_provider_model_stats(
-        &self,
-    ) -> Result<Vec<StoredProviderModelStats>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
+const COUNT_ADMIN_GLOBAL_MODELS_PREFIX: &str = r#"
+SELECT COUNT(id) AS total
+FROM global_models gm
+"#;
+
+const LIST_ACTIVE_GLOBAL_MODEL_IDS_BY_PROVIDER_IDS_PREFIX: &str = r#"
+SELECT DISTINCT
   provider_id,
-  COUNT(id) AS total_models,
-  SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active_models
+  global_model_id
 FROM models
-GROUP BY provider_id
-ORDER BY provider_id ASC
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_provider_model_stats_row).collect()
-    }
+WHERE provider_id IN (
+"#;
 
-    async fn load_active_global_model_refs(
-        &self,
-    ) -> Result<Vec<StoredProviderActiveGlobalModel>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT DISTINCT provider_id, global_model_id
-FROM models
-WHERE is_active = 1
-  AND global_model_id IS NOT NULL
-ORDER BY provider_id ASC, global_model_id ASC
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_active_global_model_row).collect()
+#[derive(Debug, Clone)]
+pub struct SqliteGlobalModelReadRepository {
+    pool: SqlitePool,
+}
+
+impl SqliteGlobalModelReadRepository {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
     pub async fn create_admin_provider_model(
@@ -480,67 +452,172 @@ impl GlobalModelReadRepository for SqliteGlobalModelReadRepository {
         &self,
         query: &PublicGlobalModelQuery,
     ) -> Result<StoredPublicGlobalModelPage, DataLayerError> {
-        self.load_memory().await?.list_public_models(query).await
+        let mut count_builder = QueryBuilder::<Sqlite>::new(COUNT_PUBLIC_GLOBAL_MODELS_PREFIX);
+        apply_public_model_filters(&mut count_builder, query);
+        let count_row = count_builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?;
+        let total = count_row
+            .try_get::<i64, _>("total")
+            .map(|value| value.max(0) as usize)
+            .map_sql_err()?;
+
+        let mut list_builder = QueryBuilder::<Sqlite>::new(LIST_PUBLIC_GLOBAL_MODELS_PREFIX);
+        apply_public_model_filters(&mut list_builder, query);
+        list_builder
+            .push(" ORDER BY name ASC LIMIT ")
+            .push_bind(query.limit as i64)
+            .push(" OFFSET ")
+            .push_bind(query.offset as i64);
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_public_global_model_row)
+            .collect::<Result<_, _>>()?;
+
+        Ok(StoredPublicGlobalModelPage { items, total })
     }
 
     async fn get_public_model_by_name(
         &self,
         model_name: &str,
     ) -> Result<Option<StoredPublicGlobalModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .get_public_model_by_name(model_name)
-            .await
+        let row = sqlx::query(
+            r#"
+SELECT
+  id,
+  name,
+  display_name,
+  is_active,
+  CAST(default_price_per_request AS REAL) AS default_price_per_request,
+  default_tiered_pricing,
+  supported_capabilities,
+  config,
+  0 AS usage_count
+FROM global_models
+WHERE name = ? AND is_active = 1
+LIMIT 1
+            "#,
+        )
+        .bind(model_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+
+        row.as_ref().map(map_public_global_model_row).transpose()
     }
 
     async fn list_public_catalog_models(
         &self,
         query: &PublicCatalogModelListQuery,
     ) -> Result<Vec<StoredPublicCatalogModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_public_catalog_models(query)
-            .await
+        let mut builder = QueryBuilder::<Sqlite>::new(LIST_PUBLIC_CATALOG_MODELS_PREFIX);
+        apply_public_catalog_model_filters(&mut builder, query.provider_id.as_deref(), None);
+        builder
+            .push(" ORDER BY p.provider_priority ASC, p.name ASC, COALESCE(gm.name, m.provider_model_name) ASC, m.id ASC LIMIT ")
+            .push_bind(query.limit as i64)
+            .push(" OFFSET ")
+            .push_bind(query.offset as i64);
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_public_catalog_model_row).collect()
     }
 
     async fn search_public_catalog_models(
         &self,
         query: &PublicCatalogModelSearchQuery,
     ) -> Result<Vec<StoredPublicCatalogModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .search_public_catalog_models(query)
-            .await
+        let mut builder = QueryBuilder::<Sqlite>::new(LIST_PUBLIC_CATALOG_MODELS_PREFIX);
+        apply_public_catalog_model_filters(
+            &mut builder,
+            query.provider_id.as_deref(),
+            Some(query.search.as_str()),
+        );
+        builder
+            .push(" ORDER BY p.provider_priority ASC, p.name ASC, COALESCE(gm.name, m.provider_model_name) ASC, m.id ASC LIMIT ")
+            .push_bind(query.limit as i64);
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_public_catalog_model_row).collect()
     }
 
     async fn list_admin_global_models(
         &self,
         query: &AdminGlobalModelListQuery,
     ) -> Result<StoredAdminGlobalModelPage, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_admin_global_models(query)
+        let mut count_builder = QueryBuilder::<Sqlite>::new(COUNT_ADMIN_GLOBAL_MODELS_PREFIX);
+        apply_admin_global_model_filters(&mut count_builder, query);
+        let count_row = count_builder
+            .build()
+            .fetch_one(&self.pool)
             .await
+            .map_sql_err()?;
+        let total = count_row
+            .try_get::<i64, _>("total")
+            .map(|value| value.max(0) as usize)
+            .map_sql_err()?;
+
+        let mut list_builder = QueryBuilder::<Sqlite>::new(LIST_ADMIN_GLOBAL_MODELS_PREFIX);
+        apply_admin_global_model_filters(&mut list_builder, query);
+        list_builder
+            .push(" ORDER BY name ASC LIMIT ")
+            .push_bind(query.limit as i64)
+            .push(" OFFSET ")
+            .push_bind(query.offset as i64);
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_admin_global_model_row)
+            .collect::<Result<_, _>>()?;
+        Ok(StoredAdminGlobalModelPage { items, total })
     }
 
     async fn list_admin_provider_models(
         &self,
         query: &AdminProviderModelListQuery,
     ) -> Result<Vec<StoredAdminProviderModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_admin_provider_models(query)
-            .await
+        let mut builder = QueryBuilder::<Sqlite>::new(LIST_ADMIN_PROVIDER_MODELS_PREFIX);
+        builder
+            .push(" WHERE m.provider_id = ")
+            .push_bind(query.provider_id.trim().to_string());
+        if let Some(is_active) = query.is_active {
+            builder.push(" AND m.is_active = ").push_bind(is_active);
+        }
+        builder
+            .push(" ORDER BY m.created_at DESC, m.id ASC LIMIT ")
+            .push_bind(query.limit as i64)
+            .push(" OFFSET ")
+            .push_bind(query.offset as i64);
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_admin_provider_model_row).collect()
     }
 
     async fn list_admin_provider_available_source_models(
         &self,
         provider_id: &str,
     ) -> Result<Vec<StoredAdminProviderModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_admin_provider_available_source_models(provider_id)
-            .await
+        let rows = sqlx::query(&format!(
+            r#"
+{LIST_ADMIN_PROVIDER_MODELS_PREFIX}
+WHERE m.provider_id = ?
+  AND m.is_active = 1
+  AND gm.is_active = 1
+ORDER BY gm.name ASC, m.created_at DESC, m.id ASC
+            "#
+        ))
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_admin_provider_model_row).collect()
     }
 
     async fn get_admin_provider_model(
@@ -548,60 +625,111 @@ impl GlobalModelReadRepository for SqliteGlobalModelReadRepository {
         provider_id: &str,
         model_id: &str,
     ) -> Result<Option<StoredAdminProviderModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .get_admin_provider_model(provider_id, model_id)
-            .await
+        let row = sqlx::query(&format!(
+            r#"
+{LIST_ADMIN_PROVIDER_MODELS_PREFIX}
+WHERE m.provider_id = ?
+  AND m.id = ?
+LIMIT 1
+            "#
+        ))
+        .bind(provider_id)
+        .bind(model_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+
+        row.as_ref().map(map_admin_provider_model_row).transpose()
     }
 
     async fn get_admin_global_model_by_id(
         &self,
         global_model_id: &str,
     ) -> Result<Option<StoredAdminGlobalModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .get_admin_global_model_by_id(global_model_id)
-            .await
+        let row = sqlx::query(&format!(
+            r#"
+{LIST_ADMIN_GLOBAL_MODELS_PREFIX}
+WHERE gm.id = ?
+LIMIT 1
+            "#
+        ))
+        .bind(global_model_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+
+        row.as_ref().map(map_admin_global_model_row).transpose()
     }
 
     async fn get_admin_global_model_by_name(
         &self,
         model_name: &str,
     ) -> Result<Option<StoredAdminGlobalModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .get_admin_global_model_by_name(model_name)
-            .await
+        let row = sqlx::query(&format!(
+            r#"
+{LIST_ADMIN_GLOBAL_MODELS_PREFIX}
+WHERE gm.name = ?
+LIMIT 1
+            "#
+        ))
+        .bind(model_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+
+        row.as_ref().map(map_admin_global_model_row).transpose()
     }
 
     async fn list_admin_provider_models_by_global_model_id(
         &self,
         global_model_id: &str,
     ) -> Result<Vec<StoredAdminProviderModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_admin_provider_models_by_global_model_id(global_model_id)
-            .await
+        let rows = sqlx::query(&format!(
+            r#"
+{LIST_ADMIN_PROVIDER_MODELS_PREFIX}
+WHERE m.global_model_id = ?
+ORDER BY m.created_at DESC, m.id ASC
+            "#
+        ))
+        .bind(global_model_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_admin_provider_model_row).collect()
     }
 
     async fn list_provider_model_stats(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderModelStats>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_provider_model_stats(provider_ids)
-            .await
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut builder = build_provider_id_list_query(
+            LIST_PROVIDER_MODEL_STATS_PREFIX,
+            provider_ids,
+            ")\nGROUP BY provider_id\nORDER BY provider_id ASC",
+        );
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_provider_model_stats_row).collect()
     }
 
     async fn list_active_global_model_ids_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderActiveGlobalModel>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_active_global_model_ids_by_provider_ids(provider_ids)
-            .await
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut builder = build_provider_id_list_query(
+            LIST_ACTIVE_GLOBAL_MODEL_IDS_BY_PROVIDER_IDS_PREFIX,
+            provider_ids,
+            ")\nAND is_active = 1\nAND global_model_id IS NOT NULL\nORDER BY provider_id ASC, global_model_id ASC",
+        );
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_active_global_model_row).collect()
     }
 }
 
@@ -705,6 +833,100 @@ fn first_tier_price(value: Option<&serde_json::Value>, key: &str) -> Option<f64>
         .and_then(serde_json::Value::as_f64)
 }
 
+fn apply_public_model_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    query: &PublicGlobalModelQuery,
+) {
+    builder.push(" WHERE ");
+    match query.is_active {
+        Some(is_active) => {
+            builder.push("is_active = ").push_bind(is_active);
+        }
+        None => {
+            builder.push("is_active = 1");
+        }
+    }
+
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let pattern = format!("%{}%", search.to_ascii_lowercase());
+        builder
+            .push(" AND (LOWER(name) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR LOWER(display_name) LIKE ")
+            .push_bind(pattern)
+            .push(")");
+    }
+}
+
+fn apply_admin_global_model_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    query: &AdminGlobalModelListQuery,
+) {
+    builder.push(" WHERE 1=1");
+    if let Some(is_active) = query.is_active {
+        builder.push(" AND gm.is_active = ").push_bind(is_active);
+    }
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let pattern = format!("%{}%", search.to_ascii_lowercase());
+        builder
+            .push(" AND (LOWER(gm.name) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR LOWER(gm.display_name) LIKE ")
+            .push_bind(pattern)
+            .push(")");
+    }
+}
+
+fn apply_public_catalog_model_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    provider_id: Option<&str>,
+    search: Option<&str>,
+) {
+    builder.push(" WHERE m.is_active = 1 AND COALESCE(m.is_available, 1) = 1 AND p.is_active = 1 AND COALESCE(gm.is_active, 1) = 1");
+
+    if let Some(provider_id) = provider_id.map(str::trim).filter(|value| !value.is_empty()) {
+        builder
+            .push(" AND m.provider_id = ")
+            .push_bind(provider_id.to_string());
+    }
+
+    if let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) {
+        let pattern = format!("%{}%", search.to_ascii_lowercase());
+        builder
+            .push(" AND (LOWER(m.provider_model_name) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR LOWER(gm.name) LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR LOWER(gm.display_name) LIKE ")
+            .push_bind(pattern)
+            .push(")");
+    }
+}
+
+fn build_provider_id_list_query<'a>(
+    prefix: &'static str,
+    provider_ids: &'a [String],
+    suffix: &'static str,
+) -> QueryBuilder<'a, Sqlite> {
+    let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+    let mut separated = builder.separated(", ");
+    for provider_id in provider_ids {
+        separated.push_bind(provider_id);
+    }
+    separated.push_unseparated(suffix);
+    builder
+}
+
 fn map_public_global_model_row(row: &SqliteRow) -> Result<StoredPublicGlobalModel, DataLayerError> {
     StoredPublicGlobalModel::new(
         row.try_get("id").map_sql_err()?,
@@ -726,6 +948,16 @@ fn map_public_global_model_row(row: &SqliteRow) -> Result<StoredPublicGlobalMode
 }
 
 fn map_admin_global_model_row(row: &SqliteRow) -> Result<StoredAdminGlobalModel, DataLayerError> {
+    let provider_count = row
+        .try_get::<i64, _>("provider_count")
+        .map_sql_err()?
+        .max(0) as u64;
+    let active_provider_count = row
+        .try_get::<i64, _>("active_provider_count")
+        .map_sql_err()?
+        .max(0) as u64;
+    let usage_count = row.try_get::<i64, _>("usage_count").map_sql_err()?.max(0) as u64;
+
     StoredAdminGlobalModel::new(
         row.try_get("id").map_sql_err()?,
         row.try_get("name").map_sql_err()?,
@@ -741,9 +973,9 @@ fn map_admin_global_model_row(row: &SqliteRow) -> Result<StoredAdminGlobalModel,
             "global_models.supported_capabilities",
         )?,
         optional_json_from_string(row.try_get("config").map_sql_err()?, "global_models.config")?,
-        0,
-        0,
-        row.try_get::<i64, _>("usage_count").map_sql_err()?.max(0) as u64,
+        provider_count,
+        active_provider_count,
+        usage_count,
         optional_u64(
             row.try_get("created_at_unix_ms").map_sql_err()?,
             "global_models.created_at",
@@ -898,8 +1130,8 @@ mod tests {
     use crate::lifecycle::migrate::run_sqlite_migrations;
     use crate::repository::global_models::{
         AdminGlobalModelListQuery, AdminProviderModelListQuery, CreateAdminGlobalModelRecord,
-        GlobalModelReadRepository, PublicCatalogModelSearchQuery, PublicGlobalModelQuery,
-        UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
+        GlobalModelReadRepository, PublicCatalogModelListQuery, PublicCatalogModelSearchQuery,
+        PublicGlobalModelQuery, UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
     };
     use serde_json::json;
 
@@ -939,6 +1171,18 @@ mod tests {
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].input_price_per_1m, Some(2.0));
 
+        let catalog_list = repository
+            .list_public_catalog_models(&PublicCatalogModelListQuery {
+                provider_id: None,
+                offset: 0,
+                limit: 10,
+            })
+            .await
+            .expect("catalog list should load");
+        assert_eq!(catalog_list.len(), 2);
+        assert_eq!(catalog_list[0].provider_id, "provider-1");
+        assert_eq!(catalog_list[1].provider_id, "provider-3");
+
         let admin_globals = repository
             .list_admin_global_models(&AdminGlobalModelListQuery {
                 offset: 0,
@@ -949,7 +1193,8 @@ mod tests {
             .await
             .expect("admin globals should load");
         assert_eq!(admin_globals.total, 1);
-        assert_eq!(admin_globals.items[0].provider_count, 1);
+        assert_eq!(admin_globals.items[0].provider_count, 3);
+        assert_eq!(admin_globals.items[0].active_provider_count, 2);
 
         let admin_models = repository
             .list_admin_provider_models(&AdminProviderModelListQuery {
@@ -1113,6 +1358,18 @@ mod tests {
         seed_provider(pool).await;
         sqlx::query(
             r#"
+INSERT INTO providers (
+  id, name, provider_type, is_active, provider_priority, created_at, updated_at
+) VALUES
+  ('provider-2', 'Inactive Provider', 'custom', 0, 1, 1, 1),
+  ('provider-3', 'Alpha Provider', 'custom', 1, 20, 1, 1)
+"#,
+        )
+        .execute(pool)
+        .await
+        .expect("extra providers should seed");
+        sqlx::query(
+            r#"
 INSERT INTO global_models (
   id, name, display_name, is_active, default_tiered_pricing,
   supported_capabilities, usage_count, config, created_at, updated_at
@@ -1132,9 +1389,19 @@ INSERT INTO models (
   id, provider_id, global_model_id, provider_model_name, provider_model_mappings,
   supports_vision, supports_function_calling, supports_streaming, is_active,
   is_available, created_at, updated_at
-) VALUES (
+) VALUES
+(
   'model-1', 'provider-1', 'global-1', 'provider-gpt-4.1', '["gpt-4.1"]',
   1, 1, 1, 1, 1, 4, 5
+)
+,
+(
+  'model-2', 'provider-2', 'global-1', 'inactive-provider-gpt-4.1', '["gpt-4.1"]',
+  1, 1, 1, 1, 1, 6, 7
+),
+(
+  'model-3', 'provider-3', 'global-1', 'alpha-provider-gpt-4.1', '["gpt-4.1"]',
+  1, 1, 1, 1, 1, 8, 9
 )
 "#,
         )
@@ -1147,9 +1414,9 @@ INSERT INTO models (
         sqlx::query(
             r#"
 INSERT INTO providers (
-  id, name, provider_type, is_active, created_at, updated_at
+  id, name, provider_type, is_active, provider_priority, created_at, updated_at
 ) VALUES (
-  'provider-1', 'Provider One', 'custom', 1, 1, 1
+  'provider-1', 'Zulu Provider', 'custom', 1, 10, 1, 1
 )
 "#,
         )

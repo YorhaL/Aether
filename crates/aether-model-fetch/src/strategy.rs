@@ -28,6 +28,7 @@ const ANTIGRAVITY_DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.
 const ANTIGRAVITY_PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_BLOCKED_MODELS: &[&str] = &["chat_23310", "chat_20706"];
 const VERTEX_API_BASE_URL: &str = "https://aiplatform.googleapis.com";
+const VERTEX_MODEL_GARDEN_LIST_API_VERSION: &str = "v1beta1";
 const VERTEX_PAGE_SIZE: &str = "100";
 const VERTEX_MAX_PAGES: usize = 20;
 const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -929,14 +930,7 @@ fn iter_vertex_base_urls(transports: &[GatewayProviderTransportSnapshot]) -> Vec
 }
 
 fn build_vertex_google_list_url(base_url: &str, api_key: &str, page_token: Option<&str>) -> String {
-    let path = if base_url.trim_end_matches('/').ends_with("/v1")
-        || base_url.trim_end_matches('/').ends_with("/v1beta")
-    {
-        "/publishers/google/models"
-    } else {
-        "/v1/publishers/google/models"
-    };
-    let url = build_simple_path_url(base_url, path);
+    let url = build_vertex_model_garden_list_url(base_url, "google");
     let mut url = append_query_param(url, "key", api_key);
     url = append_query_param(url, "pageSize", VERTEX_PAGE_SIZE);
     if let Some(page_token) = page_token {
@@ -947,19 +941,27 @@ fn build_vertex_google_list_url(base_url: &str, api_key: &str, page_token: Optio
 
 fn build_vertex_service_account_list_url(
     base_url: &str,
-    project_id: &str,
-    region: &str,
+    _project_id: &str,
+    _region: &str,
     publisher: &str,
     page_token: Option<&str>,
 ) -> String {
-    let path =
-        format!("/v1/projects/{project_id}/locations/{region}/publishers/{publisher}/models");
-    let mut url = build_simple_path_url(base_url, &path);
+    let mut url = build_vertex_model_garden_list_url(base_url, publisher);
     url = append_query_param(url, "pageSize", VERTEX_PAGE_SIZE);
     if let Some(page_token) = page_token {
         url = append_query_param(url, "pageToken", page_token);
     }
     url
+}
+
+fn build_vertex_model_garden_list_url(base_url: &str, publisher: &str) -> String {
+    let trimmed_base = base_url.trim().trim_end_matches('/');
+    let unversioned_base = trimmed_base
+        .strip_suffix("/v1beta1")
+        .or_else(|| trimmed_base.strip_suffix("/v1"))
+        .unwrap_or(trimmed_base);
+    let path = format!("/{VERTEX_MODEL_GARDEN_LIST_API_VERSION}/publishers/{publisher}/models");
+    build_simple_path_url(unversioned_base, &path)
 }
 
 fn build_simple_path_url(base_url: &str, path: &str) -> String {
@@ -1304,7 +1306,10 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::{json, Value};
 
-    use super::{select_model_fetch_strategy, ModelFetchStrategy, ModelFetchStrategyKind};
+    use super::{
+        build_vertex_google_list_url, build_vertex_service_account_list_url,
+        select_model_fetch_strategy, ModelFetchStrategy, ModelFetchStrategyKind,
+    };
     use crate::fetch_models_from_transports;
     use crate::transport::ModelFetchTransportRuntime;
 
@@ -1498,13 +1503,35 @@ mod tests {
         let urls = executed_urls.lock().expect("executed_urls lock");
         assert_eq!(
             urls.as_slice(),
-            &["https://aiplatform.googleapis.com/v1/publishers/google/models?key=vertex-secret&pageSize=100"]
+            &["https://aiplatform.googleapis.com/v1beta1/publishers/google/models?key=vertex-secret&pageSize=100"]
         );
         assert_eq!(outcome.fetched_model_ids, vec!["gemini-3.1-pro-preview"]);
         assert_eq!(outcome.cached_models.len(), 1);
         assert_eq!(
             outcome.cached_models[0]["api_formats"][0].as_str(),
             Some("gemini:generate_content")
+        );
+    }
+
+    #[test]
+    fn vertex_model_fetch_uses_model_garden_list_endpoint() {
+        assert_eq!(
+            build_vertex_google_list_url(
+                "https://aiplatform.googleapis.com/v1",
+                "vertex-secret",
+                None,
+            ),
+            "https://aiplatform.googleapis.com/v1beta1/publishers/google/models?key=vertex-secret&pageSize=100"
+        );
+        assert_eq!(
+            build_vertex_service_account_list_url(
+                "https://aiplatform.googleapis.com",
+                "project-1",
+                "global",
+                "google",
+                Some("page-2"),
+            ),
+            "https://aiplatform.googleapis.com/v1beta1/publishers/google/models?pageSize=100&pageToken=page-2"
         );
     }
 

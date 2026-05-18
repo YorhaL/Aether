@@ -24,14 +24,9 @@ pub(crate) async fn resolve_wallet_auth_gate(
             auth_snapshot.api_key_is_standalone,
         )
         .await?;
-    let is_admin = wallet_auth_allows_admin_bypass(
-        &auth_snapshot.user_role,
-        auth_snapshot.api_key_is_standalone,
-    );
 
     let decision = match wallet.as_ref() {
-        Some(wallet) => map_wallet_snapshot(wallet).access_decision(is_admin),
-        None if is_admin => WalletAccessDecision::allowed(None),
+        Some(wallet) => map_wallet_snapshot(wallet).access_decision(false),
         None => WalletAccessDecision::wallet_unavailable(None),
     };
     if !auth_snapshot.api_key_is_standalone {
@@ -83,19 +78,50 @@ fn map_wallet_snapshot(snapshot: &StoredWalletSnapshot) -> WalletSnapshot {
     }
 }
 
-fn wallet_auth_allows_admin_bypass(user_role: &str, api_key_is_standalone: bool) -> bool {
-    user_role.eq_ignore_ascii_case("admin") && !api_key_is_standalone
-}
-
 #[cfg(test)]
 mod tests {
-    use aether_data::repository::wallet::StoredWalletSnapshot;
+    use std::sync::Arc;
+
+    use aether_data::repository::usage::InMemoryUsageReadRepository;
+    use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
+    use aether_data_contracts::repository::billing::{
+        BillingReadRepository, StoredBillingModelContext, UserDailyQuotaAvailabilityRecord,
+    };
+    use aether_data_contracts::DataLayerError;
     use aether_wallet::{WalletAccessFailure, WalletLimitMode, WalletSnapshot, WalletStatus};
+    use async_trait::async_trait;
 
     use super::{
-        local_rejection_from_wallet_access, map_wallet_snapshot, wallet_auth_allows_admin_bypass,
+        local_rejection_from_wallet_access, map_wallet_snapshot, resolve_wallet_auth_gate,
     };
     use crate::control::GatewayLocalAuthRejection;
+    use crate::data::auth::GatewayAuthApiKeySnapshot;
+    use crate::data::GatewayDataState;
+    use crate::AppState;
+
+    #[derive(Debug)]
+    struct FixedQuotaBillingReadRepository {
+        quota: Option<UserDailyQuotaAvailabilityRecord>,
+    }
+
+    #[async_trait]
+    impl BillingReadRepository for FixedQuotaBillingReadRepository {
+        async fn find_model_context(
+            &self,
+            _provider_id: &str,
+            _provider_api_key_id: Option<&str>,
+            _global_model_name: &str,
+        ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+            Ok(None)
+        }
+
+        async fn find_user_daily_quota_availability(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<UserDailyQuotaAvailabilityRecord>, DataLayerError> {
+            Ok(self.quota.clone())
+        }
+    }
 
     #[test]
     fn maps_wallet_snapshot_and_derives_balance_denied() {
@@ -145,8 +171,143 @@ mod tests {
     }
 
     #[test]
-    fn standalone_key_never_uses_admin_wallet_bypass() {
-        assert!(wallet_auth_allows_admin_bypass("admin", false));
-        assert!(!wallet_auth_allows_admin_bypass("admin", true));
+    fn admin_user_with_empty_finite_wallet_is_balance_denied() {
+        let stored = StoredWalletSnapshot::new(
+            "wallet-1".to_string(),
+            Some("admin-1".to_string()),
+            None,
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            100,
+        )
+        .expect("wallet should build");
+
+        let decision = map_wallet_snapshot(&stored).access_decision(true);
+
+        assert_eq!(decision.failure, Some(WalletAccessFailure::BalanceDenied));
+    }
+
+    #[tokio::test]
+    async fn ordinary_user_key_without_quota_denies_empty_wallet() {
+        let state = state_with_wallet_and_quota(empty_user_wallet(), None);
+        let auth_snapshot = ordinary_user_api_key_snapshot();
+
+        let decision = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .expect("wallet gate should resolve")
+            .expect("wallet gate should return a decision");
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.failure, Some(WalletAccessFailure::BalanceDenied));
+        assert_eq!(
+            local_rejection_from_wallet_access(&decision),
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(0.0),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_user_key_with_remaining_quota_allows_empty_wallet() {
+        let state = state_with_wallet_and_quota(
+            empty_user_wallet(),
+            Some(quota_availability(10.0, 4.0, false)),
+        );
+        let auth_snapshot = ordinary_user_api_key_snapshot();
+
+        let decision = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .expect("wallet gate should resolve")
+            .expect("wallet gate should return a decision");
+
+        assert!(decision.allowed);
+        assert_eq!(decision.failure, None);
+        assert_eq!(decision.remaining, Some(4.0));
+    }
+
+    fn state_with_wallet_and_quota(
+        wallet: StoredWalletSnapshot,
+        quota: Option<UserDailyQuotaAvailabilityRecord>,
+    ) -> AppState {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let billing_repository: Arc<dyn BillingReadRepository> =
+            Arc::new(FixedQuotaBillingReadRepository { quota });
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![wallet]));
+        let data = GatewayDataState::with_usage_billing_and_wallet_for_tests(
+            usage_repository,
+            billing_repository,
+            wallet_repository,
+        );
+        AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data)
+    }
+
+    fn empty_user_wallet() -> StoredWalletSnapshot {
+        StoredWalletSnapshot::new(
+            "wallet-user-1".to_string(),
+            Some("user-1".to_string()),
+            None,
+            0.0,
+            0.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            100,
+        )
+        .expect("wallet should build")
+    }
+
+    fn quota_availability(
+        total_quota_usd: f64,
+        remaining_usd: f64,
+        allow_wallet_overage: bool,
+    ) -> UserDailyQuotaAvailabilityRecord {
+        UserDailyQuotaAvailabilityRecord {
+            has_active_daily_quota: true,
+            total_quota_usd,
+            used_usd: total_quota_usd - remaining_usd,
+            remaining_usd,
+            allow_wallet_overage,
+        }
+    }
+
+    fn ordinary_user_api_key_snapshot() -> GatewayAuthApiKeySnapshot {
+        GatewayAuthApiKeySnapshot {
+            user_id: "user-1".to_string(),
+            username: "ordinary-user".to_string(),
+            email: Some("ordinary@example.com".to_string()),
+            user_role: "user".to_string(),
+            user_auth_source: "local".to_string(),
+            user_is_active: true,
+            user_is_deleted: false,
+            user_rate_limit: None,
+            user_allowed_providers: None,
+            user_allowed_api_formats: None,
+            user_allowed_models: None,
+            api_key_id: "api-key-1".to_string(),
+            api_key_name: Some("admin-created-key".to_string()),
+            api_key_is_active: true,
+            api_key_is_locked: false,
+            api_key_is_standalone: false,
+            api_key_rate_limit: None,
+            api_key_concurrent_limit: None,
+            api_key_expires_at_unix_secs: None,
+            api_key_allowed_providers: None,
+            api_key_allowed_api_formats: None,
+            api_key_allowed_models: None,
+            currently_usable: true,
+        }
     }
 }

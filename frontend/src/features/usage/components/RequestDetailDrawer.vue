@@ -159,6 +159,47 @@
               v-else-if="detail"
               class="space-y-4"
             >
+              <!-- 执行失败原因：优先展示本地调度/运行时失败摘要 -->
+              <Card
+                v-if="failureNotice"
+                class="border-red-200 bg-red-50/80 shadow-sm dark:border-red-900/60 dark:bg-red-950/30"
+              >
+                <div class="p-3 sm:p-4 flex gap-3">
+                  <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 dark:bg-red-900/50 dark:text-red-300">
+                    <AlertTriangle class="h-4 w-4" />
+                  </div>
+                  <div class="min-w-0 flex-1 space-y-2">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <h4 class="text-sm font-semibold text-red-950 dark:text-red-100">
+                        {{ failureNotice.title }}
+                      </h4>
+                      <Badge
+                        v-if="failureNotice.isSchedulingFailure"
+                        variant="outline"
+                        class="border-red-300 bg-white/60 text-[10px] text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
+                      >
+                        调度阶段
+                      </Badge>
+                    </div>
+                    <p class="text-sm leading-6 text-red-900 dark:text-red-100">
+                      {{ failureNotice.message }}
+                    </p>
+                    <div
+                      v-if="failureNotice.meta.length > 0"
+                      class="flex flex-wrap gap-1.5"
+                    >
+                      <span
+                        v-for="item in failureNotice.meta"
+                        :key="item"
+                        class="rounded-full border border-red-200 bg-white/70 px-2 py-0.5 text-[11px] font-mono text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
+                      >
+                        {{ item }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </Card>
+
               <!-- 费用与性能概览 -->
               <Card>
                 <div class="p-3 sm:p-4">
@@ -701,7 +742,7 @@ import Separator from '@/components/ui/separator.vue'
 import Skeleton from '@/components/ui/skeleton.vue'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
-import { Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
+import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
 import { dashboardApi, type RequestDetail, type RequestErrorDomain } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
@@ -721,6 +762,7 @@ import {
   resolveDisplayRequestStatus,
   resolveUsageStreamLabelSegments,
 } from '../utils/status'
+import { resolveRequestFailureNotice } from '../utils/errorNotice'
 
 // 子组件
 import RequestHeadersContent from './RequestDetailDrawer/RequestHeadersContent.vue'
@@ -1022,6 +1064,8 @@ const metadataPanelData = computed<Record<string, unknown> | null>(() => {
 
   return Object.keys(merged).length > 0 ? merged : null
 })
+
+const failureNotice = computed(() => resolveRequestFailureNotice(detail.value))
 
 const settlementInfo = computed<JsonRecord | null>(() =>
   asRecord(detail.value?.settlement ?? null),
@@ -1826,6 +1870,7 @@ async function ensureBodyContentLoaded() {
       failure_summary: response.failure_summary,
       errors: response.errors,
       error_flow: response.error_flow,
+      scheduling_failure: response.scheduling_failure,
     }
     bodiesLoadedForRequestId.value = cacheKey
   } catch (err) {
@@ -1872,12 +1917,13 @@ async function loadDetail(id: string, silent = false) {
       provider_request_body: sameRequest ? previousDetail?.provider_request_body : undefined,
       response_body: sameRequest ? previousDetail?.response_body : undefined,
       client_response_body: sameRequest ? previousDetail?.client_response_body : undefined,
-      request_error: sameRequest ? (previousDetail?.request_error ?? response.request_error) : response.request_error,
-      upstream_error: sameRequest ? (previousDetail?.upstream_error ?? response.upstream_error) : response.upstream_error,
-      client_error: sameRequest ? (previousDetail?.client_error ?? response.client_error) : response.client_error,
-      failure_summary: sameRequest ? (previousDetail?.failure_summary ?? response.failure_summary) : response.failure_summary,
-      errors: sameRequest ? (previousDetail?.errors ?? response.errors) : response.errors,
-      error_flow: sameRequest ? (previousDetail?.error_flow ?? response.error_flow) : response.error_flow,
+      request_error: response.request_error,
+      upstream_error: response.upstream_error,
+      client_error: response.client_error,
+      failure_summary: response.failure_summary,
+      errors: response.errors,
+      error_flow: response.error_flow,
+      scheduling_failure: response.scheduling_failure,
     }
     bodiesLoadedForRequestId.value = sameRequest ? bodiesLoadedForRequestId.value : null
 

@@ -1,11 +1,11 @@
 use super::{
     build_auth_error_response, build_auth_json_response, build_auth_wallet_summary_payload, http,
     query_param_value, resolve_authenticated_local_user, unix_secs_to_rfc3339, AppState, Body,
-    GatewayError, GatewayPublicRequestContext, Response, WALLET_LEGACY_TIMEZONE,
+    GatewayPublicRequestContext, Response, WALLET_LEGACY_TIMEZONE,
 };
 use crate::handlers::shared::round_to;
 use aether_data_contracts::repository::usage::UsageSettledCostSummaryQuery;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use serde_json::json;
 
 const WALLET_TODAY_COST_UNAVAILABLE_DETAIL: &str = "钱包今日费用数据暂不可用";
@@ -143,6 +143,26 @@ pub(super) fn wallet_today_billing_date_string() -> String {
         .to_string()
 }
 
+fn wallet_today_usage_window() -> Result<(String, String, u64, u64), String> {
+    let offset = wallet_fixed_offset();
+    let today = Utc::now().with_timezone(&offset).date_naive();
+    let Some(local_start_naive) = today.and_hms_opt(0, 0, 0) else {
+        return Err("wallet today start is invalid".to_string());
+    };
+    let Some(local_start) = offset.from_local_datetime(&local_start_naive).single() else {
+        return Err("wallet today local start is ambiguous".to_string());
+    };
+    let local_end = local_start + chrono::Duration::days(1);
+    let start_unix_secs = local_start.timestamp().max(0) as u64;
+    let end_unix_secs = local_end.timestamp().max(0) as u64;
+    Ok((
+        today.to_string(),
+        WALLET_LEGACY_TIMEZONE.to_string(),
+        start_unix_secs,
+        end_unix_secs,
+    ))
+}
+
 pub(super) fn build_wallet_daily_usage_payload(
     id: Option<String>,
     date: String,
@@ -191,6 +211,43 @@ pub(super) fn build_wallet_zero_today_entry() -> serde_json::Value {
         Some(Utc::now().to_rfc3339()),
         true,
     )
+}
+
+pub(super) async fn build_wallet_live_today_usage_payload_for_user(
+    state: &AppState,
+    user_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    if !state.has_usage_data_reader() {
+        return Ok(None);
+    }
+    let (date, timezone, start_unix_secs, end_unix_secs) = wallet_today_usage_window()?;
+    let summary = state
+        .summarize_usage_settled_cost(&UsageSettledCostSummaryQuery {
+            created_from_unix_secs: start_unix_secs,
+            created_until_unix_secs: end_unix_secs,
+            user_id: Some(user_id.to_string()),
+        })
+        .await
+        .map_err(|err| format!("wallet today cost lookup failed: {err:?}"))?;
+    Ok(Some(build_wallet_daily_usage_payload(
+        None,
+        date,
+        timezone,
+        summary.total_cost_usd,
+        summary.total_requests,
+        summary.input_tokens,
+        summary.output_tokens,
+        summary.cache_creation_tokens,
+        summary.cache_read_tokens,
+        summary
+            .first_finalized_at_unix_secs
+            .and_then(unix_secs_to_rfc3339),
+        summary
+            .last_finalized_at_unix_secs
+            .and_then(unix_secs_to_rfc3339),
+        Some(Utc::now().to_rfc3339()),
+        true,
+    )))
 }
 
 pub(super) fn wallet_transaction_payload_from_record(
@@ -253,65 +310,17 @@ pub(super) async fn handle_wallet_today_cost(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let today = Utc::now().date_naive();
-    let Some(start_of_day) = today.and_hms_opt(0, 0, 0) else {
-        return build_auth_error_response(
-            http::StatusCode::INTERNAL_SERVER_ERROR,
-            "wallet today start is invalid",
+    match build_wallet_live_today_usage_payload_for_user(state, &auth.user.id).await {
+        Ok(Some(payload)) => build_auth_json_response(http::StatusCode::OK, payload, None),
+        Ok(None) => build_auth_error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            WALLET_TODAY_COST_UNAVAILABLE_DETAIL,
             false,
-        );
-    };
-    let start_unix_secs = u64::try_from(
-        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(start_of_day, chrono::Utc)
-            .timestamp(),
-    )
-    .unwrap_or_default();
-    let end_unix_secs = start_unix_secs.saturating_add(24 * 3600);
-
-    let summary = match state
-        .summarize_usage_settled_cost(&UsageSettledCostSummaryQuery {
-            created_from_unix_secs: start_unix_secs,
-            created_until_unix_secs: end_unix_secs,
-            user_id: Some(auth.user.id.clone()),
-        })
-        .await
-    {
-        Ok(value) => value,
-        Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("wallet today cost lookup failed: {err:?}"),
-                false,
-            )
+        ),
+        Err(detail) => {
+            build_auth_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, detail, false)
         }
-    };
-
-    let first_finalized_at = summary
-        .first_finalized_at_unix_secs
-        .and_then(unix_secs_to_rfc3339);
-    let last_finalized_at = summary
-        .last_finalized_at_unix_secs
-        .and_then(unix_secs_to_rfc3339);
-
-    build_auth_json_response(
-        http::StatusCode::OK,
-        json!({
-            "id": serde_json::Value::Null,
-            "date": today.to_string(),
-            "timezone": "UTC",
-            "total_cost": round_to(summary.total_cost_usd, 6),
-            "total_requests": summary.total_requests,
-            "input_tokens": summary.input_tokens,
-            "output_tokens": summary.output_tokens,
-            "cache_creation_tokens": summary.cache_creation_tokens,
-            "cache_read_tokens": summary.cache_read_tokens,
-            "first_finalized_at": first_finalized_at,
-            "last_finalized_at": last_finalized_at,
-            "aggregated_at": Utc::now().to_rfc3339(),
-            "is_today": true,
-        }),
-        None,
-    )
+    }
 }
 
 pub(super) async fn handle_wallet_transactions(

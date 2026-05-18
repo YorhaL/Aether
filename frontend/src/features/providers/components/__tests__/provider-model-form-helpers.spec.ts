@@ -49,7 +49,7 @@ describe('provider model form embedding helpers', () => {
     expect('supports_embedding' in payload).toBe(false)
   })
 
-  it('uses manually supplied provider model name in create payload', () => {
+  it('uses supplied provider model name in create payload', () => {
     const payload = buildProviderModelCreatePayload({
       globalModelId: 'gm-local-manual',
       providerModelName: 'intranet-chat-model-v1',

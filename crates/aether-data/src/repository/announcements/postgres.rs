@@ -1,15 +1,15 @@
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use futures_util::TryStreamExt;
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::types::{
     AnnouncementListQuery, AnnouncementReadRepository, AnnouncementWriteRepository,
     CreateAnnouncementRecord, StoredAnnouncement, StoredAnnouncementPage, UpdateAnnouncementRecord,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
+use aether_data_query::{push_eq, push_limit, push_limit_offset, WhereClause};
 
-const FIND_ANNOUNCEMENT_BY_ID_SQL: &str = r#"
+const ANNOUNCEMENT_SELECT: &str = r#"
 SELECT
   a.id,
   a.title,
@@ -26,63 +26,6 @@ SELECT
   EXTRACT(EPOCH FROM a.updated_at)::bigint AS updated_at_unix_secs
 FROM announcements a
 LEFT JOIN users u ON u.id = a.author_id
-WHERE a.id = $1
-LIMIT 1
-"#;
-
-const LIST_ANNOUNCEMENTS_SQL: &str = r#"
-SELECT
-  a.id,
-  a.title,
-  a.content,
-  a.type,
-  a.priority,
-  a.is_active,
-  a.is_pinned,
-  a.author_id,
-  u.username AS author_username,
-  EXTRACT(EPOCH FROM a.start_time)::bigint AS start_time_unix_secs,
-  EXTRACT(EPOCH FROM a.end_time)::bigint AS end_time_unix_secs,
-  EXTRACT(EPOCH FROM a.created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM a.updated_at)::bigint AS updated_at_unix_secs
-FROM announcements a
-LEFT JOIN users u ON u.id = a.author_id
-WHERE (
-  NOT $1 OR (
-    a.is_active = TRUE
-    AND (a.start_time IS NULL OR a.start_time <= TO_TIMESTAMP($2::double precision))
-    AND (a.end_time IS NULL OR a.end_time >= TO_TIMESTAMP($2::double precision))
-  )
-)
-ORDER BY a.is_pinned DESC, a.priority DESC, a.created_at DESC, a.id ASC
-OFFSET $3
-LIMIT $4
-"#;
-
-const COUNT_ANNOUNCEMENTS_SQL: &str = r#"
-SELECT COUNT(a.id) AS total
-FROM announcements a
-WHERE (
-  NOT $1 OR (
-    a.is_active = TRUE
-    AND (a.start_time IS NULL OR a.start_time <= TO_TIMESTAMP($2::double precision))
-    AND (a.end_time IS NULL OR a.end_time >= TO_TIMESTAMP($2::double precision))
-  )
-)
-"#;
-
-const COUNT_UNREAD_ACTIVE_ANNOUNCEMENTS_SQL: &str = r#"
-SELECT COUNT(a.id) AS total
-FROM announcements a
-WHERE a.is_active = TRUE
-  AND (a.start_time IS NULL OR a.start_time <= TO_TIMESTAMP($2::double precision))
-  AND (a.end_time IS NULL OR a.end_time >= TO_TIMESTAMP($2::double precision))
-  AND NOT EXISTS (
-    SELECT 1
-    FROM announcement_reads r
-    WHERE r.user_id = $1
-      AND r.announcement_id = a.id
-  )
 "#;
 
 const CREATE_ANNOUNCEMENT_SQL: &str = r#"
@@ -193,6 +136,25 @@ impl SqlxAnnouncementReadRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    fn apply_active_filter(
+        builder: &mut QueryBuilder<'_, Postgres>,
+        where_clause: &mut WhereClause,
+        active_only: bool,
+        now_unix_secs: u64,
+    ) {
+        if !active_only {
+            return;
+        }
+
+        where_clause.push_next(builder);
+        builder
+            .push("a.is_active = TRUE AND (a.start_time IS NULL OR a.start_time <= TO_TIMESTAMP(")
+            .push_bind(now_unix_secs as f64)
+            .push("::double precision)) AND (a.end_time IS NULL OR a.end_time >= TO_TIMESTAMP(")
+            .push_bind(now_unix_secs as f64)
+            .push("::double precision))");
+    }
 }
 
 #[async_trait]
@@ -201,8 +163,17 @@ impl AnnouncementReadRepository for SqlxAnnouncementReadRepository {
         &self,
         announcement_id: &str,
     ) -> Result<Option<StoredAnnouncement>, DataLayerError> {
-        let row = sqlx::query(FIND_ANNOUNCEMENT_BY_ID_SQL)
-            .bind(announcement_id)
+        let mut builder = QueryBuilder::<Postgres>::new(ANNOUNCEMENT_SELECT);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "a.id",
+            announcement_id.to_string(),
+        );
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -214,27 +185,42 @@ impl AnnouncementReadRepository for SqlxAnnouncementReadRepository {
         query: &AnnouncementListQuery,
     ) -> Result<StoredAnnouncementPage, DataLayerError> {
         let now_unix_secs = query.now_unix_secs.unwrap_or_else(current_unix_secs);
-        let total_row = sqlx::query(COUNT_ANNOUNCEMENTS_SQL)
-            .bind(query.active_only)
-            .bind(now_unix_secs as f64)
+        let mut count_builder =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(a.id) AS total FROM announcements a");
+        let mut count_where = WhereClause::new();
+        Self::apply_active_filter(
+            &mut count_builder,
+            &mut count_where,
+            query.active_only,
+            now_unix_secs,
+        );
+        let total = count_builder
+            .build_query_scalar::<i64>()
             .fetch_one(&self.pool)
             .await
-            .map_postgres_err()?;
-        let total = total_row
-            .try_get::<i64, _>("total")
             .map_postgres_err()?
             .max(0) as u64;
 
-        let mut rows = sqlx::query(LIST_ANNOUNCEMENTS_SQL)
-            .bind(query.active_only)
-            .bind(now_unix_secs as f64)
-            .bind(query.offset as i64)
-            .bind(query.limit as i64)
-            .fetch(&self.pool);
-        let mut items = Vec::new();
-        while let Some(row) = rows.try_next().await.map_postgres_err()? {
-            items.push(map_announcement_row(&row)?);
-        }
+        let mut list_builder = QueryBuilder::<Postgres>::new(ANNOUNCEMENT_SELECT);
+        let mut list_where = WhereClause::new();
+        Self::apply_active_filter(
+            &mut list_builder,
+            &mut list_where,
+            query.active_only,
+            now_unix_secs,
+        );
+        list_builder
+            .push(" ORDER BY a.is_pinned DESC, a.priority DESC, a.created_at DESC, a.id ASC");
+        push_limit_offset(&mut list_builder, query.limit as i64, query.offset as i64);
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+        let items = rows
+            .iter()
+            .map(map_announcement_row)
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(StoredAnnouncementPage { items, total })
     }
@@ -244,13 +230,22 @@ impl AnnouncementReadRepository for SqlxAnnouncementReadRepository {
         user_id: &str,
         now_unix_secs: u64,
     ) -> Result<u64, DataLayerError> {
-        let row = sqlx::query(COUNT_UNREAD_ACTIVE_ANNOUNCEMENTS_SQL)
-            .bind(user_id)
-            .bind(now_unix_secs as f64)
+        let mut builder =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(a.id) AS total FROM announcements a");
+        let mut where_clause = WhereClause::new();
+        Self::apply_active_filter(&mut builder, &mut where_clause, true, now_unix_secs);
+        where_clause.push_next(&mut builder);
+        builder
+            .push("NOT EXISTS (SELECT 1 FROM announcement_reads r WHERE r.user_id = ")
+            .push_bind(user_id.to_string())
+            .push(" AND r.announcement_id = a.id)");
+        let total = builder
+            .build_query_scalar::<i64>()
             .fetch_one(&self.pool)
             .await
-            .map_postgres_err()?;
-        Ok(row.try_get::<i64, _>("total").map_postgres_err()?.max(0) as u64)
+            .map_postgres_err()?
+            .max(0) as u64;
+        Ok(total)
     }
 }
 

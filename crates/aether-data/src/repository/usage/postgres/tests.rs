@@ -456,7 +456,17 @@ fn usage_sql_aggregate_usage_audits_supports_daily_model_and_provider_aggregates
 fn usage_sql_provider_aggregation_excludes_unknown_provider_labels() {
     let source = include_str!("mod.rs");
     assert!(source.contains(
-        r#"lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')"#
+        r#"const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_id, '')) <> ''"#
+    ));
+    assert!(source.contains("LEFT JOIN providers AS provider_by_id"));
+    assert!(source.contains("provider_by_id.id = BTRIM(\"usage\".provider_id)"));
+    assert!(
+        source.contains("COALESCE(\n      provider_by_id.id,\n      BTRIM(\"usage\".provider_id)")
+    );
+    assert!(source.contains("COALESCE(\n      provider_by_id.name,"));
+    assert!(!source.contains("provider_by_name.name = BTRIM(\"usage\".provider_name)"));
+    assert!(source.contains(
+        "if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {\n            return self.aggregate_usage_audits_raw(query).await;"
     ));
     assert!(source.contains("exclude_reserved_provider_labels"));
     assert!(source.contains(

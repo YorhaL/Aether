@@ -10,6 +10,9 @@ use super::{
 use crate::driver::sqlite::SqlitePool;
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
+use aether_data_query::{
+    push_ci_contains, push_eq, push_limit, push_limit_offset, SqlDialect, WhereClause,
+};
 
 const RUN_COLUMNS: &str = r#"
 SELECT
@@ -57,46 +60,29 @@ impl SqliteBackgroundTaskRepository {
     }
 
     fn apply_run_filter(builder: &mut QueryBuilder<'_, Sqlite>, query: &BackgroundTaskListQuery) {
-        let mut has_where = false;
+        let mut where_clause = WhereClause::new();
         if let Some(kind) = query.kind {
-            if !has_where {
-                builder.push(" WHERE ");
-                has_where = true;
-            } else {
-                builder.push(" AND ");
-            }
-            builder.push("kind = ").push_bind(kind.as_database());
+            push_eq(builder, &mut where_clause, "kind", kind.as_database());
         }
         if let Some(status) = query.status {
-            if !has_where {
-                builder.push(" WHERE ");
-                has_where = true;
-            } else {
-                builder.push(" AND ");
-            }
-            builder.push("status = ").push_bind(status.as_database());
+            push_eq(builder, &mut where_clause, "status", status.as_database());
         }
         if let Some(trigger) = query.trigger.as_deref() {
-            if !has_where {
-                builder.push(" WHERE ");
-                has_where = true;
-            } else {
-                builder.push(" AND ");
-            }
-            builder
-                .push("\"trigger\" = ")
-                .push_bind(trigger.to_string());
+            push_eq(
+                builder,
+                &mut where_clause,
+                &SqlDialect::Sqlite.quote_ident("trigger"),
+                trigger.to_string(),
+            );
         }
         if let Some(task_key_substring) = query.task_key_substring.as_deref() {
-            if !has_where {
-                builder.push(" WHERE ");
-            } else {
-                builder.push(" AND ");
-            }
-            builder.push("LOWER(task_key) LIKE ").push_bind(format!(
-                "%{}%",
-                task_key_substring.trim().to_ascii_lowercase()
-            ));
+            push_ci_contains(
+                builder,
+                &mut where_clause,
+                SqlDialect::Sqlite,
+                "task_key",
+                task_key_substring,
+            );
         }
     }
 }
@@ -107,8 +93,12 @@ impl BackgroundTaskReadRepository for SqliteBackgroundTaskRepository {
         &self,
         run_id: &str,
     ) -> Result<Option<StoredBackgroundTaskRun>, DataLayerError> {
-        let row = sqlx::query(&format!("{RUN_COLUMNS} WHERE id = ? LIMIT 1"))
-            .bind(run_id)
+        let mut builder = QueryBuilder::<Sqlite>::new(RUN_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(&mut builder, &mut where_clause, "id", run_id.to_string());
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
@@ -131,12 +121,12 @@ impl BackgroundTaskReadRepository for SqliteBackgroundTaskRepository {
 
         let mut builder = QueryBuilder::<Sqlite>::new(RUN_COLUMNS);
         Self::apply_run_filter(&mut builder, query);
-        builder
-            .push(" ORDER BY created_at_unix_secs DESC, updated_at_unix_secs DESC")
-            .push(" LIMIT ")
-            .push_bind(i64_from_usize(limit, "run limit")?)
-            .push(" OFFSET ")
-            .push_bind(i64_from_usize(query.offset, "run offset")?);
+        builder.push(" ORDER BY created_at_unix_secs DESC, updated_at_unix_secs DESC");
+        push_limit_offset(
+            &mut builder,
+            i64_from_usize(limit, "run limit")?,
+            i64_from_usize(query.offset, "run offset")?,
+        );
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         let items = rows
             .iter()
@@ -155,15 +145,21 @@ impl BackgroundTaskReadRepository for SqliteBackgroundTaskRepository {
         limit: usize,
     ) -> Result<Vec<StoredBackgroundTaskEvent>, DataLayerError> {
         let limit = limit.max(1);
-        let rows = sqlx::query(&format!(
-            "{EVENT_COLUMNS} WHERE run_id = ? ORDER BY created_at_unix_secs ASC, id ASC LIMIT ? OFFSET ?"
-        ))
-        .bind(run_id)
-        .bind(i64_from_usize(limit, "event limit")?)
-        .bind(i64_from_usize(offset, "event offset")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
+        let mut builder = QueryBuilder::<Sqlite>::new(EVENT_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "run_id",
+            run_id.to_string(),
+        );
+        builder.push(" ORDER BY created_at_unix_secs ASC, id ASC");
+        push_limit_offset(
+            &mut builder,
+            i64_from_usize(limit, "event limit")?,
+            i64_from_usize(offset, "event offset")?,
+        );
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_event_row).collect()
     }
 

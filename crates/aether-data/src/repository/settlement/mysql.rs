@@ -464,6 +464,19 @@ FOR UPDATE
                 }
                 None => Some(0.0),
             };
+            if let Some(row) = wallet_row.as_ref() {
+                let wallet_id: String = row.try_get("id").map_sql_err()?;
+                let before_recharge: f64 = row.try_get("balance").map_sql_err()?;
+                let before_gift: f64 = row.try_get("gift_balance").map_sql_err()?;
+                let before_total = before_recharge + before_gift;
+                settlement.wallet_id = Some(wallet_id);
+                settlement.wallet_balance_before = Some(before_total);
+                settlement.wallet_balance_after = Some(before_total);
+                settlement.wallet_recharge_balance_before = Some(before_recharge);
+                settlement.wallet_recharge_balance_after = Some(before_recharge);
+                settlement.wallet_gift_balance_before = Some(before_gift);
+                settlement.wallet_gift_balance_after = Some(before_gift);
+            }
 
             let wallet_debit_cost_usd = if !api_key_is_standalone {
                 if let Some(user_id) = input.user_id.as_deref().filter(|value| !value.is_empty()) {

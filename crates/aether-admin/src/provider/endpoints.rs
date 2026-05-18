@@ -1,9 +1,14 @@
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
+use aether_provider_transport::provider_types::fixed_provider_key_inherits_api_formats;
 use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+
+pub fn normalize_endpoint_api_format(api_format: &str) -> String {
+    aether_ai_formats::normalize_api_format_alias(api_format)
+}
 
 fn unix_secs_to_rfc3339(unix_secs: u64) -> Option<String> {
     Utc.timestamp_opt(unix_secs as i64, 0)
@@ -41,23 +46,63 @@ pub fn key_api_formats_without_entry(
     )
 }
 
+fn active_endpoint_api_formats(endpoints: &[StoredProviderCatalogEndpoint]) -> Vec<String> {
+    let mut formats = Vec::new();
+    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
+        let api_format = normalize_endpoint_api_format(&endpoint.api_format);
+        if !formats.iter().any(|existing| existing == &api_format) {
+            formats.push(api_format);
+        }
+    }
+    formats
+}
+
+fn configured_key_api_formats(key: &StoredProviderCatalogKey) -> Vec<String> {
+    let Some(formats) = key
+        .api_formats
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut normalized = Vec::new();
+    for api_format in formats.iter().filter_map(serde_json::Value::as_str) {
+        let api_format = normalize_endpoint_api_format(api_format);
+        if !normalized.iter().any(|existing| existing == &api_format) {
+            normalized.push(api_format);
+        }
+    }
+    normalized
+}
+
 pub fn endpoint_key_counts_by_format(
+    provider_type: &str,
+    endpoints: &[StoredProviderCatalogEndpoint],
     keys: &[StoredProviderCatalogKey],
 ) -> (BTreeMap<String, usize>, BTreeMap<String, usize>) {
     let mut total = BTreeMap::new();
     let mut active = BTreeMap::new();
+    let inherited_api_formats = active_endpoint_api_formats(endpoints);
+
     for key in keys {
-        let Some(formats) = key
-            .api_formats
-            .as_ref()
-            .and_then(serde_json::Value::as_array)
-        else {
+        if fixed_provider_key_inherits_api_formats(
+            provider_type,
+            &key.auth_type,
+            key.encrypted_auth_config.as_deref(),
+        ) {
+            for api_format in &inherited_api_formats {
+                *total.entry(api_format.clone()).or_insert(0) += 1;
+                if key.is_active {
+                    *active.entry(api_format.clone()).or_insert(0) += 1;
+                }
+            }
             continue;
-        };
-        for api_format in formats.iter().filter_map(serde_json::Value::as_str) {
-            *total.entry(api_format.to_string()).or_insert(0) += 1;
+        }
+
+        for api_format in configured_key_api_formats(key) {
+            *total.entry(api_format.clone()).or_insert(0) += 1;
             if key.is_active {
-                *active.entry(api_format.to_string()).or_insert(0) += 1;
+                *active.entry(api_format).or_insert(0) += 1;
             }
         }
     }

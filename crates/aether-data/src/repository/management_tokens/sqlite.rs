@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
+use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite, SqlitePool};
 
 use super::types::{
     CreateManagementTokenRecord, ManagementTokenListQuery, ManagementTokenReadRepository,
@@ -9,6 +9,7 @@ use super::types::{
 };
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
+use aether_data_query::{push_eq, push_limit, push_limit_offset, push_optional_eq, WhereClause};
 
 #[derive(Debug, Clone)]
 pub struct SqliteManagementTokenRepository {
@@ -24,8 +25,12 @@ impl SqliteManagementTokenRepository {
         &self,
         token_id: &str,
     ) -> Result<Option<StoredManagementToken>, DataLayerError> {
-        let row = sqlx::query(TOKEN_BY_ID_SQL)
-            .bind(token_id)
+        let mut builder = QueryBuilder::<Sqlite>::new(TOKEN_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(&mut builder, &mut where_clause, "id", token_id.to_string());
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
@@ -33,7 +38,7 @@ impl SqliteManagementTokenRepository {
     }
 }
 
-const TOKEN_BY_ID_SQL: &str = r#"
+const TOKEN_COLUMNS: &str = r#"
 SELECT
   id,
   user_id,
@@ -50,11 +55,9 @@ SELECT
   created_at AS created_at_unix_ms,
   updated_at AS updated_at_unix_secs
 FROM management_tokens
-WHERE id = ?
-LIMIT 1
 "#;
 
-const LIST_MANAGEMENT_TOKENS_SQL: &str = r#"
+const TOKEN_WITH_USER_COLUMNS: &str = r#"
 SELECT
   mt.id,
   mt.user_id,
@@ -76,69 +79,6 @@ SELECT
   u.role AS user_role
 FROM management_tokens mt
 JOIN users u ON u.id = mt.user_id
-WHERE (? IS NULL OR mt.user_id = ?)
-  AND (? IS NULL OR mt.is_active = ?)
-ORDER BY mt.created_at DESC, mt.id DESC
-LIMIT ? OFFSET ?
-"#;
-
-const COUNT_MANAGEMENT_TOKENS_SQL: &str = r#"
-SELECT COUNT(mt.id) AS total
-FROM management_tokens mt
-WHERE (? IS NULL OR mt.user_id = ?)
-  AND (? IS NULL OR mt.is_active = ?)
-"#;
-
-const GET_MANAGEMENT_TOKEN_WITH_USER_SQL: &str = r#"
-SELECT
-  mt.id,
-  mt.user_id,
-  mt.name,
-  mt.description,
-  mt.token_prefix,
-  mt.allowed_ips,
-  mt.permissions,
-  mt.expires_at AS expires_at_unix_secs,
-  mt.last_used_at AS last_used_at_unix_secs,
-  mt.last_used_ip,
-  COALESCE(mt.usage_count, 0) AS usage_count,
-  mt.is_active,
-  mt.created_at AS created_at_unix_ms,
-  mt.updated_at AS updated_at_unix_secs,
-  u.id AS user_row_id,
-  u.email AS user_email,
-  u.username AS user_username,
-  u.role AS user_role
-FROM management_tokens mt
-JOIN users u ON u.id = mt.user_id
-WHERE mt.id = ?
-LIMIT 1
-"#;
-
-const GET_MANAGEMENT_TOKEN_WITH_USER_BY_HASH_SQL: &str = r#"
-SELECT
-  mt.id,
-  mt.user_id,
-  mt.name,
-  mt.description,
-  mt.token_prefix,
-  mt.allowed_ips,
-  mt.permissions,
-  mt.expires_at AS expires_at_unix_secs,
-  mt.last_used_at AS last_used_at_unix_secs,
-  mt.last_used_ip,
-  COALESCE(mt.usage_count, 0) AS usage_count,
-  mt.is_active,
-  mt.created_at AS created_at_unix_ms,
-  mt.updated_at AS updated_at_unix_secs,
-  u.id AS user_row_id,
-  u.email AS user_email,
-  u.username AS user_username,
-  u.role AS user_role
-FROM management_tokens mt
-JOIN users u ON u.id = mt.user_id
-WHERE mt.token_hash = ?
-LIMIT 1
 "#;
 
 #[async_trait]
@@ -147,23 +87,27 @@ impl ManagementTokenReadRepository for SqliteManagementTokenRepository {
         &self,
         query: &ManagementTokenListQuery,
     ) -> Result<StoredManagementTokenListPage, DataLayerError> {
-        let count_row = sqlx::query(COUNT_MANAGEMENT_TOKENS_SQL)
-            .bind(query.user_id.as_deref())
-            .bind(query.user_id.as_deref())
-            .bind(query.is_active)
-            .bind(query.is_active)
+        let mut count_builder =
+            QueryBuilder::<Sqlite>::new("SELECT COUNT(mt.id) AS total FROM management_tokens mt");
+        let mut count_where = WhereClause::new();
+        apply_management_token_filters(&mut count_builder, &mut count_where, query);
+        let total = count_builder
+            .build_query_scalar::<i64>()
             .fetch_one(&self.pool)
             .await
             .map_sql_err()?;
-        let total = count_row.try_get::<i64, _>("total").map_sql_err()?;
 
-        let rows = sqlx::query(LIST_MANAGEMENT_TOKENS_SQL)
-            .bind(query.user_id.as_deref())
-            .bind(query.user_id.as_deref())
-            .bind(query.is_active)
-            .bind(query.is_active)
-            .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
-            .bind(i64::try_from(query.offset).unwrap_or(i64::MAX))
+        let mut list_builder = QueryBuilder::<Sqlite>::new(TOKEN_WITH_USER_COLUMNS);
+        let mut list_where = WhereClause::new();
+        apply_management_token_filters(&mut list_builder, &mut list_where, query);
+        list_builder.push(" ORDER BY mt.created_at DESC, mt.id DESC");
+        push_limit_offset(
+            &mut list_builder,
+            i64::try_from(query.limit).unwrap_or(i64::MAX),
+            i64::try_from(query.offset).unwrap_or(i64::MAX),
+        );
+        let rows = list_builder
+            .build()
             .fetch_all(&self.pool)
             .await
             .map_sql_err()?;
@@ -181,8 +125,17 @@ impl ManagementTokenReadRepository for SqliteManagementTokenRepository {
         &self,
         token_id: &str,
     ) -> Result<Option<StoredManagementTokenWithUser>, DataLayerError> {
-        let row = sqlx::query(GET_MANAGEMENT_TOKEN_WITH_USER_SQL)
-            .bind(token_id)
+        let mut builder = QueryBuilder::<Sqlite>::new(TOKEN_WITH_USER_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "mt.id",
+            token_id.to_string(),
+        );
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
@@ -193,13 +146,31 @@ impl ManagementTokenReadRepository for SqliteManagementTokenRepository {
         &self,
         token_hash: &str,
     ) -> Result<Option<StoredManagementTokenWithUser>, DataLayerError> {
-        let row = sqlx::query(GET_MANAGEMENT_TOKEN_WITH_USER_BY_HASH_SQL)
-            .bind(token_hash)
+        let mut builder = QueryBuilder::<Sqlite>::new(TOKEN_WITH_USER_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "mt.token_hash",
+            token_hash.to_string(),
+        );
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
         row.as_ref().map(map_token_with_user_row).transpose()
     }
+}
+
+fn apply_management_token_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    where_clause: &mut WhereClause,
+    query: &ManagementTokenListQuery,
+) {
+    push_optional_eq(builder, where_clause, "mt.user_id", query.user_id.clone());
+    push_optional_eq(builder, where_clause, "mt.is_active", query.is_active);
 }
 
 #[async_trait]

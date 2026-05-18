@@ -1,14 +1,14 @@
 use async_trait::async_trait;
-use futures_util::{stream::TryStream, TryStreamExt};
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::types::{
     AuthModuleReadRepository, AuthModuleWriteRepository, StoredLdapModuleConfig,
     StoredOAuthProviderModuleConfig,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
+use aether_data_query::{push_eq, push_limit, WhereClause};
 
-const LIST_ENABLED_OAUTH_PROVIDERS_SQL: &str = r#"
+const OAUTH_PROVIDER_COLUMNS: &str = r#"
 SELECT
   provider_type,
   display_name,
@@ -16,11 +16,9 @@ SELECT
   client_secret_encrypted,
   redirect_uri
 FROM oauth_providers
-WHERE is_enabled = TRUE
-ORDER BY provider_type ASC
 "#;
 
-const GET_LDAP_CONFIG_SQL: &str = r#"
+const LDAP_CONFIG_COLUMNS: &str = r#"
 SELECT
   server_url,
   bind_dn,
@@ -35,8 +33,6 @@ SELECT
   use_starttls,
   connect_timeout
 FROM ldap_configs
-ORDER BY id ASC
-LIMIT 1
 "#;
 
 const UPDATE_LDAP_CONFIG_SQL: &str = r#"
@@ -146,18 +142,27 @@ impl SqlxAuthModuleRepository {
     }
 }
 
-async fn collect_query_rows<T, S>(
-    mut rows: S,
-    map_row: fn(&PgRow) -> Result<T, DataLayerError>,
-) -> Result<Vec<T>, DataLayerError>
-where
-    S: TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
-{
-    let mut items = Vec::new();
-    while let Some(row) = rows.try_next().await.map_postgres_err()? {
-        items.push(map_row(&row)?);
-    }
-    Ok(items)
+async fn list_enabled_oauth_providers(
+    pool: &PgPool,
+) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
+    let mut builder = QueryBuilder::<Postgres>::new(OAUTH_PROVIDER_COLUMNS);
+    let mut where_clause = WhereClause::new();
+    push_eq(&mut builder, &mut where_clause, "is_enabled", true);
+    builder.push(" ORDER BY provider_type ASC");
+    let rows = builder.build().fetch_all(pool).await.map_postgres_err()?;
+    rows.iter().map(map_oauth_row).collect()
+}
+
+async fn get_ldap_config(pool: &PgPool) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
+    let mut builder = QueryBuilder::<Postgres>::new(LDAP_CONFIG_COLUMNS);
+    builder.push(" ORDER BY id ASC");
+    push_limit(&mut builder, 1);
+    let row = builder
+        .build()
+        .fetch_optional(pool)
+        .await
+        .map_postgres_err()?;
+    row.as_ref().map(map_ldap_row).transpose()
 }
 
 #[async_trait]
@@ -165,19 +170,11 @@ impl AuthModuleReadRepository for SqlxAuthModuleReadRepository {
     async fn list_enabled_oauth_providers(
         &self,
     ) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
-        collect_query_rows(
-            sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL).fetch(&self.pool),
-            map_oauth_row,
-        )
-        .await
+        list_enabled_oauth_providers(&self.pool).await
     }
 
     async fn get_ldap_config(&self) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
-        let row = sqlx::query(GET_LDAP_CONFIG_SQL)
-            .fetch_optional(&self.pool)
-            .await
-            .map_postgres_err()?;
-        row.as_ref().map(map_ldap_row).transpose()
+        get_ldap_config(&self.pool).await
     }
 }
 
@@ -186,19 +183,11 @@ impl AuthModuleReadRepository for SqlxAuthModuleRepository {
     async fn list_enabled_oauth_providers(
         &self,
     ) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
-        collect_query_rows(
-            sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL).fetch(&self.pool),
-            map_oauth_row,
-        )
-        .await
+        list_enabled_oauth_providers(&self.pool).await
     }
 
     async fn get_ldap_config(&self) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
-        let row = sqlx::query(GET_LDAP_CONFIG_SQL)
-            .fetch_optional(&self.pool)
-            .await
-            .map_postgres_err()?;
-        row.as_ref().map(map_ldap_row).transpose()
+        get_ldap_config(&self.pool).await
     }
 }
 

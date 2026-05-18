@@ -1,7 +1,7 @@
 use super::extractors::admin_endpoint_id;
 use super::payloads::{
     build_admin_provider_endpoint_response, endpoint_key_counts_by_format,
-    AdminProviderEndpointUpdatePatch,
+    normalize_endpoint_api_format, AdminProviderEndpointUpdatePatch,
 };
 use super::support::build_admin_endpoints_data_unavailable_response;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -147,18 +147,23 @@ pub(super) async fn maybe_handle(
         .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
         .await
         .unwrap_or_default();
-    let (total_keys_by_format, active_keys_by_format) = endpoint_key_counts_by_format(&keys);
+    let (total_keys_by_format, active_keys_by_format) = endpoint_key_counts_by_format(
+        &provider.provider_type,
+        std::slice::from_ref(&updated),
+        &keys,
+    );
+    let updated_api_format = normalize_endpoint_api_format(&updated.api_format);
 
     Ok(Some(
         Json(build_admin_provider_endpoint_response(
             &updated,
             &provider.name,
             total_keys_by_format
-                .get(updated.api_format.as_str())
+                .get(updated_api_format.as_str())
                 .copied()
                 .unwrap_or(0),
             active_keys_by_format
-                .get(updated.api_format.as_str())
+                .get(updated_api_format.as_str())
                 .copied()
                 .unwrap_or(0),
             now_unix_secs,

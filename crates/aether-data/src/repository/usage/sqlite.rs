@@ -1,13 +1,35 @@
 use std::collections::{BTreeMap, HashSet};
+use std::io::Read;
 
+use aether_data_contracts::repository::usage::{parse_usage_body_ref, UsageBodyField};
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, Row};
+use flate2::read::GzDecoder;
+use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::{
-    provider_api_key_usage_is_error, provider_api_key_usage_is_success,
     strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
-    usage_request_metadata_client_family, InMemoryUsageReadRepository, PendingUsageCleanupSummary,
-    StoredRequestUsageAudit, UpsertUsageRecord, UsageWriteRepository,
+    usage_request_metadata_client_family, PendingUsageCleanupSummary,
+    ProviderApiKeyWindowUsageRequest, StoredProviderApiKeyUsageSummary,
+    StoredProviderApiKeyWindowUsageSummary, StoredProviderUsageSummary, StoredRequestUsageAudit,
+    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow,
+    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
+    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailySummary,
+    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
+    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
+    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
+    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UpsertUsageRecord,
+    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
+    UsageAuditListQuery, UsageAuditSummaryQuery, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
+    UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageReadRepository,
+    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    UsageWriteRepository,
 };
 use crate::driver::sqlite::{sqlite_optional_real, sqlite_real, SqlitePool};
 use crate::error::SqlResultExt;
@@ -57,6 +79,8 @@ SELECT
   request_metadata,
   candidate_id,
   candidate_index,
+  NULL AS username,
+  NULL AS api_key_name,
   key_name,
   planner_kind,
   route_family,
@@ -199,6 +223,669 @@ WHERE request_id = ?
   AND status IN ('streaming', 'success')
 "#;
 
+const SQLITE_PROVIDER_NAME_IS_NOT_RESERVED: &str = r#"
+provider_name IS NOT NULL
+AND TRIM(provider_name) <> ''
+AND LOWER(TRIM(provider_name)) NOT IN ('unknown', 'unknow', 'pending')
+"#;
+
+const SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR: &str = r#"
+CASE
+  WHEN COALESCE(cache_creation_input_tokens, 0) = 0
+       AND (
+         COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
+         + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
+       ) > 0
+  THEN COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
+     + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
+  ELSE MAX(COALESCE(cache_creation_input_tokens, 0), 0)
+END
+"#;
+
+const SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR: &str = r#"
+CASE
+  WHEN (
+    LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'gemini:%'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'google'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'google:%'
+  )
+  AND COALESCE(input_tokens, 0) > 0
+  AND COALESCE(cache_read_input_tokens, 0) > 0
+  THEN MAX(COALESCE(input_tokens, 0) - COALESCE(cache_read_input_tokens, 0), 0)
+  ELSE MAX(COALESCE(input_tokens, 0), 0)
+END
+"#;
+
+const SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR: &str = r#"
+CASE
+  WHEN (
+    LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'gemini:%'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'google'
+    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'google:%'
+  )
+  THEN (
+    CASE
+      WHEN COALESCE(input_tokens, 0) > 0 AND COALESCE(cache_read_input_tokens, 0) > 0
+      THEN MAX(COALESCE(input_tokens, 0) - COALESCE(cache_read_input_tokens, 0), 0)
+      ELSE MAX(COALESCE(input_tokens, 0), 0)
+    END
+  ) + MAX(COALESCE(cache_read_input_tokens, 0), 0)
+  ELSE MAX(COALESCE(input_tokens, 0), 0)
+     + (
+       CASE
+         WHEN COALESCE(cache_creation_input_tokens, 0) = 0
+              AND (
+                COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
+                + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
+              ) > 0
+         THEN COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
+            + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
+         ELSE MAX(COALESCE(cache_creation_input_tokens, 0), 0)
+       END
+     )
+     + MAX(COALESCE(cache_read_input_tokens, 0), 0)
+END
+"#;
+
+const SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR: &str = r#"
+(
+  CASE
+    WHEN (
+      LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
+      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
+      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
+      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'gemini:%'
+      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'google'
+      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'google:%'
+    )
+    AND COALESCE(input_tokens, 0) > 0
+    AND COALESCE(cache_read_input_tokens, 0) > 0
+    THEN MAX(COALESCE(input_tokens, 0) - COALESCE(cache_read_input_tokens, 0), 0)
+    ELSE MAX(COALESCE(input_tokens, 0), 0)
+  END
+  + MAX(COALESCE(output_tokens, 0), 0)
+  + (
+    CASE
+      WHEN COALESCE(cache_creation_input_tokens, 0) = 0
+           AND (
+             COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
+             + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
+           ) > 0
+      THEN COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
+         + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
+      ELSE MAX(COALESCE(cache_creation_input_tokens, 0), 0)
+    END
+  )
+  + MAX(COALESCE(cache_read_input_tokens, 0), 0)
+)
+"#;
+
+const SQLITE_USAGE_SUCCESS_FLAG_EXPR: &str = r#"
+CASE
+  WHEN status <> 'failed'
+       AND (status_code IS NULL OR status_code < 400)
+       AND error_message IS NULL
+  THEN 1
+  ELSE 0
+END
+"#;
+
+const SQLITE_PROVIDER_KEY_SUCCESS_FLAG_EXPR: &str = r#"
+CASE
+  WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
+       AND (status_code IS NULL OR status_code < 400)
+       AND (error_message IS NULL OR TRIM(error_message) = '')
+  THEN 1
+  ELSE 0
+END
+"#;
+
+const SQLITE_PROVIDER_KEY_ERROR_FLAG_EXPR: &str = r#"
+CASE
+  WHEN status NOT IN ('pending', 'streaming')
+       AND NOT (
+         status IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND (error_message IS NULL OR TRIM(error_message) = '')
+       )
+  THEN 1
+  ELSE 0
+END
+"#;
+
+const SQLITE_MONITORING_ERROR_PREDICATE: &str = r#"
+(
+  LOWER(TRIM(COALESCE(status, ''))) IN ('failed', 'error')
+  OR (error_category IS NOT NULL AND TRIM(error_category) <> '')
+  OR (
+    TRIM(COALESCE(status, '')) = ''
+    AND (
+      COALESCE(status_code, 0) >= 400
+      OR (error_message IS NOT NULL AND TRIM(error_message) <> '')
+    )
+  )
+)
+"#;
+
+const SQLITE_FINALIZED_USAGE_PREDICATE: &str = r#"
+status NOT IN ('pending', 'streaming')
+AND provider_name NOT IN ('unknown', 'pending')
+"#;
+
+fn push_sqlite_usage_where(builder: &mut QueryBuilder<'_, Sqlite>, has_where: &mut bool) {
+    builder.push(if *has_where { " AND " } else { " WHERE " });
+    *has_where = true;
+}
+
+fn push_sqlite_usage_list_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    query: &UsageAuditListQuery,
+    has_where: &mut bool,
+) {
+    if let Some(created_from_unix_secs) = query.created_from_unix_secs {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push("created_at_unix_ms >= ")
+            .push_bind(created_from_unix_secs as i64);
+    }
+    if let Some(created_until_unix_secs) = query.created_until_unix_secs {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push("created_at_unix_ms < ")
+            .push_bind(created_until_unix_secs as i64);
+    }
+    if let Some(user_id) = query.user_id.as_deref() {
+        push_sqlite_usage_where(builder, has_where);
+        builder.push("user_id = ").push_bind(user_id.to_string());
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push("provider_name = ")
+            .push_bind(provider_name.to_string());
+    }
+    if let Some(model) = query.model.as_deref() {
+        push_sqlite_usage_where(builder, has_where);
+        builder.push("model = ").push_bind(model.to_string());
+    }
+    if let Some(api_format) = query.api_format.as_deref() {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push("api_format = ")
+            .push_bind(api_format.to_string());
+    }
+    if let Some(statuses) = query.statuses.as_deref() {
+        if !statuses.is_empty() {
+            push_sqlite_usage_where(builder, has_where);
+            builder.push("status IN (");
+            let mut separated = builder.separated(", ");
+            for status in statuses {
+                separated.push_bind(status.to_string());
+            }
+            separated.push_unseparated(")");
+        }
+    }
+    if let Some(is_stream) = query.is_stream {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push("is_stream = ")
+            .push_bind(if is_stream { 1_i64 } else { 0_i64 });
+    }
+    if query.error_only {
+        push_sqlite_usage_where(builder, has_where);
+        builder.push(
+            "(status = 'failed' \
+OR COALESCE(status_code, 0) >= 400 \
+OR (error_message IS NOT NULL AND TRIM(error_message) <> ''))",
+        );
+    }
+}
+
+fn push_sqlite_usage_keyword_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    query: &UsageAuditKeywordSearchQuery,
+    has_where: &mut bool,
+) {
+    push_sqlite_usage_list_filters(
+        builder,
+        &UsageAuditListQuery {
+            created_from_unix_secs: query.created_from_unix_secs,
+            created_until_unix_secs: query.created_until_unix_secs,
+            user_id: query.user_id.clone(),
+            provider_name: query.provider_name.clone(),
+            model: query.model.clone(),
+            api_format: query.api_format.clone(),
+            statuses: query.statuses.clone(),
+            is_stream: query.is_stream,
+            error_only: query.error_only,
+            limit: None,
+            offset: None,
+            newest_first: query.newest_first,
+        },
+        has_where,
+    );
+
+    for (index, keyword) in query.keywords.iter().enumerate() {
+        let keyword = keyword.trim();
+        if keyword.is_empty() {
+            continue;
+        }
+        let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+        push_sqlite_usage_where(builder, has_where);
+        builder.push("(");
+        builder
+            .push("LOWER(COALESCE(model, '')) LIKE ")
+            .push_bind(pattern.clone());
+        builder
+            .push(" OR LOWER(COALESCE(provider_name, '')) LIKE ")
+            .push_bind(pattern.clone());
+        if query.auth_user_reader_available {
+            let matched_user_ids = query
+                .matched_user_ids_by_keyword
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            if !matched_user_ids.is_empty() {
+                builder.push(" OR user_id IN (");
+                let mut separated = builder.separated(", ");
+                for user_id in matched_user_ids {
+                    separated.push_bind(user_id);
+                }
+                separated.push_unseparated(")");
+            }
+        } else {
+            builder
+                .push(" OR user_id IN (SELECT id FROM users WHERE LOWER(COALESCE(username, '')) LIKE ")
+                .push_bind(pattern.clone());
+            builder.push(")");
+        }
+        if query.auth_api_key_reader_available {
+            let matched_api_key_ids = query
+                .matched_api_key_ids_by_keyword
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+            if !matched_api_key_ids.is_empty() {
+                builder.push(" OR api_key_id IN (");
+                let mut separated = builder.separated(", ");
+                for api_key_id in matched_api_key_ids {
+                    separated.push_bind(api_key_id);
+                }
+                separated.push_unseparated(")");
+            }
+        } else {
+            builder
+                .push(" OR api_key_id IN (SELECT id FROM api_keys WHERE LOWER(COALESCE(name, '')) LIKE ")
+                .push_bind(pattern);
+            builder.push(")");
+        }
+        builder.push(")");
+    }
+
+    if let Some(username_keyword) = query
+        .username_keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_sqlite_usage_where(builder, has_where);
+        if query.auth_user_reader_available {
+            if query.matched_user_ids_for_username.is_empty() {
+                builder.push("0 = 1");
+            } else {
+                builder.push("user_id IN (");
+                let mut separated = builder.separated(", ");
+                for user_id in &query.matched_user_ids_for_username {
+                    separated.push_bind(user_id.clone());
+                }
+                separated.push_unseparated(")");
+            }
+        } else {
+            builder
+                .push("user_id IN (SELECT id FROM users WHERE LOWER(COALESCE(username, '')) LIKE ")
+                .push_bind(format!("%{}%", username_keyword.to_ascii_lowercase()));
+            builder.push(")");
+        }
+    }
+}
+
+fn push_sqlite_usage_summary_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    query: &UsageAuditSummaryQuery,
+    has_where: &mut bool,
+) {
+    push_sqlite_usage_where(builder, has_where);
+    builder
+        .push("created_at_unix_ms >= ")
+        .push_bind(query.created_from_unix_secs as i64);
+    push_sqlite_usage_where(builder, has_where);
+    builder
+        .push("created_at_unix_ms < ")
+        .push_bind(query.created_until_unix_secs as i64);
+    if let Some(user_id) = query.user_id.as_deref() {
+        push_sqlite_usage_where(builder, has_where);
+        builder.push("user_id = ").push_bind(user_id.to_string());
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push("provider_name = ")
+            .push_bind(provider_name.to_string());
+    }
+    if let Some(model) = query.model.as_deref() {
+        push_sqlite_usage_where(builder, has_where);
+        builder.push("model = ").push_bind(model.to_string());
+    }
+}
+
+fn push_sqlite_usage_order_limit_offset(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    newest_first: bool,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) {
+    if newest_first {
+        builder.push(" ORDER BY created_at_unix_ms DESC, id ASC");
+    } else {
+        builder.push(" ORDER BY created_at_unix_ms ASC, request_id ASC");
+    }
+    if let Some(limit) = limit {
+        builder.push(" LIMIT ").push_bind(limit as i64);
+    }
+    if let Some(offset) = offset {
+        builder.push(" OFFSET ").push_bind(offset as i64);
+    }
+}
+
+fn sqlite_usage_aggregation_group_expr(group_by: UsageAuditAggregationGroupBy) -> &'static str {
+    match group_by {
+        UsageAuditAggregationGroupBy::Model => "COALESCE(NULLIF(model, ''), 'unknown')",
+        UsageAuditAggregationGroupBy::Provider => {
+            "CASE WHEN provider_id IS NOT NULL \
+AND TRIM(provider_id) <> '' \
+AND LOWER(TRIM(provider_id)) NOT IN ('unknown', 'unknow', 'pending') \
+THEN TRIM(provider_id) ELSE TRIM(provider_name) END"
+        }
+        UsageAuditAggregationGroupBy::ApiFormat => "COALESCE(NULLIF(api_format, ''), 'unknown')",
+        UsageAuditAggregationGroupBy::User => "user_id",
+    }
+}
+
+fn sqlite_aggregate_u64(row: &SqliteRow, field: &str) -> Result<u64, DataLayerError> {
+    Ok(row.try_get::<i64, _>(field).map_sql_err()?.max(0) as u64)
+}
+
+fn sqlite_optional_u64(row: &SqliteRow, field: &str) -> Result<Option<u64>, DataLayerError> {
+    Ok(row
+        .try_get::<Option<i64>, _>(field)
+        .map_sql_err()?
+        .map(|value| value.max(0) as u64))
+}
+
+fn push_sqlite_usage_provider_performance_base_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    query: &UsageProviderPerformanceQuery,
+    has_where: &mut bool,
+) {
+    push_sqlite_usage_range(
+        builder,
+        has_where,
+        query.created_from_unix_secs,
+        query.created_until_unix_secs,
+    );
+    push_sqlite_usage_where(builder, has_where);
+    builder.push(
+        "COALESCE(status, '') NOT IN ('pending', 'streaming') \
+AND provider_id IS NOT NULL AND TRIM(provider_id) <> '' \
+AND LOWER(TRIM(provider_id)) NOT IN ('unknown', 'pending') \
+AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'pending')",
+    );
+    push_sqlite_usage_provider_performance_filters(builder, query, has_where);
+}
+
+fn decode_sqlite_usage_audit_summary_row(
+    row: &SqliteRow,
+) -> Result<StoredUsageAuditSummary, DataLayerError> {
+    Ok(StoredUsageAuditSummary {
+        total_requests: sqlite_aggregate_u64(row, "total_requests")?,
+        input_tokens: sqlite_aggregate_u64(row, "input_tokens")?,
+        output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
+        recorded_total_tokens: sqlite_aggregate_u64(row, "recorded_total_tokens")?,
+        cache_creation_tokens: sqlite_aggregate_u64(row, "cache_creation_tokens")?,
+        cache_creation_ephemeral_5m_tokens: sqlite_aggregate_u64(
+            row,
+            "cache_creation_ephemeral_5m_tokens",
+        )?,
+        cache_creation_ephemeral_1h_tokens: sqlite_aggregate_u64(
+            row,
+            "cache_creation_ephemeral_1h_tokens",
+        )?,
+        cache_read_tokens: sqlite_aggregate_u64(row, "cache_read_tokens")?,
+        total_cost_usd: sqlite_real(row, "total_cost_usd")?,
+        actual_total_cost_usd: sqlite_real(row, "actual_total_cost_usd")?,
+        cache_creation_cost_usd: sqlite_real(row, "cache_creation_cost_usd")?,
+        cache_read_cost_usd: sqlite_real(row, "cache_read_cost_usd")?,
+        total_response_time_ms: sqlite_real(row, "total_response_time_ms")?,
+        error_requests: sqlite_aggregate_u64(row, "error_requests")?,
+    })
+}
+
+fn decode_sqlite_usage_aggregation_row(
+    row: &SqliteRow,
+) -> Result<StoredUsageAuditAggregation, DataLayerError> {
+    Ok(StoredUsageAuditAggregation {
+        group_key: row.try_get::<String, _>("group_key").map_sql_err()?,
+        display_name: row.try_get("display_name").map_sql_err()?,
+        secondary_name: None,
+        request_count: sqlite_aggregate_u64(row, "request_count")?,
+        total_tokens: sqlite_aggregate_u64(row, "total_tokens")?,
+        output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
+        effective_input_tokens: sqlite_aggregate_u64(row, "effective_input_tokens")?,
+        total_input_context: sqlite_aggregate_u64(row, "total_input_context")?,
+        cache_creation_tokens: sqlite_aggregate_u64(row, "cache_creation_tokens")?,
+        cache_creation_ephemeral_5m_tokens: sqlite_aggregate_u64(
+            row,
+            "cache_creation_ephemeral_5m_tokens",
+        )?,
+        cache_creation_ephemeral_1h_tokens: sqlite_aggregate_u64(
+            row,
+            "cache_creation_ephemeral_1h_tokens",
+        )?,
+        cache_read_tokens: sqlite_aggregate_u64(row, "cache_read_tokens")?,
+        total_cost_usd: sqlite_real(row, "total_cost_usd")?,
+        actual_total_cost_usd: sqlite_real(row, "actual_total_cost_usd")?,
+        avg_response_time_ms: sqlite_optional_real(row, "avg_response_time_ms")?,
+        success_count: row
+            .try_get::<Option<i64>, _>("success_count")
+            .map_sql_err()?
+            .map(|value| value.max(0) as u64),
+    })
+}
+
+fn push_sqlite_usage_range(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    has_where: &mut bool,
+    created_from_unix_secs: u64,
+    created_until_unix_secs: u64,
+) {
+    push_sqlite_usage_where(builder, has_where);
+    builder
+        .push("created_at_unix_ms >= ")
+        .push_bind(created_from_unix_secs as i64);
+    push_sqlite_usage_where(builder, has_where);
+    builder
+        .push("created_at_unix_ms < ")
+        .push_bind(created_until_unix_secs as i64);
+}
+
+fn push_sqlite_usage_optional_text_filter(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    has_where: &mut bool,
+    column: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push(column)
+            .push(" = ")
+            .push_bind(value.to_string());
+    }
+}
+
+fn push_sqlite_usage_bool_filter(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    has_where: &mut bool,
+    column: &str,
+    value: Option<bool>,
+) {
+    if let Some(value) = value {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push(column)
+            .push(" = ")
+            .push_bind(if value { 1_i64 } else { 0_i64 });
+    }
+}
+
+fn push_sqlite_usage_finalized_filter(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    has_where: &mut bool,
+) {
+    push_sqlite_usage_where(builder, has_where);
+    builder.push(SQLITE_FINALIZED_USAGE_PREDICATE);
+}
+
+fn push_sqlite_usage_provider_performance_filters(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    query: &UsageProviderPerformanceQuery,
+    has_where: &mut bool,
+) {
+    push_sqlite_usage_optional_text_filter(
+        builder,
+        has_where,
+        "provider_id",
+        query.provider_id.as_deref(),
+    );
+    push_sqlite_usage_optional_text_filter(builder, has_where, "model", query.model.as_deref());
+    push_sqlite_usage_optional_text_filter(
+        builder,
+        has_where,
+        "api_format",
+        query.api_format.as_deref(),
+    );
+    push_sqlite_usage_optional_text_filter(
+        builder,
+        has_where,
+        "endpoint_kind",
+        query.endpoint_kind.as_deref(),
+    );
+    push_sqlite_usage_bool_filter(builder, has_where, "is_stream", query.is_stream);
+    push_sqlite_usage_bool_filter(
+        builder,
+        has_where,
+        "has_format_conversion",
+        query.has_format_conversion,
+    );
+}
+
+fn sqlite_usage_metadata_input_price_expr() -> &'static str {
+    r#"
+COALESCE(
+  CAST(json_extract(request_metadata, '$.input_price_per_1m') AS REAL),
+  CAST(json_extract(request_metadata, '$.settlement_snapshot.input_price_per_1m') AS REAL),
+  CAST(json_extract(request_metadata, '$.billing_snapshot.input_price_per_1m') AS REAL),
+  0
+)
+"#
+}
+
+fn sqlite_usage_bucket_expr(
+    granularity: UsageTimeSeriesGranularity,
+    tz_offset_minutes: i32,
+) -> String {
+    let offset = i64::from(tz_offset_minutes) * 60;
+    match granularity {
+        UsageTimeSeriesGranularity::Hour => {
+            format!(
+                "strftime('%Y-%m-%dT%H:00:00+00:00', created_at_unix_ms + ({offset}), 'unixepoch')"
+            )
+        }
+        UsageTimeSeriesGranularity::Day => {
+            format!("date(created_at_unix_ms + ({offset}), 'unixepoch')")
+        }
+    }
+}
+
+fn sqlite_usage_local_date_expr(tz_offset_minutes: i32) -> String {
+    let offset = i64::from(tz_offset_minutes) * 60;
+    format!("date(created_at_unix_ms + ({offset}), 'unixepoch')")
+}
+
+fn sqlite_usage_breakdown_group_expr(group_by: UsageBreakdownGroupBy) -> &'static str {
+    match group_by {
+        UsageBreakdownGroupBy::Model => "COALESCE(NULLIF(model, ''), 'unknown')",
+        UsageBreakdownGroupBy::Provider => "COALESCE(NULLIF(provider_name, ''), 'unknown')",
+        UsageBreakdownGroupBy::ApiFormat => "COALESCE(NULLIF(api_format, ''), 'unknown')",
+    }
+}
+
+fn sqlite_usage_leaderboard_group_expr(
+    group_by: UsageLeaderboardGroupBy,
+) -> (&'static str, &'static str, &'static str) {
+    match group_by {
+        UsageLeaderboardGroupBy::Model => {
+            ("model", "NULL", "model IS NOT NULL AND TRIM(model) <> ''")
+        }
+        UsageLeaderboardGroupBy::User => (
+            "user_id",
+            "(SELECT users.username FROM users WHERE users.id = user_id)",
+            "user_id IS NOT NULL AND TRIM(user_id) <> ''",
+        ),
+        UsageLeaderboardGroupBy::ApiKey => (
+            "api_key_id",
+            "(SELECT api_keys.name FROM api_keys WHERE api_keys.id = api_key_id)",
+            "api_key_id IS NOT NULL AND TRIM(api_key_id) <> ''",
+        ),
+    }
+}
+
+fn sqlite_usage_body_sql_columns(field: UsageBodyField) -> (&'static str, &'static str) {
+    match field {
+        UsageBodyField::RequestBody => ("request_body", "request_body_compressed"),
+        UsageBodyField::ProviderRequestBody => {
+            ("provider_request_body", "provider_request_body_compressed")
+        }
+        UsageBodyField::ResponseBody => ("response_body", "response_body_compressed"),
+        UsageBodyField::ClientResponseBody => {
+            ("client_response_body", "client_response_body_compressed")
+        }
+    }
+}
+
+fn inflate_usage_json_value(bytes: &[u8]) -> Result<serde_json::Value, DataLayerError> {
+    let mut decoder = GzDecoder::new(bytes);
+    let mut json_bytes = Vec::new();
+    decoder.read_to_end(&mut json_bytes).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to decompress usage json: {err}"))
+    })?;
+    serde_json::from_slice(&json_bytes).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to parse decompressed usage json: {err}"))
+    })
+}
+
+fn parse_usage_json_text(raw: &str) -> Result<serde_json::Value, DataLayerError> {
+    serde_json::from_str(raw).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to parse usage json: {err}"))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteUsageWriteRepository {
     pool: SqlitePool,
@@ -209,28 +896,2329 @@ pub struct SqliteUsageReadRepository {
     pool: SqlitePool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct SqliteProviderPerformancePercentiles {
+    p90_response_time_ms: Option<u64>,
+    p99_response_time_ms: Option<u64>,
+    p90_first_byte_time_ms: Option<u64>,
+    p99_first_byte_time_ms: Option<u64>,
+}
+
 impl SqliteUsageReadRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
-    async fn materialize_read_model(&self) -> Result<InMemoryUsageReadRepository, DataLayerError> {
-        let rows = sqlx::query(&format!(
-            "{USAGE_COLUMNS} ORDER BY created_at_unix_ms ASC, request_id ASC"
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
+    async fn summarize_provider_performance_percentiles(
+        &self,
+        query: &UsageProviderPerformanceQuery,
+    ) -> Result<SqliteProviderPerformancePercentiles, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+WITH filtered_usage AS (
+  SELECT
+    MAX(COALESCE(response_time_ms, 0), 0) AS response_time_ms,
+    MAX(COALESCE(first_byte_time_ms, 0), 0) AS first_byte_time_ms,
+    response_time_ms IS NOT NULL AS has_response_time,
+    first_byte_time_ms IS NOT NULL AS has_first_byte_time,
+    CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+      THEN 1
+      ELSE 0
+    END AS success_flag
+  FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+        push_sqlite_usage_provider_performance_base_filters(&mut builder, query, &mut has_where);
+        builder.push(
+            r#"
+),
+response_ranked AS (
+  SELECT
+    response_time_ms AS value,
+    ROW_NUMBER() OVER (ORDER BY response_time_ms) AS rn,
+    COUNT(response_time_ms) OVER () AS n
+  FROM filtered_usage
+  WHERE success_flag = 1 AND has_response_time
+),
+first_byte_ranked AS (
+  SELECT
+    first_byte_time_ms AS value,
+    ROW_NUMBER() OVER (ORDER BY first_byte_time_ms) AS rn,
+    COUNT(first_byte_time_ms) OVER () AS n
+  FROM filtered_usage
+  WHERE success_flag = 1 AND has_first_byte_time
+),
+response_positions AS (
+  SELECT
+    n,
+    0.9 * (n - 1) AS p90_pos,
+    0.99 * (n - 1) AS p99_pos
+  FROM response_ranked
+  GROUP BY n
+),
+first_byte_positions AS (
+  SELECT
+    n,
+    0.9 * (n - 1) AS p90_pos,
+    0.99 * (n - 1) AS p99_pos
+  FROM first_byte_ranked
+  GROUP BY n
+),
+response_percentiles AS (
+  SELECT
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p90_pos = CAST(positions.p90_pos AS INTEGER)
+          THEN CAST(positions.p90_pos AS INTEGER) + 1
+          ELSE CAST(positions.p90_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p90_pos - CAST(positions.p90_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p90_response_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p99_pos = CAST(positions.p99_pos AS INTEGER)
+          THEN CAST(positions.p99_pos AS INTEGER) + 1
+          ELSE CAST(positions.p99_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p99_pos - CAST(positions.p99_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p99_response_time_ms
+  FROM response_positions AS positions
+  JOIN response_ranked AS ranked ON ranked.n = positions.n
+  GROUP BY positions.n, positions.p90_pos, positions.p99_pos
+),
+first_byte_percentiles AS (
+  SELECT
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p90_pos = CAST(positions.p90_pos AS INTEGER)
+          THEN CAST(positions.p90_pos AS INTEGER) + 1
+          ELSE CAST(positions.p90_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p90_pos - CAST(positions.p90_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p90_first_byte_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p99_pos = CAST(positions.p99_pos AS INTEGER)
+          THEN CAST(positions.p99_pos AS INTEGER) + 1
+          ELSE CAST(positions.p99_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p99_pos - CAST(positions.p99_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p99_first_byte_time_ms
+  FROM first_byte_positions AS positions
+  JOIN first_byte_ranked AS ranked ON ranked.n = positions.n
+  GROUP BY positions.n, positions.p90_pos, positions.p99_pos
+)
+SELECT
+  (SELECT p90_response_time_ms FROM response_percentiles) AS p90_response_time_ms,
+  (SELECT p99_response_time_ms FROM response_percentiles) AS p99_response_time_ms,
+  (SELECT p90_first_byte_time_ms FROM first_byte_percentiles) AS p90_first_byte_time_ms,
+  (SELECT p99_first_byte_time_ms FROM first_byte_percentiles) AS p99_first_byte_time_ms
+"#,
+        );
 
-        let items = rows
-            .iter()
-            .map(map_usage_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(InMemoryUsageReadRepository::seed(items))
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(SqliteProviderPerformancePercentiles {
+            p90_response_time_ms: sqlite_optional_u64(&row, "p90_response_time_ms")?,
+            p99_response_time_ms: sqlite_optional_u64(&row, "p99_response_time_ms")?,
+            p90_first_byte_time_ms: sqlite_optional_u64(&row, "p90_first_byte_time_ms")?,
+            p99_first_byte_time_ms: sqlite_optional_u64(&row, "p99_first_byte_time_ms")?,
+        })
+    }
+
+    async fn summarize_provider_performance_provider_percentiles(
+        &self,
+        query: &UsageProviderPerformanceQuery,
+        provider_ids: &[String],
+    ) -> Result<BTreeMap<String, SqliteProviderPerformancePercentiles>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+WITH filtered_usage AS (
+  SELECT
+    provider_id,
+    MAX(COALESCE(response_time_ms, 0), 0) AS response_time_ms,
+    MAX(COALESCE(first_byte_time_ms, 0), 0) AS first_byte_time_ms,
+    response_time_ms IS NOT NULL AS has_response_time,
+    first_byte_time_ms IS NOT NULL AS has_first_byte_time,
+    CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+      THEN 1
+      ELSE 0
+    END AS success_flag
+  FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+        push_sqlite_usage_provider_performance_base_filters(&mut builder, query, &mut has_where);
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push("provider_id IN (");
+        {
+            let mut separated = builder.separated(", ");
+            for provider_id in provider_ids {
+                separated.push_bind(provider_id.clone());
+            }
+        }
+        builder.push(
+            r#")
+),
+response_ranked AS (
+  SELECT
+    provider_id,
+    response_time_ms AS value,
+    ROW_NUMBER() OVER (PARTITION BY provider_id ORDER BY response_time_ms) AS rn,
+    COUNT(response_time_ms) OVER (PARTITION BY provider_id) AS n
+  FROM filtered_usage
+  WHERE success_flag = 1 AND has_response_time
+),
+first_byte_ranked AS (
+  SELECT
+    provider_id,
+    first_byte_time_ms AS value,
+    ROW_NUMBER() OVER (PARTITION BY provider_id ORDER BY first_byte_time_ms) AS rn,
+    COUNT(first_byte_time_ms) OVER (PARTITION BY provider_id) AS n
+  FROM filtered_usage
+  WHERE success_flag = 1 AND has_first_byte_time
+),
+response_positions AS (
+  SELECT
+    provider_id,
+    n,
+    0.9 * (n - 1) AS p90_pos,
+    0.99 * (n - 1) AS p99_pos
+  FROM response_ranked
+  GROUP BY provider_id, n
+),
+first_byte_positions AS (
+  SELECT
+    provider_id,
+    n,
+    0.9 * (n - 1) AS p90_pos,
+    0.99 * (n - 1) AS p99_pos
+  FROM first_byte_ranked
+  GROUP BY provider_id, n
+),
+response_percentiles AS (
+  SELECT
+    positions.provider_id,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p90_pos = CAST(positions.p90_pos AS INTEGER)
+          THEN CAST(positions.p90_pos AS INTEGER) + 1
+          ELSE CAST(positions.p90_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p90_pos - CAST(positions.p90_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p90_response_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p99_pos = CAST(positions.p99_pos AS INTEGER)
+          THEN CAST(positions.p99_pos AS INTEGER) + 1
+          ELSE CAST(positions.p99_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p99_pos - CAST(positions.p99_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p99_response_time_ms
+  FROM response_positions AS positions
+  JOIN response_ranked AS ranked
+    ON ranked.provider_id = positions.provider_id AND ranked.n = positions.n
+  GROUP BY positions.provider_id, positions.n, positions.p90_pos, positions.p99_pos
+),
+first_byte_percentiles AS (
+  SELECT
+    positions.provider_id,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p90_pos = CAST(positions.p90_pos AS INTEGER)
+          THEN CAST(positions.p90_pos AS INTEGER) + 1
+          ELSE CAST(positions.p90_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p90_pos - CAST(positions.p90_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p90_first_byte_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p99_pos = CAST(positions.p99_pos AS INTEGER)
+          THEN CAST(positions.p99_pos AS INTEGER) + 1
+          ELSE CAST(positions.p99_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p99_pos - CAST(positions.p99_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p99_first_byte_time_ms
+  FROM first_byte_positions AS positions
+  JOIN first_byte_ranked AS ranked
+    ON ranked.provider_id = positions.provider_id AND ranked.n = positions.n
+  GROUP BY positions.provider_id, positions.n, positions.p90_pos, positions.p99_pos
+),
+provider_ids AS (
+  SELECT DISTINCT provider_id FROM filtered_usage
+)
+SELECT
+  provider_ids.provider_id,
+  response_percentiles.p90_response_time_ms,
+  response_percentiles.p99_response_time_ms,
+  first_byte_percentiles.p90_first_byte_time_ms,
+  first_byte_percentiles.p99_first_byte_time_ms
+FROM provider_ids
+LEFT JOIN response_percentiles ON response_percentiles.provider_id = provider_ids.provider_id
+LEFT JOIN first_byte_percentiles ON first_byte_percentiles.provider_id = provider_ids.provider_id
+"#,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        let mut values = BTreeMap::new();
+        for row in rows {
+            values.insert(
+                row.try_get::<String, _>("provider_id").map_sql_err()?,
+                SqliteProviderPerformancePercentiles {
+                    p90_response_time_ms: sqlite_optional_u64(&row, "p90_response_time_ms")?,
+                    p99_response_time_ms: sqlite_optional_u64(&row, "p99_response_time_ms")?,
+                    p90_first_byte_time_ms: sqlite_optional_u64(&row, "p90_first_byte_time_ms")?,
+                    p99_first_byte_time_ms: sqlite_optional_u64(&row, "p99_first_byte_time_ms")?,
+                },
+            );
+        }
+        Ok(values)
+    }
+
+    async fn fetch_usage_items(
+        &self,
+        mut builder: QueryBuilder<'_, Sqlite>,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_usage_row).collect()
+    }
+
+    pub async fn list_usage_audits(
+        &self,
+        query: &UsageAuditListQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(USAGE_COLUMNS);
+        let mut has_where = false;
+        push_sqlite_usage_list_filters(&mut builder, query, &mut has_where);
+        push_sqlite_usage_order_limit_offset(
+            &mut builder,
+            query.newest_first,
+            query.limit,
+            query.offset,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_usage_row).collect()
+    }
+
+    pub async fn count_usage_audits(
+        &self,
+        query: &UsageAuditListQuery,
+    ) -> Result<u64, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(r#"SELECT COUNT(*) AS total FROM "usage""#);
+        let mut has_where = false;
+        push_sqlite_usage_list_filters(&mut builder, query, &mut has_where);
+
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(row.try_get::<i64, _>("total").map_sql_err()?.max(0) as u64)
+    }
+
+    pub async fn list_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(USAGE_COLUMNS);
+        let mut has_where = false;
+        push_sqlite_usage_keyword_filters(&mut builder, query, &mut has_where);
+        push_sqlite_usage_order_limit_offset(
+            &mut builder,
+            query.newest_first,
+            query.limit,
+            query.offset,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_usage_row).collect()
+    }
+
+    pub async fn count_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<u64, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(r#"SELECT COUNT(*) AS total FROM "usage""#);
+        let mut has_where = false;
+        push_sqlite_usage_keyword_filters(&mut builder, query, &mut has_where);
+
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(row.try_get::<i64, _>("total").map_sql_err()?.max(0) as u64)
+    }
+
+    pub async fn summarize_usage_audits(
+        &self,
+        query: &UsageAuditSummaryQuery,
+    ) -> Result<StoredUsageAuditSummary, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(StoredUsageAuditSummary::default());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  COUNT(*) AS total_requests,
+  COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS recorded_total_tokens,
+  COALESCE(SUM({cache_creation_expr}), 0) AS cache_creation_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_ephemeral_5m_input_tokens, 0), 0)), 0)
+    AS cache_creation_ephemeral_5m_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_ephemeral_1h_input_tokens, 0), 0)), 0)
+    AS cache_creation_ephemeral_1h_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
+    AS actual_total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(cache_creation_cost_usd AS REAL), 0)), 0)
+    AS cache_creation_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(cache_read_cost_usd AS REAL), 0)), 0)
+    AS cache_read_cost_usd,
+  COALESCE(SUM(MAX(COALESCE(response_time_ms, 0), 0)), 0) AS total_response_time_ms,
+  COALESCE(SUM(
+    CASE
+      WHEN COALESCE(status_code, 0) >= 400
+        OR (error_message IS NOT NULL AND TRIM(error_message) <> '')
+      THEN 1 ELSE 0
+    END
+  ), 0) AS error_requests
+FROM "usage"
+"#,
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_summary_filters(&mut builder, query, &mut has_where);
+
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        decode_sqlite_usage_audit_summary_row(&row)
+    }
+
+    pub async fn aggregate_usage_audits(
+        &self,
+        query: &UsageAuditAggregationQuery,
+    ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs || query.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let group_expr = sqlite_usage_aggregation_group_expr(query.group_by);
+        let display_expr = if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
+            "NULLIF(TRIM(provider_name), '')"
+        } else {
+            "NULL"
+        };
+        let avg_response_expr = if matches!(
+            query.group_by,
+            UsageAuditAggregationGroupBy::Provider | UsageAuditAggregationGroupBy::ApiFormat
+        ) {
+            "CASE WHEN COUNT(*) = 0 THEN 0 ELSE COALESCE(SUM(MAX(COALESCE(response_time_ms, 0), 0)), 0) * 1.0 / COUNT(*) END"
+        } else {
+            "NULL"
+        };
+        let success_count_expr = if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
+        {
+            "COALESCE(SUM(CASE WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled') AND (status_code IS NULL OR status_code < 400) THEN 1 ELSE 0 END), 0)"
+        } else {
+            "NULL"
+        };
+
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  {group_expr} AS group_key,
+  {display_expr} AS display_name,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  COALESCE(SUM({effective_input_expr}), 0) AS effective_input_tokens,
+  COALESCE(SUM({total_input_context_expr}), 0) AS total_input_context,
+  COALESCE(SUM({cache_creation_expr}), 0) AS cache_creation_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_ephemeral_5m_input_tokens, 0), 0)), 0)
+    AS cache_creation_ephemeral_5m_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_ephemeral_1h_input_tokens, 0), 0)), 0)
+    AS cache_creation_ephemeral_1h_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
+    AS actual_total_cost_usd,
+  {avg_response_expr} AS avg_response_time_ms,
+  {success_count_expr} AS success_count
+FROM "usage"
+"#,
+            effective_input_expr = SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR,
+            total_input_context_expr = SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR,
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder
+            .push("created_at_unix_ms >= ")
+            .push_bind(query.created_from_unix_secs as i64);
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder
+            .push("created_at_unix_ms < ")
+            .push_bind(query.created_until_unix_secs as i64);
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push("status NOT IN ('pending', 'streaming')");
+        if query.exclude_reserved_provider_labels {
+            push_sqlite_usage_where(&mut builder, &mut has_where);
+            builder.push(SQLITE_PROVIDER_NAME_IS_NOT_RESERVED);
+        }
+        if matches!(query.group_by, UsageAuditAggregationGroupBy::User) {
+            push_sqlite_usage_where(&mut builder, &mut has_where);
+            builder.push("user_id IS NOT NULL AND TRIM(user_id) <> ''");
+        }
+        builder
+            .push(" GROUP BY group_key")
+            .push(" ORDER BY request_count DESC, group_key ASC")
+            .push(" LIMIT ")
+            .push_bind(query.limit as i64);
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(decode_sqlite_usage_aggregation_row)
+            .collect()
+    }
+
+    pub async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUsageUserTotals>, DataLayerError> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+SELECT
+  user_id,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens
+FROM "usage"
+WHERE user_id IN (
+"#,
+        );
+        let mut separated = builder.separated(", ");
+        for user_id in user_ids {
+            separated.push_bind(user_id.clone());
+        }
+        separated.push_unseparated(
+            r#")
+  AND status NOT IN ('pending', 'streaming')
+  AND provider_name NOT IN ('unknown', 'pending')
+GROUP BY user_id
+ORDER BY user_id ASC
+"#,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageUserTotals {
+                    user_id: row.try_get::<String, _>("user_id").map_sql_err()?,
+                    request_count: row.try_get::<i64, _>("request_count").map_sql_err()?.max(0)
+                        as u64,
+                    total_tokens: row.try_get::<i64, _>("total_tokens").map_sql_err()?.max(0)
+                        as u64,
+                })
+            })
+            .collect()
     }
 }
 
-impl_materialized_usage_read_repository!(SqliteUsageReadRepository);
+#[async_trait]
+impl UsageReadRepository for SqliteUsageReadRepository {
+    async fn find_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+        let row = sqlx::query(&format!("{USAGE_COLUMNS} WHERE id = ? LIMIT 1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        row.as_ref().map(map_usage_row).transpose()
+    }
+
+    async fn list_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new(USAGE_COLUMNS);
+        builder.push(" WHERE id IN (");
+        {
+            let mut separated = builder.separated(", ");
+            for id in ids {
+                separated.push_bind(id);
+            }
+        }
+        builder.push(") ORDER BY created_at_unix_ms DESC, id ASC");
+        self.fetch_usage_items(builder).await
+    }
+
+    async fn find_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+        let row = sqlx::query(&format!("{USAGE_COLUMNS} WHERE request_id = ? LIMIT 1"))
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        row.as_ref().map(map_usage_row).transpose()
+    }
+
+    async fn resolve_body_ref(
+        &self,
+        body_ref: &str,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        let has_blob_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'usage_body_blobs'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_sql_err()?;
+        if has_blob_table > 0 {
+            let blob_row =
+                sqlx::query("SELECT payload_gzip FROM usage_body_blobs WHERE body_ref = ? LIMIT 1")
+                    .bind(body_ref)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_sql_err()?;
+            if let Some(row) = blob_row.as_ref() {
+                let payload_gzip = row.try_get::<Vec<u8>, _>("payload_gzip").map_sql_err()?;
+                return inflate_usage_json_value(&payload_gzip).map(Some);
+            }
+        }
+
+        let Some((request_id, field)) = parse_usage_body_ref(body_ref) else {
+            return Ok(None);
+        };
+        let (inline_column, compressed_column) = sqlite_usage_body_sql_columns(field);
+        let row = sqlx::query(&format!(
+            "SELECT {inline_column} AS inline_body, {compressed_column} AS compressed_body FROM \"usage\" WHERE request_id = ? LIMIT 1"
+        ))
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+        let Some(row) = row.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(raw) = row
+            .try_get::<Option<String>, _>("inline_body")
+            .map_sql_err()?
+        {
+            return parse_usage_json_text(&raw).map(Some);
+        }
+        row.try_get::<Option<Vec<u8>>, _>("compressed_body")
+            .map_sql_err()?
+            .map(|bytes| inflate_usage_json_value(&bytes))
+            .transpose()
+    }
+
+    async fn list_usage_audits(
+        &self,
+        query: &UsageAuditListQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        Self::list_usage_audits(self, query).await
+    }
+
+    async fn count_usage_audits(&self, query: &UsageAuditListQuery) -> Result<u64, DataLayerError> {
+        Self::count_usage_audits(self, query).await
+    }
+
+    async fn list_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        Self::list_usage_audits_by_keyword_search(self, query).await
+    }
+
+    async fn count_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<u64, DataLayerError> {
+        Self::count_usage_audits_by_keyword_search(self, query).await
+    }
+
+    async fn aggregate_usage_audits(
+        &self,
+        query: &UsageAuditAggregationQuery,
+    ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
+        Self::aggregate_usage_audits(self, query).await
+    }
+
+    async fn summarize_usage_audits(
+        &self,
+        query: &UsageAuditSummaryQuery,
+    ) -> Result<StoredUsageAuditSummary, DataLayerError> {
+        Self::summarize_usage_audits(self, query).await
+    }
+
+    async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUsageUserTotals>, DataLayerError> {
+        Self::summarize_usage_totals_by_user_ids(self, user_ids).await
+    }
+
+    async fn summarize_usage_cache_hit_summary(
+        &self,
+        query: &UsageCacheHitSummaryQuery,
+    ) -> Result<StoredUsageCacheHitSummary, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(StoredUsageCacheHitSummary::default());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+SELECT
+  COUNT(*) AS total_requests,
+  COALESCE(SUM(CASE WHEN COALESCE(cache_read_input_tokens, 0) > 0 THEN 1 ELSE 0 END), 0)
+    AS cache_hit_requests
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(StoredUsageCacheHitSummary {
+            total_requests: sqlite_aggregate_u64(&row, "total_requests")?,
+            cache_hit_requests: sqlite_aggregate_u64(&row, "cache_hit_requests")?,
+        })
+    }
+
+    async fn summarize_usage_settled_cost(
+        &self,
+        query: &UsageSettledCostSummaryQuery,
+    ) -> Result<StoredUsageSettledCostSummary, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(StoredUsageSettledCostSummary::default());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+SELECT
+  COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) AS total_cost_usd,
+  COUNT(*) AS total_requests,
+  COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_input_tokens, 0), 0)), 0) AS cache_creation_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  MIN(finalized_at) AS first_finalized_at_unix_secs,
+  MAX(finalized_at) AS last_finalized_at_unix_secs
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push("billing_status = 'settled' AND COALESCE(total_cost_usd, 0) > 0");
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(StoredUsageSettledCostSummary {
+            total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
+            total_requests: sqlite_aggregate_u64(&row, "total_requests")?,
+            input_tokens: sqlite_aggregate_u64(&row, "input_tokens")?,
+            output_tokens: sqlite_aggregate_u64(&row, "output_tokens")?,
+            cache_creation_tokens: sqlite_aggregate_u64(&row, "cache_creation_tokens")?,
+            cache_read_tokens: sqlite_aggregate_u64(&row, "cache_read_tokens")?,
+            first_finalized_at_unix_secs: row
+                .try_get::<Option<i64>, _>("first_finalized_at_unix_secs")
+                .map_sql_err()?
+                .map(|value| value.max(0) as u64),
+            last_finalized_at_unix_secs: row
+                .try_get::<Option<i64>, _>("last_finalized_at_unix_secs")
+                .map_sql_err()?
+                .map(|value| value.max(0) as u64),
+        })
+    }
+
+    async fn summarize_usage_cache_affinity_hit_summary(
+        &self,
+        query: &UsageCacheAffinityHitSummaryQuery,
+    ) -> Result<StoredUsageCacheAffinityHitSummary, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(StoredUsageCacheAffinityHitSummary::default());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  COUNT(*) AS total_requests,
+  COALESCE(SUM(CASE WHEN COALESCE(cache_read_input_tokens, 0) > 0 THEN 1 ELSE 0 END), 0)
+    AS requests_with_cache_hit,
+  COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM({cache_creation_expr}), 0) AS cache_creation_tokens,
+  COALESCE(SUM({total_input_context_expr}), 0) AS total_input_context,
+  COALESCE(SUM(COALESCE(CAST(cache_read_cost_usd AS REAL), 0)), 0) AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(cache_creation_cost_usd AS REAL), 0)), 0)
+    AS cache_creation_cost_usd
+FROM "usage"
+"#,
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR,
+            total_input_context_expr = SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push("status = 'completed'");
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "api_key_id",
+            query.api_key_id.as_deref(),
+        );
+
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(StoredUsageCacheAffinityHitSummary {
+            total_requests: sqlite_aggregate_u64(&row, "total_requests")?,
+            requests_with_cache_hit: sqlite_aggregate_u64(&row, "requests_with_cache_hit")?,
+            input_tokens: sqlite_aggregate_u64(&row, "input_tokens")?,
+            cache_read_tokens: sqlite_aggregate_u64(&row, "cache_read_tokens")?,
+            cache_creation_tokens: sqlite_aggregate_u64(&row, "cache_creation_tokens")?,
+            total_input_context: sqlite_aggregate_u64(&row, "total_input_context")?,
+            cache_read_cost_usd: sqlite_real(&row, "cache_read_cost_usd")?,
+            cache_creation_cost_usd: sqlite_real(&row, "cache_creation_cost_usd")?,
+        })
+    }
+
+    async fn list_usage_cache_affinity_intervals(
+        &self,
+        query: &UsageCacheAffinityIntervalQuery,
+    ) -> Result<Vec<StoredUsageCacheAffinityIntervalRow>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let group_expr = match query.group_by {
+            UsageCacheAffinityIntervalGroupBy::User => "user_id",
+            UsageCacheAffinityIntervalGroupBy::ApiKey => "api_key_id",
+        };
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+WITH filtered_usage AS (
+  SELECT
+    {group_expr} AS group_id,
+    NULL AS username,
+    model,
+    created_at_unix_ms,
+    id,
+    LAG(created_at_unix_ms) OVER (
+      PARTITION BY {group_expr}
+      ORDER BY created_at_unix_ms ASC, id ASC
+    ) AS previous_created_at_unix_secs
+  FROM "usage"
+"#
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "api_key_id",
+            query.api_key_id.as_deref(),
+        );
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push("status = 'completed'");
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder
+            .push(group_expr)
+            .push(" IS NOT NULL AND TRIM(")
+            .push(group_expr)
+            .push(") <> ''");
+        builder.push(
+            r#"
+)
+SELECT
+  group_id,
+  username,
+  model,
+  created_at_unix_ms AS created_at_unix_secs,
+  (created_at_unix_ms - previous_created_at_unix_secs) * 1.0 / 60.0 AS interval_minutes
+FROM filtered_usage
+WHERE previous_created_at_unix_secs IS NOT NULL
+ORDER BY created_at_unix_ms ASC, id ASC
+"#,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageCacheAffinityIntervalRow {
+                    group_id: row.try_get("group_id").map_sql_err()?,
+                    username: row.try_get("username").map_sql_err()?,
+                    model: row.try_get("model").map_sql_err()?,
+                    created_at_unix_secs: sqlite_aggregate_u64(row, "created_at_unix_secs")?,
+                    interval_minutes: sqlite_real(row, "interval_minutes")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn summarize_dashboard_usage(
+        &self,
+        query: &UsageDashboardSummaryQuery,
+    ) -> Result<StoredUsageDashboardSummary, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(StoredUsageDashboardSummary::default());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  COUNT(*) AS total_requests,
+  COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+  COALESCE(SUM({effective_input_expr}), 0) AS effective_input_tokens,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+  COALESCE(SUM({cache_creation_expr}), 0) AS cache_creation_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM({total_input_context_expr}), 0) AS total_input_context,
+  COALESCE(SUM(COALESCE(CAST(cache_creation_cost_usd AS REAL), 0)), 0)
+    AS cache_creation_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(cache_read_cost_usd AS REAL), 0)), 0)
+    AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
+    AS actual_total_cost_usd,
+  COALESCE(SUM(CASE WHEN COALESCE(status_code, 0) >= 400 OR status = 'failed' THEN 1 ELSE 0 END), 0)
+    AS error_requests,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE 0 END), 0)
+    AS response_time_sum_ms,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
+    AS response_time_samples
+FROM "usage"
+"#,
+            effective_input_expr = SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR,
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR,
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR,
+            total_input_context_expr = SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_finalized_filter(&mut builder, &mut has_where);
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(StoredUsageDashboardSummary {
+            total_requests: sqlite_aggregate_u64(&row, "total_requests")?,
+            input_tokens: sqlite_aggregate_u64(&row, "input_tokens")?,
+            effective_input_tokens: sqlite_aggregate_u64(&row, "effective_input_tokens")?,
+            output_tokens: sqlite_aggregate_u64(&row, "output_tokens")?,
+            total_tokens: sqlite_aggregate_u64(&row, "total_tokens")?,
+            cache_creation_tokens: sqlite_aggregate_u64(&row, "cache_creation_tokens")?,
+            cache_read_tokens: sqlite_aggregate_u64(&row, "cache_read_tokens")?,
+            total_input_context: sqlite_aggregate_u64(&row, "total_input_context")?,
+            cache_creation_cost_usd: sqlite_real(&row, "cache_creation_cost_usd")?,
+            cache_read_cost_usd: sqlite_real(&row, "cache_read_cost_usd")?,
+            total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
+            actual_total_cost_usd: sqlite_real(&row, "actual_total_cost_usd")?,
+            error_requests: sqlite_aggregate_u64(&row, "error_requests")?,
+            response_time_sum_ms: sqlite_real(&row, "response_time_sum_ms")?,
+            response_time_samples: sqlite_aggregate_u64(&row, "response_time_samples")?,
+        })
+    }
+
+    async fn list_dashboard_daily_breakdown(
+        &self,
+        query: &UsageDashboardDailyBreakdownQuery,
+    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let date_expr = sqlite_usage_local_date_expr(query.tz_offset_minutes);
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  {date_expr} AS date,
+  model,
+  provider_name AS provider,
+  COUNT(*) AS requests,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE 0 END), 0)
+    AS response_time_sum_ms,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
+    AS response_time_samples
+FROM "usage"
+"#
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_finalized_filter(&mut builder, &mut has_where);
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        builder.push(
+            r#"
+GROUP BY date, model, provider
+ORDER BY date ASC, total_cost_usd DESC, model ASC, provider ASC
+"#,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageDashboardDailyBreakdownRow {
+                    date: row.try_get("date").map_sql_err()?,
+                    model: row.try_get("model").map_sql_err()?,
+                    provider: row.try_get("provider").map_sql_err()?,
+                    requests: sqlite_aggregate_u64(row, "requests")?,
+                    total_tokens: sqlite_aggregate_u64(row, "total_tokens")?,
+                    total_cost_usd: sqlite_real(row, "total_cost_usd")?,
+                    response_time_sum_ms: sqlite_real(row, "response_time_sum_ms")?,
+                    response_time_samples: sqlite_aggregate_u64(row, "response_time_samples")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn summarize_dashboard_provider_counts(
+        &self,
+        query: &UsageDashboardProviderCountsQuery,
+    ) -> Result<Vec<StoredUsageDashboardProviderCount>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+SELECT
+  provider_name,
+  COUNT(*) AS request_count
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_finalized_filter(&mut builder, &mut has_where);
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        builder.push(
+            r#"
+GROUP BY provider_name
+ORDER BY request_count DESC, provider_name ASC
+"#,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageDashboardProviderCount {
+                    provider_name: row.try_get("provider_name").map_sql_err()?,
+                    request_count: sqlite_aggregate_u64(row, "request_count")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn summarize_usage_breakdown(
+        &self,
+        query: &UsageBreakdownSummaryQuery,
+    ) -> Result<Vec<StoredUsageBreakdownSummaryRow>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let group_expr = sqlite_usage_breakdown_group_expr(query.group_by);
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  {group_expr} AS group_key,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  COALESCE(SUM({effective_input_expr}), 0) AS effective_input_tokens,
+  COALESCE(SUM({total_input_context_expr}), 0) AS total_input_context,
+  COALESCE(SUM({cache_creation_expr}), 0) AS cache_creation_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_ephemeral_5m_input_tokens, 0), 0)), 0)
+    AS cache_creation_ephemeral_5m_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_ephemeral_1h_input_tokens, 0), 0)), 0)
+    AS cache_creation_ephemeral_1h_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
+    AS actual_total_cost_usd,
+  COALESCE(SUM({success_flag_expr}), 0) AS success_count,
+  COALESCE(SUM(CASE WHEN {success_flag_expr} = 1 AND response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE 0 END), 0)
+    AS response_time_sum_ms,
+  COALESCE(SUM(CASE WHEN {success_flag_expr} = 1 AND response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
+    AS response_time_samples,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE 0 END), 0)
+    AS overall_response_time_sum_ms,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
+    AS overall_response_time_samples
+FROM "usage"
+"#,
+            effective_input_expr = SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR,
+            total_input_context_expr = SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR,
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR,
+            success_flag_expr = SQLITE_USAGE_SUCCESS_FLAG_EXPR
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_finalized_filter(&mut builder, &mut has_where);
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        if matches!(query.group_by, UsageBreakdownGroupBy::ApiFormat) {
+            push_sqlite_usage_where(&mut builder, &mut has_where);
+            builder.push("api_format IS NOT NULL");
+        }
+        builder.push(" GROUP BY group_key ORDER BY request_count DESC, group_key ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageBreakdownSummaryRow {
+                    group_key: row.try_get("group_key").map_sql_err()?,
+                    request_count: sqlite_aggregate_u64(row, "request_count")?,
+                    input_tokens: sqlite_aggregate_u64(row, "input_tokens")?,
+                    total_tokens: sqlite_aggregate_u64(row, "total_tokens")?,
+                    output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
+                    effective_input_tokens: sqlite_aggregate_u64(row, "effective_input_tokens")?,
+                    total_input_context: sqlite_aggregate_u64(row, "total_input_context")?,
+                    cache_creation_tokens: sqlite_aggregate_u64(row, "cache_creation_tokens")?,
+                    cache_creation_ephemeral_5m_tokens: sqlite_aggregate_u64(
+                        row,
+                        "cache_creation_ephemeral_5m_tokens",
+                    )?,
+                    cache_creation_ephemeral_1h_tokens: sqlite_aggregate_u64(
+                        row,
+                        "cache_creation_ephemeral_1h_tokens",
+                    )?,
+                    cache_read_tokens: sqlite_aggregate_u64(row, "cache_read_tokens")?,
+                    total_cost_usd: sqlite_real(row, "total_cost_usd")?,
+                    actual_total_cost_usd: sqlite_real(row, "actual_total_cost_usd")?,
+                    success_count: sqlite_aggregate_u64(row, "success_count")?,
+                    response_time_sum_ms: sqlite_real(row, "response_time_sum_ms")?,
+                    response_time_samples: sqlite_aggregate_u64(row, "response_time_samples")?,
+                    overall_response_time_sum_ms: sqlite_real(row, "overall_response_time_sum_ms")?,
+                    overall_response_time_samples: sqlite_aggregate_u64(
+                        row,
+                        "overall_response_time_samples",
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    async fn count_monitoring_usage_errors(
+        &self,
+        query: &UsageMonitoringErrorCountQuery,
+    ) -> Result<u64, DataLayerError> {
+        let row = sqlx::query(&format!(
+            r#"
+SELECT COUNT(*) AS total
+FROM "usage"
+WHERE created_at_unix_ms >= ?
+  AND created_at_unix_ms < ?
+  AND {error_predicate}
+"#,
+            error_predicate = SQLITE_MONITORING_ERROR_PREDICATE
+        ))
+        .bind(query.created_from_unix_secs as i64)
+        .bind(query.created_until_unix_secs as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_sql_err()?;
+        sqlite_aggregate_u64(&row, "total")
+    }
+
+    async fn list_monitoring_usage_errors(
+        &self,
+        query: &UsageMonitoringErrorListQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(USAGE_COLUMNS);
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push(SQLITE_MONITORING_ERROR_PREDICATE);
+        builder.push(" ORDER BY created_at_unix_ms DESC, id ASC");
+        if let Some(limit) = query.limit {
+            builder.push(" LIMIT ").push_bind(limit as i64);
+        }
+        self.fetch_usage_items(builder).await
+    }
+
+    async fn summarize_usage_error_distribution(
+        &self,
+        query: &UsageErrorDistributionQuery,
+    ) -> Result<Vec<StoredUsageErrorDistributionRow>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let date_expr = sqlite_usage_local_date_expr(query.tz_offset_minutes);
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  {date_expr} AS date,
+  error_category,
+  COUNT(*) AS count
+FROM "usage"
+"#
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push("error_category IS NOT NULL AND TRIM(error_category) <> ''");
+        builder.push(
+            r#"
+GROUP BY date, error_category
+ORDER BY date ASC, count DESC, error_category ASC
+"#,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageErrorDistributionRow {
+                    date: row.try_get("date").map_sql_err()?,
+                    error_category: row.try_get("error_category").map_sql_err()?,
+                    count: sqlite_aggregate_u64(row, "count")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn summarize_usage_performance_percentiles(
+        &self,
+        query: &UsagePerformancePercentilesQuery,
+    ) -> Result<Vec<StoredUsagePerformancePercentilesRow>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let date_expr = sqlite_usage_local_date_expr(query.tz_offset_minutes);
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+WITH filtered_usage AS (
+  SELECT
+    {date_expr} AS date,
+    response_time_ms,
+    first_byte_time_ms
+  FROM "usage"
+"#
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push("status = 'completed'");
+        builder.push(
+            r#"
+),
+response_ranked AS (
+  SELECT
+    date,
+    response_time_ms AS value,
+    ROW_NUMBER() OVER (PARTITION BY date ORDER BY response_time_ms) AS rn,
+    COUNT(response_time_ms) OVER (PARTITION BY date) AS n
+  FROM filtered_usage
+  WHERE response_time_ms IS NOT NULL
+),
+first_byte_ranked AS (
+  SELECT
+    date,
+    first_byte_time_ms AS value,
+    ROW_NUMBER() OVER (PARTITION BY date ORDER BY first_byte_time_ms) AS rn,
+    COUNT(first_byte_time_ms) OVER (PARTITION BY date) AS n
+  FROM filtered_usage
+  WHERE first_byte_time_ms IS NOT NULL
+),
+response_positions AS (
+  SELECT
+    date,
+    n,
+    0.5 * (n - 1) AS p50_pos,
+    0.9 * (n - 1) AS p90_pos,
+    0.99 * (n - 1) AS p99_pos
+  FROM response_ranked
+  GROUP BY date, n
+),
+first_byte_positions AS (
+  SELECT
+    date,
+    n,
+    0.5 * (n - 1) AS p50_pos,
+    0.9 * (n - 1) AS p90_pos,
+    0.99 * (n - 1) AS p99_pos
+  FROM first_byte_ranked
+  GROUP BY date, n
+),
+response_percentiles AS (
+  SELECT
+    positions.date,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p50_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p50_pos = CAST(positions.p50_pos AS INTEGER)
+          THEN CAST(positions.p50_pos AS INTEGER) + 1
+          ELSE CAST(positions.p50_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p50_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p50_pos - CAST(positions.p50_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p50_response_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p90_pos = CAST(positions.p90_pos AS INTEGER)
+          THEN CAST(positions.p90_pos AS INTEGER) + 1
+          ELSE CAST(positions.p90_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p90_pos - CAST(positions.p90_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p90_response_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p99_pos = CAST(positions.p99_pos AS INTEGER)
+          THEN CAST(positions.p99_pos AS INTEGER) + 1
+          ELSE CAST(positions.p99_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p99_pos - CAST(positions.p99_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p99_response_time_ms
+  FROM response_positions AS positions
+  JOIN response_ranked AS ranked ON ranked.date = positions.date
+  GROUP BY positions.date, positions.n, positions.p50_pos, positions.p90_pos, positions.p99_pos
+),
+first_byte_percentiles AS (
+  SELECT
+    positions.date,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p50_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p50_pos = CAST(positions.p50_pos AS INTEGER)
+          THEN CAST(positions.p50_pos AS INTEGER) + 1
+          ELSE CAST(positions.p50_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p50_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p50_pos - CAST(positions.p50_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p50_first_byte_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p90_pos = CAST(positions.p90_pos AS INTEGER)
+          THEN CAST(positions.p90_pos AS INTEGER) + 1
+          ELSE CAST(positions.p90_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p90_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p90_pos - CAST(positions.p90_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p90_first_byte_time_ms,
+    CASE WHEN positions.n >= 10 THEN CAST((
+      MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      + (
+        MAX(CASE WHEN ranked.rn = CASE WHEN positions.p99_pos = CAST(positions.p99_pos AS INTEGER)
+          THEN CAST(positions.p99_pos AS INTEGER) + 1
+          ELSE CAST(positions.p99_pos AS INTEGER) + 2
+        END THEN ranked.value END)
+        - MAX(CASE WHEN ranked.rn = CAST(positions.p99_pos AS INTEGER) + 1 THEN ranked.value END)
+      ) * (positions.p99_pos - CAST(positions.p99_pos AS INTEGER))
+    ) AS INTEGER) ELSE NULL END AS p99_first_byte_time_ms
+  FROM first_byte_positions AS positions
+  JOIN first_byte_ranked AS ranked ON ranked.date = positions.date
+  GROUP BY positions.date, positions.n, positions.p50_pos, positions.p90_pos, positions.p99_pos
+),
+dates AS (
+  SELECT date FROM response_percentiles
+  UNION
+  SELECT date FROM first_byte_percentiles
+)
+SELECT
+  dates.date,
+  response_percentiles.p50_response_time_ms,
+  response_percentiles.p90_response_time_ms,
+  response_percentiles.p99_response_time_ms,
+  first_byte_percentiles.p50_first_byte_time_ms,
+  first_byte_percentiles.p90_first_byte_time_ms,
+  first_byte_percentiles.p99_first_byte_time_ms
+FROM dates
+LEFT JOIN response_percentiles ON response_percentiles.date = dates.date
+LEFT JOIN first_byte_percentiles ON first_byte_percentiles.date = dates.date
+ORDER BY dates.date ASC
+"#,
+        );
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsagePerformancePercentilesRow {
+                    date: row.try_get("date").map_sql_err()?,
+                    p50_response_time_ms: row
+                        .try_get::<Option<i64>, _>("p50_response_time_ms")
+                        .map_sql_err()?
+                        .map(|value| value.max(0) as u64),
+                    p90_response_time_ms: row
+                        .try_get::<Option<i64>, _>("p90_response_time_ms")
+                        .map_sql_err()?
+                        .map(|value| value.max(0) as u64),
+                    p99_response_time_ms: row
+                        .try_get::<Option<i64>, _>("p99_response_time_ms")
+                        .map_sql_err()?
+                        .map(|value| value.max(0) as u64),
+                    p50_first_byte_time_ms: row
+                        .try_get::<Option<i64>, _>("p50_first_byte_time_ms")
+                        .map_sql_err()?
+                        .map(|value| value.max(0) as u64),
+                    p90_first_byte_time_ms: row
+                        .try_get::<Option<i64>, _>("p90_first_byte_time_ms")
+                        .map_sql_err()?
+                        .map(|value| value.max(0) as u64),
+                    p99_first_byte_time_ms: row
+                        .try_get::<Option<i64>, _>("p99_first_byte_time_ms")
+                        .map_sql_err()?
+                        .map(|value| value.max(0) as u64),
+                })
+            })
+            .collect()
+    }
+
+    async fn summarize_usage_provider_performance(
+        &self,
+        query: &UsageProviderPerformanceQuery,
+    ) -> Result<StoredUsageProviderPerformance, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(StoredUsageProviderPerformance::default());
+        }
+
+        let summary_sql = format!(
+            r#"
+SELECT
+  COUNT(*) AS request_count,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+    THEN 1 ELSE 0 END), 0) AS success_count,
+  CASE
+    WHEN COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(response_time_ms, 0), 0)
+      ELSE 0
+    END), 0) > 0
+    THEN COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(output_tokens, 0), 0)
+      ELSE 0
+    END), 0) * 1000.0 / COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(response_time_ms, 0), 0)
+      ELSE 0
+    END), 0)
+    ELSE NULL
+  END AS avg_output_tps,
+  AVG(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND first_byte_time_ms IS NOT NULL
+    THEN MAX(COALESCE(first_byte_time_ms, 0), 0)
+    ELSE NULL
+  END) AS avg_first_byte_time_ms,
+  AVG(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND response_time_ms IS NOT NULL
+    THEN MAX(COALESCE(response_time_ms, 0), 0)
+    ELSE NULL
+  END) AS avg_response_time_ms,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND COALESCE(response_time_ms, 0) > 0
+         AND COALESCE(output_tokens, 0) > 0
+    THEN 1 ELSE 0 END), 0) AS tps_sample_count,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND response_time_ms IS NOT NULL
+    THEN 1 ELSE 0 END), 0) AS response_time_sample_count,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND first_byte_time_ms IS NOT NULL
+    THEN 1 ELSE 0 END), 0) AS first_byte_sample_count,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL AND response_time_ms >= {slow_threshold} THEN 1 ELSE 0 END), 0)
+    AS slow_request_count
+FROM "usage"
+"#,
+            slow_threshold = query.slow_threshold_ms
+        );
+        let mut summary_builder = QueryBuilder::<Sqlite>::new(summary_sql);
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut summary_builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_where(&mut summary_builder, &mut has_where);
+        summary_builder.push(
+            "COALESCE(status, '') NOT IN ('pending', 'streaming') \
+AND provider_id IS NOT NULL AND TRIM(provider_id) <> '' \
+AND LOWER(TRIM(provider_id)) NOT IN ('unknown', 'pending') \
+AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'pending')",
+        );
+        push_sqlite_usage_provider_performance_filters(&mut summary_builder, query, &mut has_where);
+        let summary_row = summary_builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?;
+        let summary_percentiles = self
+            .summarize_provider_performance_percentiles(query)
+            .await?;
+        let summary = StoredUsageProviderPerformanceSummary {
+            request_count: sqlite_aggregate_u64(&summary_row, "request_count")?,
+            success_count: sqlite_aggregate_u64(&summary_row, "success_count")?,
+            avg_output_tps: sqlite_optional_real(&summary_row, "avg_output_tps")?,
+            avg_first_byte_time_ms: sqlite_optional_real(&summary_row, "avg_first_byte_time_ms")?,
+            avg_response_time_ms: sqlite_optional_real(&summary_row, "avg_response_time_ms")?,
+            p90_response_time_ms: summary_percentiles.p90_response_time_ms,
+            p99_response_time_ms: summary_percentiles.p99_response_time_ms,
+            p90_first_byte_time_ms: summary_percentiles.p90_first_byte_time_ms,
+            p99_first_byte_time_ms: summary_percentiles.p99_first_byte_time_ms,
+            tps_sample_count: sqlite_aggregate_u64(&summary_row, "tps_sample_count")?,
+            response_time_sample_count: sqlite_aggregate_u64(
+                &summary_row,
+                "response_time_sample_count",
+            )?,
+            first_byte_sample_count: sqlite_aggregate_u64(&summary_row, "first_byte_sample_count")?,
+            slow_request_count: sqlite_aggregate_u64(&summary_row, "slow_request_count")?,
+        };
+
+        let provider_sql = format!(
+            r#"
+SELECT
+  provider_id,
+  COALESCE(MAX(NULLIF(TRIM(provider_name), '')), provider_id) AS provider,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+    THEN 1 ELSE 0 END), 0) AS success_count,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  CASE
+    WHEN COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(response_time_ms, 0), 0)
+      ELSE 0
+    END), 0) > 0
+    THEN COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(output_tokens, 0), 0)
+      ELSE 0
+    END), 0) * 1000.0 / COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(response_time_ms, 0), 0)
+      ELSE 0
+    END), 0)
+    ELSE NULL
+  END AS avg_output_tps,
+  AVG(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND first_byte_time_ms IS NOT NULL
+    THEN MAX(COALESCE(first_byte_time_ms, 0), 0)
+    ELSE NULL
+  END) AS avg_first_byte_time_ms,
+  AVG(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND response_time_ms IS NOT NULL
+    THEN MAX(COALESCE(response_time_ms, 0), 0)
+    ELSE NULL
+  END) AS avg_response_time_ms,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND COALESCE(response_time_ms, 0) > 0
+         AND COALESCE(output_tokens, 0) > 0
+    THEN 1 ELSE 0 END), 0) AS tps_sample_count,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND response_time_ms IS NOT NULL
+    THEN 1 ELSE 0 END), 0) AS response_time_sample_count,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND first_byte_time_ms IS NOT NULL
+    THEN 1 ELSE 0 END), 0) AS first_byte_sample_count,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL AND response_time_ms >= {slow_threshold} THEN 1 ELSE 0 END), 0)
+    AS slow_request_count
+FROM "usage"
+"#,
+            slow_threshold = query.slow_threshold_ms
+        );
+        let mut provider_builder = QueryBuilder::<Sqlite>::new(provider_sql);
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut provider_builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_where(&mut provider_builder, &mut has_where);
+        provider_builder.push(
+            "COALESCE(status, '') NOT IN ('pending', 'streaming') \
+AND provider_id IS NOT NULL AND TRIM(provider_id) <> '' \
+AND LOWER(TRIM(provider_id)) NOT IN ('unknown', 'pending') \
+AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'pending')",
+        );
+        push_sqlite_usage_provider_performance_filters(
+            &mut provider_builder,
+            query,
+            &mut has_where,
+        );
+        provider_builder
+            .push(" GROUP BY provider_id ORDER BY request_count DESC, provider_id ASC LIMIT ");
+        provider_builder.push_bind(query.limit.max(1) as i64);
+        let provider_rows = provider_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let provider_ids = provider_rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("provider_id").map_sql_err())
+            .collect::<Result<Vec<_>, DataLayerError>>()?;
+        let provider_percentiles = self
+            .summarize_provider_performance_provider_percentiles(query, &provider_ids)
+            .await?;
+        let providers = provider_rows
+            .iter()
+            .map(|row| {
+                let provider_id = row.try_get::<String, _>("provider_id").map_sql_err()?;
+                let percentiles = provider_percentiles
+                    .get(&provider_id)
+                    .copied()
+                    .unwrap_or_default();
+                Ok(StoredUsageProviderPerformanceProviderRow {
+                    provider_id,
+                    provider: row.try_get("provider").map_sql_err()?,
+                    request_count: sqlite_aggregate_u64(row, "request_count")?,
+                    success_count: sqlite_aggregate_u64(row, "success_count")?,
+                    output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
+                    avg_output_tps: sqlite_optional_real(row, "avg_output_tps")?,
+                    avg_first_byte_time_ms: sqlite_optional_real(row, "avg_first_byte_time_ms")?,
+                    avg_response_time_ms: sqlite_optional_real(row, "avg_response_time_ms")?,
+                    p90_response_time_ms: percentiles.p90_response_time_ms,
+                    p99_response_time_ms: percentiles.p99_response_time_ms,
+                    p90_first_byte_time_ms: percentiles.p90_first_byte_time_ms,
+                    p99_first_byte_time_ms: percentiles.p99_first_byte_time_ms,
+                    tps_sample_count: sqlite_aggregate_u64(row, "tps_sample_count")?,
+                    response_time_sample_count: sqlite_aggregate_u64(
+                        row,
+                        "response_time_sample_count",
+                    )?,
+                    first_byte_sample_count: sqlite_aggregate_u64(row, "first_byte_sample_count")?,
+                    slow_request_count: sqlite_aggregate_u64(row, "slow_request_count")?,
+                })
+            })
+            .collect::<Result<Vec<_>, DataLayerError>>()?;
+        let timeline = if provider_ids.is_empty() {
+            Vec::new()
+        } else {
+            let bucket_expr = sqlite_usage_bucket_expr(query.granularity, query.tz_offset_minutes);
+            let mut timeline_builder = QueryBuilder::<Sqlite>::new(format!(
+                r#"
+SELECT
+  {bucket_expr} AS date,
+  provider_id,
+  COALESCE(MAX(NULLIF(TRIM(provider_name), '')), provider_id) AS provider,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+    THEN 1 ELSE 0 END), 0) AS success_count,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  CASE
+    WHEN COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(response_time_ms, 0), 0)
+      ELSE 0
+    END), 0) > 0
+    THEN COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(output_tokens, 0), 0)
+      ELSE 0
+    END), 0) * 1000.0 / COALESCE(SUM(CASE
+      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+           AND COALESCE(response_time_ms, 0) > 0
+           AND COALESCE(output_tokens, 0) > 0
+      THEN MAX(COALESCE(response_time_ms, 0), 0)
+      ELSE 0
+    END), 0)
+    ELSE NULL
+  END AS avg_output_tps,
+  AVG(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND first_byte_time_ms IS NOT NULL
+    THEN MAX(COALESCE(first_byte_time_ms, 0), 0)
+    ELSE NULL
+  END) AS avg_first_byte_time_ms,
+  AVG(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+         AND response_time_ms IS NOT NULL
+    THEN MAX(COALESCE(response_time_ms, 0), 0)
+    ELSE NULL
+  END) AS avg_response_time_ms,
+  COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL AND response_time_ms >= {slow_threshold} THEN 1 ELSE 0 END), 0)
+    AS slow_request_count
+FROM "usage"
+"#,
+                slow_threshold = query.slow_threshold_ms
+            ));
+            let mut has_where = false;
+            push_sqlite_usage_range(
+                &mut timeline_builder,
+                &mut has_where,
+                query.created_from_unix_secs,
+                query.created_until_unix_secs,
+            );
+            push_sqlite_usage_where(&mut timeline_builder, &mut has_where);
+            timeline_builder.push(
+                "COALESCE(status, '') NOT IN ('pending', 'streaming') \
+AND provider_id IS NOT NULL AND TRIM(provider_id) <> '' \
+AND LOWER(TRIM(provider_id)) NOT IN ('unknown', 'pending') \
+AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'pending')",
+            );
+            push_sqlite_usage_provider_performance_filters(
+                &mut timeline_builder,
+                query,
+                &mut has_where,
+            );
+            push_sqlite_usage_where(&mut timeline_builder, &mut has_where);
+            timeline_builder.push("provider_id IN (");
+            {
+                let mut separated = timeline_builder.separated(", ");
+                for provider_id in &provider_ids {
+                    separated.push_bind(provider_id.clone());
+                }
+            }
+            timeline_builder
+                .push(") GROUP BY date, provider_id ORDER BY date ASC, provider_id ASC");
+            let rows = timeline_builder
+                .build()
+                .fetch_all(&self.pool)
+                .await
+                .map_sql_err()?;
+            rows.iter()
+                .map(|row| {
+                    Ok(StoredUsageProviderPerformanceTimelineRow {
+                        date: row.try_get("date").map_sql_err()?,
+                        provider_id: row.try_get("provider_id").map_sql_err()?,
+                        provider: row.try_get("provider").map_sql_err()?,
+                        request_count: sqlite_aggregate_u64(row, "request_count")?,
+                        success_count: sqlite_aggregate_u64(row, "success_count")?,
+                        output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
+                        avg_output_tps: sqlite_optional_real(row, "avg_output_tps")?,
+                        avg_first_byte_time_ms: sqlite_optional_real(
+                            row,
+                            "avg_first_byte_time_ms",
+                        )?,
+                        avg_response_time_ms: sqlite_optional_real(row, "avg_response_time_ms")?,
+                        slow_request_count: sqlite_aggregate_u64(row, "slow_request_count")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, DataLayerError>>()?
+        };
+
+        Ok(StoredUsageProviderPerformance {
+            summary,
+            providers,
+            timeline,
+        })
+    }
+
+    async fn summarize_usage_cost_savings(
+        &self,
+        query: &UsageCostSavingsSummaryQuery,
+    ) -> Result<StoredUsageCostSavingsSummary, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(StoredUsageCostSavingsSummary::default());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM(COALESCE(CAST(cache_read_cost_usd AS REAL), 0)), 0) AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(cache_creation_cost_usd AS REAL), 0)), 0)
+    AS cache_creation_cost_usd,
+  COALESCE(SUM(
+    {input_price_expr}
+    * MAX(COALESCE(cache_read_input_tokens, 0), 0) / 1000000.0
+  ), 0) AS estimated_full_cost_usd
+FROM "usage"
+"#,
+            input_price_expr = sqlite_usage_metadata_input_price_expr()
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "provider_name",
+            query.provider_name.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "model",
+            query.model.as_deref(),
+        );
+
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(StoredUsageCostSavingsSummary {
+            cache_read_tokens: sqlite_aggregate_u64(&row, "cache_read_tokens")?,
+            cache_read_cost_usd: sqlite_real(&row, "cache_read_cost_usd")?,
+            cache_creation_cost_usd: sqlite_real(&row, "cache_creation_cost_usd")?,
+            estimated_full_cost_usd: sqlite_real(&row, "estimated_full_cost_usd")?,
+        })
+    }
+
+    async fn summarize_usage_time_series(
+        &self,
+        query: &UsageTimeSeriesQuery,
+    ) -> Result<Vec<StoredUsageTimeSeriesBucket>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let bucket_expr = sqlite_usage_bucket_expr(query.granularity, query.tz_offset_minutes);
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  {bucket_expr} AS bucket_key,
+  COUNT(*) AS total_requests,
+  COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+  COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_creation_input_tokens, 0), 0)), 0)
+    AS cache_creation_tokens,
+  COALESCE(SUM(MAX(COALESCE(cache_read_input_tokens, 0), 0)), 0) AS cache_read_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(MAX(COALESCE(response_time_ms, 0), 0)), 0) AS total_response_time_ms
+FROM "usage"
+"#
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "provider_name",
+            query.provider_name.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "model",
+            query.model.as_deref(),
+        );
+        builder.push(" GROUP BY bucket_key ORDER BY bucket_key ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageTimeSeriesBucket {
+                    bucket_key: row.try_get("bucket_key").map_sql_err()?,
+                    total_requests: sqlite_aggregate_u64(row, "total_requests")?,
+                    input_tokens: sqlite_aggregate_u64(row, "input_tokens")?,
+                    output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
+                    cache_creation_tokens: sqlite_aggregate_u64(row, "cache_creation_tokens")?,
+                    cache_read_tokens: sqlite_aggregate_u64(row, "cache_read_tokens")?,
+                    total_cost_usd: sqlite_real(row, "total_cost_usd")?,
+                    total_response_time_ms: sqlite_real(row, "total_response_time_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn summarize_usage_leaderboard(
+        &self,
+        query: &UsageLeaderboardQuery,
+    ) -> Result<Vec<StoredUsageLeaderboardSummary>, DataLayerError> {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let (group_key_expr, legacy_name_expr, extra_filter) =
+            sqlite_usage_leaderboard_group_expr(query.group_by);
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  {group_key_expr} AS group_key,
+  MAX({legacy_name_expr}) AS legacy_name,
+  COUNT(*) AS request_count,
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd
+FROM "usage"
+"#,
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_range(
+            &mut builder,
+            &mut has_where,
+            query.created_from_unix_secs,
+            query.created_until_unix_secs,
+        );
+        push_sqlite_usage_finalized_filter(&mut builder, &mut has_where);
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder.push(extra_filter);
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "provider_name",
+            query.provider_name.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "model",
+            query.model.as_deref(),
+        );
+        builder.push(" GROUP BY group_key ORDER BY group_key ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageLeaderboardSummary {
+                    group_key: row.try_get("group_key").map_sql_err()?,
+                    legacy_name: row.try_get("legacy_name").map_sql_err()?,
+                    request_count: sqlite_aggregate_u64(row, "request_count")?,
+                    total_tokens: sqlite_aggregate_u64(row, "total_tokens")?,
+                    total_cost_usd: sqlite_real(row, "total_cost_usd")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn list_recent_usage_audits(
+        &self,
+        user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(USAGE_COLUMNS);
+        let mut has_where = false;
+        push_sqlite_usage_optional_text_filter(&mut builder, &mut has_where, "user_id", user_id);
+        builder.push(" ORDER BY created_at_unix_ms DESC, id ASC LIMIT ");
+        builder.push_bind(limit as i64);
+        self.fetch_usage_items(builder).await
+    }
+
+    async fn summarize_total_tokens_by_api_key_ids(
+        &self,
+        api_key_ids: &[String],
+    ) -> Result<BTreeMap<String, u64>, DataLayerError> {
+        if api_key_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+SELECT
+  api_key_id,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens
+FROM "usage"
+WHERE api_key_id IN (
+"#,
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for api_key_id in api_key_ids {
+                separated.push_bind(api_key_id.clone());
+            }
+        }
+        builder.push(") GROUP BY api_key_id ORDER BY api_key_id ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        let mut totals = BTreeMap::new();
+        for row in rows {
+            totals.insert(
+                row.try_get("api_key_id").map_sql_err()?,
+                sqlite_aggregate_u64(&row, "total_tokens")?,
+            );
+        }
+        Ok(totals)
+    }
+
+    async fn summarize_usage_by_provider_api_key_ids(
+        &self,
+        provider_api_key_ids: &[String],
+    ) -> Result<BTreeMap<String, StoredProviderApiKeyUsageSummary>, DataLayerError> {
+        if provider_api_key_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            r#"
+SELECT
+  provider_api_key_id,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  MAX(created_at_unix_ms) AS last_used_at_unix_secs
+FROM "usage"
+WHERE provider_api_key_id IN (
+"#,
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for provider_api_key_id in provider_api_key_ids {
+                separated.push_bind(provider_api_key_id.clone());
+            }
+        }
+        builder.push(") GROUP BY provider_api_key_id ORDER BY provider_api_key_id ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        let mut summaries = BTreeMap::new();
+        for row in rows {
+            let provider_api_key_id: String = row.try_get("provider_api_key_id").map_sql_err()?;
+            summaries.insert(
+                provider_api_key_id.clone(),
+                StoredProviderApiKeyUsageSummary {
+                    provider_api_key_id,
+                    request_count: sqlite_aggregate_u64(&row, "request_count")?,
+                    total_tokens: sqlite_aggregate_u64(&row, "total_tokens")?,
+                    total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
+                    last_used_at_unix_secs: row
+                        .try_get::<Option<i64>, _>("last_used_at_unix_secs")
+                        .map_sql_err()?
+                        .map(|value| value.max(0) as u64),
+                },
+            );
+        }
+        Ok(summaries)
+    }
+
+    async fn summarize_usage_by_provider_api_key_windows(
+        &self,
+        requests: &[ProviderApiKeyWindowUsageRequest],
+    ) -> Result<Vec<StoredProviderApiKeyWindowUsageSummary>, DataLayerError> {
+        let mut summaries = Vec::with_capacity(requests.len());
+        for request in requests {
+            let provider_api_key_id = request.provider_api_key_id.trim();
+            if provider_api_key_id.is_empty() {
+                return Err(DataLayerError::InvalidInput(
+                    "provider api key window usage provider_api_key_id cannot be empty".to_string(),
+                ));
+            }
+            let window_code = request.window_code.trim();
+            if window_code.is_empty() {
+                return Err(DataLayerError::InvalidInput(
+                    "provider api key window usage window_code cannot be empty".to_string(),
+                ));
+            }
+            if request.start_unix_secs >= request.end_unix_secs {
+                return Err(DataLayerError::InvalidInput(
+                    "provider api key window usage range must be non-empty".to_string(),
+                ));
+            }
+
+            let row = sqlx::query(
+                r#"
+SELECT
+  COUNT(*) AS request_count,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd
+FROM "usage"
+WHERE provider_api_key_id = ?
+  AND created_at_unix_ms >= ?
+  AND created_at_unix_ms < ?
+"#,
+            )
+            .bind(provider_api_key_id)
+            .bind(request.start_unix_secs as i64)
+            .bind(request.end_unix_secs as i64)
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?;
+
+            summaries.push(StoredProviderApiKeyWindowUsageSummary {
+                provider_api_key_id: provider_api_key_id.to_string(),
+                window_code: window_code.to_string(),
+                request_count: sqlite_aggregate_u64(&row, "request_count")?,
+                total_tokens: sqlite_aggregate_u64(&row, "total_tokens")?,
+                total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
+            });
+        }
+        Ok(summaries)
+    }
+
+    async fn summarize_provider_usage_since(
+        &self,
+        provider_id: &str,
+        since_unix_secs: u64,
+    ) -> Result<StoredProviderUsageSummary, DataLayerError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+  COUNT(*) AS total_requests,
+  COALESCE(SUM(CASE
+    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+         AND (status_code IS NULL OR status_code < 400)
+    THEN 1 ELSE 0 END), 0) AS successful_requests,
+  COALESCE(SUM(CASE
+    WHEN status NOT IN ('pending', 'streaming')
+         AND NOT (
+           LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
+           AND (status_code IS NULL OR status_code < 400)
+         )
+    THEN 1 ELSE 0 END), 0) AS failed_requests,
+  COALESCE(AVG(CASE WHEN response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE NULL END), 0)
+    AS avg_response_time_ms,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd
+FROM "usage"
+WHERE provider_id = ?
+  AND created_at_unix_ms >= ?
+"#,
+        )
+        .bind(provider_id)
+        .bind(since_unix_secs as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_sql_err()?;
+
+        Ok(StoredProviderUsageSummary {
+            total_requests: sqlite_aggregate_u64(&row, "total_requests")?,
+            successful_requests: sqlite_aggregate_u64(&row, "successful_requests")?,
+            failed_requests: sqlite_aggregate_u64(&row, "failed_requests")?,
+            avg_response_time_ms: sqlite_real(&row, "avg_response_time_ms")?,
+            total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
+        })
+    }
+
+    async fn summarize_usage_daily_heatmap(
+        &self,
+        query: &UsageDailyHeatmapQuery,
+    ) -> Result<Vec<StoredUsageDailySummary>, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            r#"
+SELECT
+  date(created_at_unix_ms, 'unixepoch') AS date,
+  COUNT(*) AS requests,
+  COALESCE(SUM(
+    MAX(COALESCE(input_tokens, 0), 0)
+    + MAX(COALESCE(output_tokens, 0), 0)
+    + {cache_creation_expr}
+    + MAX(COALESCE(cache_read_input_tokens, 0), 0)
+  ), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
+    AS actual_total_cost_usd
+FROM "usage"
+"#,
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR
+        ));
+        let mut has_where = false;
+        push_sqlite_usage_where(&mut builder, &mut has_where);
+        builder
+            .push("created_at_unix_ms >= ")
+            .push_bind(query.created_from_unix_secs as i64);
+        push_sqlite_usage_finalized_filter(&mut builder, &mut has_where);
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "user_id",
+            query.user_id.as_deref(),
+        );
+        builder.push(" GROUP BY date ORDER BY date ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageDailySummary {
+                    date: row.try_get("date").map_sql_err()?,
+                    requests: sqlite_aggregate_u64(row, "requests")?,
+                    total_tokens: sqlite_aggregate_u64(row, "total_tokens")?,
+                    total_cost_usd: sqlite_real(row, "total_cost_usd")?,
+                    actual_total_cost_usd: sqlite_real(row, "actual_total_cost_usd")?,
+                })
+            })
+            .collect()
+    }
+}
 
 impl SqliteUsageWriteRepository {
     pub fn new(pool: SqlitePool) -> Self {
@@ -360,54 +3348,34 @@ SET request_count = 0,
         .await
         .map_sql_err()?;
 
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
 SELECT
   provider_api_key_id,
-  status,
-  status_code,
-  error_message,
-  total_tokens,
-  CAST(total_cost_usd AS REAL) AS total_cost_usd,
-  response_time_ms,
-  updated_at_unix_secs
+  COUNT(*) AS request_count,
+  COALESCE(SUM({success_flag_expr}), 0) AS success_count,
+  COALESCE(SUM({error_flag_expr}), 0) AS error_count,
+  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(CASE
+    WHEN {success_flag_expr} = 1 AND response_time_ms IS NOT NULL
+    THEN MAX(COALESCE(response_time_ms, 0), 0)
+    ELSE 0
+  END), 0) AS total_response_time_ms,
+  MAX(created_at_unix_ms) AS last_used_at
 FROM "usage"
-WHERE provider_api_key_id IS NOT NULL AND provider_api_key_id <> ''
+WHERE provider_api_key_id IS NOT NULL
+  AND TRIM(provider_api_key_id) <> ''
+GROUP BY provider_api_key_id
 "#,
-        )
+            success_flag_expr = SQLITE_PROVIDER_KEY_SUCCESS_FLAG_EXPR,
+            error_flag_expr = SQLITE_PROVIDER_KEY_ERROR_FLAG_EXPR
+        ))
         .fetch_all(&self.pool)
         .await
         .map_sql_err()?;
 
-        let mut stats = BTreeMap::<String, ProviderKeyStats>::new();
-        for row in rows {
-            let key_id: String = row.try_get("provider_api_key_id").map_sql_err()?;
-            let status: String = row.try_get("status").map_sql_err()?;
-            let status_code = row.try_get::<Option<i64>, _>("status_code").map_sql_err()?;
-            let status_code_u16 = status_code.and_then(|value| u16::try_from(value).ok());
-            let error_message: Option<String> = row.try_get("error_message").map_sql_err()?;
-            let entry = stats.entry(key_id).or_default();
-            entry.request_count += 1;
-            if provider_api_key_usage_is_success(&status, status_code_u16, error_message.as_deref())
-            {
-                entry.success_count += 1;
-            }
-            if provider_api_key_usage_is_error(&status, status_code_u16, error_message.as_deref()) {
-                entry.error_count += 1;
-            }
-            entry.total_tokens += row.try_get::<i64, _>("total_tokens").map_sql_err()?;
-            entry.total_cost_usd += sqlite_real(&row, "total_cost_usd")?;
-            entry.total_response_time_ms += row
-                .try_get::<Option<i64>, _>("response_time_ms")
-                .map_sql_err()?
-                .unwrap_or_default();
-            entry.last_used_at = entry.last_used_at.max(
-                row.try_get::<Option<i64>, _>("updated_at_unix_secs")
-                    .map_sql_err()?,
-            );
-        }
-
-        for (key_id, stat) in &stats {
+        for row in &rows {
             sqlx::query(
                 r#"
 UPDATE provider_api_keys
@@ -421,20 +3389,29 @@ SET request_count = ?,
 WHERE id = ?
 "#,
             )
-            .bind(stat.request_count)
-            .bind(stat.success_count)
-            .bind(stat.error_count)
-            .bind(stat.total_tokens)
-            .bind(stat.total_cost_usd)
-            .bind(stat.total_response_time_ms)
-            .bind(stat.last_used_at)
-            .bind(key_id)
+            .bind(row.try_get::<i64, _>("request_count").map_sql_err()?)
+            .bind(row.try_get::<i64, _>("success_count").map_sql_err()?)
+            .bind(row.try_get::<i64, _>("error_count").map_sql_err()?)
+            .bind(row.try_get::<i64, _>("total_tokens").map_sql_err()?)
+            .bind(sqlite_real(row, "total_cost_usd")?)
+            .bind(
+                row.try_get::<i64, _>("total_response_time_ms")
+                    .map_sql_err()?,
+            )
+            .bind(
+                row.try_get::<Option<i64>, _>("last_used_at")
+                    .map_sql_err()?,
+            )
+            .bind(
+                row.try_get::<String, _>("provider_api_key_id")
+                    .map_sql_err()?,
+            )
             .execute(&self.pool)
             .await
             .map_sql_err()?;
         }
 
-        Ok(stats.len() as u64)
+        Ok(rows.len() as u64)
     }
 
     async fn cleanup_stale_pending_requests(
@@ -591,17 +3568,6 @@ struct StalePendingUsageRow {
     request_id: String,
     status: String,
     billing_status: String,
-}
-
-#[derive(Default)]
-struct ProviderKeyStats {
-    request_count: i64,
-    success_count: i64,
-    error_count: i64,
-    total_tokens: i64,
-    total_cost_usd: f64,
-    total_response_time_ms: i64,
-    last_used_at: Option<i64>,
 }
 
 async fn completed_request_ids_sqlite<'a>(
@@ -796,8 +3762,8 @@ fn map_usage_row(row: &SqliteRow) -> Result<StoredRequestUsageAudit, DataLayerEr
         row.try_get("request_id").map_sql_err()?,
         row.try_get("user_id").map_sql_err()?,
         row.try_get("api_key_id").map_sql_err()?,
-        None,
-        None,
+        row.try_get("username").map_sql_err()?,
+        row.try_get("api_key_name").map_sql_err()?,
         row.try_get("provider_name").map_sql_err()?,
         row.try_get("model").map_sql_err()?,
         row.try_get("target_model").map_sql_err()?,

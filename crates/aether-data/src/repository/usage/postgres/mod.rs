@@ -1348,8 +1348,41 @@ const REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL: &str =
 
 const LIST_USAGE_AUDITS_PREFIX: &str = include_str!("queries/list_usage_audits_prefix.sql");
 const USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_name, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')";
+const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_id, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')";
+const USAGE_RAW_PROVIDER_GROUP_KEY_SQL: &str = r#"CASE
+      WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
+        OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
+      THEN BTRIM("usage".provider_name)
+      ELSE BTRIM("usage".provider_id)
+    END"#;
+const USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL: &str = r#"CASE
+      WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
+        OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
+      THEN NULL
+      ELSE BTRIM("usage".provider_name)
+    END"#;
+const USAGE_PROVIDER_IDENTITY_JOIN_SQL: &str = r#"  LEFT JOIN providers AS provider_by_id
+    ON BTRIM(COALESCE("usage".provider_id, '')) <> ''
+   AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
+   AND provider_by_id.id = BTRIM("usage".provider_id)"#;
+const USAGE_RESOLVED_PROVIDER_GROUP_KEY_SQL: &str = r#"COALESCE(
+      provider_by_id.id,
+      BTRIM("usage".provider_id)
+    )"#;
+const USAGE_RESOLVED_PROVIDER_DISPLAY_NAME_SQL: &str = r#"COALESCE(
+      provider_by_id.name,
+      CASE
+        WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
+          OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
+        THEN NULL
+        ELSE BTRIM("usage".provider_name)
+      END
+    )"#;
 
 struct UsageAuditAggregationSqlFragments {
+    provider_identity_join: &'static str,
+    provider_group_key_expr: &'static str,
+    provider_display_name_expr: &'static str,
     filtered_extra_where: &'static str,
     group_key_expr: &'static str,
     display_name_expr: &'static str,
@@ -1365,6 +1398,9 @@ fn usage_audit_aggregation_sql_fragments(
 ) -> UsageAuditAggregationSqlFragments {
     match group_by {
         UsageAuditAggregationGroupBy::Model => UsageAuditAggregationSqlFragments {
+            provider_identity_join: "",
+            provider_group_key_expr: USAGE_RAW_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: "",
             group_key_expr: "model",
             display_name_expr: "NULL::varchar",
@@ -1375,6 +1411,9 @@ fn usage_audit_aggregation_sql_fragments(
             success_count_expr: "NULL::BIGINT",
         },
         UsageAuditAggregationGroupBy::Provider => UsageAuditAggregationSqlFragments {
+            provider_identity_join: USAGE_PROVIDER_IDENTITY_JOIN_SQL,
+            provider_group_key_expr: USAGE_RESOLVED_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RESOLVED_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: "",
             group_key_expr: "provider_group_key",
             display_name_expr: "provider_display_name",
@@ -1385,6 +1424,9 @@ fn usage_audit_aggregation_sql_fragments(
             success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
         },
         UsageAuditAggregationGroupBy::ApiFormat => UsageAuditAggregationSqlFragments {
+            provider_identity_join: "",
+            provider_group_key_expr: USAGE_RAW_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: "",
             group_key_expr: "api_format_group_key",
             display_name_expr: "NULL::varchar",
@@ -1395,6 +1437,9 @@ fn usage_audit_aggregation_sql_fragments(
             success_count_expr: "NULL::BIGINT",
         },
         UsageAuditAggregationGroupBy::User => UsageAuditAggregationSqlFragments {
+            provider_identity_join: "",
+            provider_group_key_expr: USAGE_RAW_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: " AND \"usage\".user_id IS NOT NULL",
             group_key_expr: "user_id",
             display_name_expr: "NULL::varchar",
@@ -6409,6 +6454,7 @@ WHERE stats_daily_api_key.date >=
             display_name_expr,
             avg_response_time_expr,
             success_count_expr,
+            join_clause,
         ) = match group_by {
             UsageAuditAggregationGroupBy::Model => (
                 "stats_user_daily_model",
@@ -6416,13 +6462,15 @@ WHERE stats_daily_api_key.date >=
                 "NULL::varchar",
                 "NULL::DOUBLE PRECISION",
                 "NULL::BIGINT",
+                "",
             ),
             UsageAuditAggregationGroupBy::Provider => (
                 "stats_user_daily_provider",
                 "provider_name",
-                "provider_name",
+                "MAX(provider_name)",
                 "CASE WHEN COALESCE(SUM(response_time_samples), 0) > 0 THEN COALESCE(SUM(response_time_sum_ms), 0) / COALESCE(SUM(response_time_samples), 0) ELSE NULL END",
                 "COALESCE(SUM(success_requests), 0)::BIGINT",
+                "",
             ),
             UsageAuditAggregationGroupBy::ApiFormat => (
                 "stats_user_daily_api_format",
@@ -6430,6 +6478,7 @@ WHERE stats_daily_api_key.date >=
                 "NULL::varchar",
                 "CASE WHEN COALESCE(SUM(response_time_samples), 0) > 0 THEN COALESCE(SUM(response_time_sum_ms), 0) / COALESCE(SUM(response_time_samples), 0) ELSE NULL END",
                 "NULL::BIGINT",
+                "",
             ),
             UsageAuditAggregationGroupBy::User => {
                 return Ok(Vec::new());
@@ -6464,6 +6513,7 @@ SELECT
   {avg_response_time_expr} AS avg_response_time_ms,
   {success_count_expr} AS success_count
 FROM {table_name}
+{join_clause}
 WHERE date >= $1
   AND date < $2
   {provider_extra_where}
@@ -6475,6 +6525,7 @@ ORDER BY request_count DESC, group_key ASC
             avg_response_time_expr = avg_response_time_expr,
             success_count_expr = success_count_expr,
             table_name = table_name,
+            join_clause = join_clause,
             provider_extra_where = provider_extra_where,
         );
 
@@ -6495,9 +6546,9 @@ ORDER BY request_count DESC, group_key ASC
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         let fragments = usage_audit_aggregation_sql_fragments(query.group_by);
         let provider_extra_where =
-            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
-                || query.exclude_reserved_provider_labels
-            {
+            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
+                USAGE_PROVIDER_IDENTITY_FILTER_SQL
+            } else if query.exclude_reserved_provider_labels {
                 USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL
             } else {
                 ""
@@ -6508,18 +6559,8 @@ WITH filtered_usage AS (
   SELECT
     "usage".model AS model,
     "usage".user_id AS user_id,
-    CASE
-      WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
-        OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
-      THEN BTRIM("usage".provider_name)
-      ELSE BTRIM("usage".provider_id)
-    END AS provider_group_key,
-    CASE
-      WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
-        OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
-      THEN NULL
-      ELSE BTRIM("usage".provider_name)
-    END AS provider_display_name,
+    {provider_group_key_expr} AS provider_group_key,
+    {provider_display_name_expr} AS provider_display_name,
     COALESCE("usage".api_format, 'unknown') AS api_format_group_key,
     GREATEST(COALESCE("usage".input_tokens, 0), 0) AS input_tokens,
     GREATEST(COALESCE("usage".output_tokens, 0), 0) AS output_tokens,
@@ -6550,6 +6591,7 @@ WITH filtered_usage AS (
       ELSE 0
     END AS success_flag
   FROM usage_billing_facts AS "usage"
+{provider_identity_join}
   WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
     AND "usage".created_at < TO_TIMESTAMP($2::double precision)
     AND "usage".status NOT IN ('pending', 'streaming')
@@ -6649,6 +6691,9 @@ LIMIT $3
 "#,
             provider_extra_where = provider_extra_where,
             filtered_extra_where = fragments.filtered_extra_where,
+            provider_identity_join = fragments.provider_identity_join,
+            provider_group_key_expr = fragments.provider_group_key_expr,
+            provider_display_name_expr = fragments.provider_display_name_expr,
             group_key_expr = fragments.group_key_expr,
             display_name_expr = fragments.display_name_expr,
             secondary_name_expr = fragments.secondary_name_expr,
@@ -6681,6 +6726,9 @@ LIMIT $3
         query: &UsageAuditAggregationQuery,
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         if matches!(query.group_by, UsageAuditAggregationGroupBy::User) {
+            return self.aggregate_usage_audits_raw(query).await;
+        }
+        if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
             return self.aggregate_usage_audits_raw(query).await;
         }
         if query.exclude_reserved_provider_labels

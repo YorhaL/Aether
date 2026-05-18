@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, Row};
+use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::types::{
     bucket_start_unix_secs, build_tunnel_error_event_detail, build_tunnel_metrics_sample,
@@ -14,6 +14,7 @@ use super::types::{
 use crate::driver::sqlite::SqlitePool;
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
+use aether_data_query::{push_eq, push_limit, WhereClause};
 
 #[derive(Debug, Clone)]
 pub struct SqliteProxyNodeReadRepository {
@@ -337,13 +338,23 @@ SELECT
 FROM proxy_nodes
 "#;
 
+const PROXY_NODE_EVENT_COLUMNS: &str = r#"
+SELECT
+  id,
+  node_id,
+  event_type,
+  detail,
+  event_metadata,
+  created_at AS created_at_unix_ms
+FROM proxy_node_events
+"#;
+
 #[async_trait]
 impl ProxyNodeReadRepository for SqliteProxyNodeReadRepository {
     async fn list_proxy_nodes(&self) -> Result<Vec<StoredProxyNode>, DataLayerError> {
-        let rows = sqlx::query(&format!("{PROXY_NODE_COLUMNS} ORDER BY name ASC, id ASC"))
-            .fetch_all(&self.pool)
-            .await
-            .map_sql_err()?;
+        let mut builder = QueryBuilder::<Sqlite>::new(PROXY_NODE_COLUMNS);
+        builder.push(" ORDER BY name ASC, id ASC");
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_proxy_node_row).collect()
     }
 
@@ -351,8 +362,12 @@ impl ProxyNodeReadRepository for SqliteProxyNodeReadRepository {
         &self,
         node_id: &str,
     ) -> Result<Option<StoredProxyNode>, DataLayerError> {
-        let row = sqlx::query(&format!("{PROXY_NODE_COLUMNS} WHERE id = ? LIMIT 1"))
-            .bind(node_id)
+        let mut builder = QueryBuilder::<Sqlite>::new(PROXY_NODE_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(&mut builder, &mut where_clause, "id", node_id.to_string());
+        push_limit(&mut builder, 1);
+        let row = builder
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
@@ -364,26 +379,17 @@ impl ProxyNodeReadRepository for SqliteProxyNodeReadRepository {
         node_id: &str,
         limit: usize,
     ) -> Result<Vec<StoredProxyNodeEvent>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  id,
-  node_id,
-  event_type,
-  detail,
-  event_metadata,
-  created_at AS created_at_unix_ms
-FROM proxy_node_events
-WHERE node_id = ?
-ORDER BY created_at DESC, id DESC
-LIMIT ?
-"#,
-        )
-        .bind(node_id)
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
+        let mut builder = QueryBuilder::<Sqlite>::new(PROXY_NODE_EVENT_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "node_id",
+            node_id.to_string(),
+        );
+        builder.push(" ORDER BY created_at DESC, id DESC");
+        push_limit(&mut builder, i64::try_from(limit).unwrap_or(i64::MAX));
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_proxy_node_event_row).collect()
     }
 
@@ -392,51 +398,36 @@ LIMIT ?
         node_id: &str,
         query: &ProxyNodeEventQuery,
     ) -> Result<Vec<StoredProxyNodeEvent>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  id,
-  node_id,
-  event_type,
-  detail,
-  event_metadata,
-  created_at AS created_at_unix_ms
-FROM proxy_node_events
-WHERE node_id = ?
-  AND (? IS NULL OR created_at >= ?)
-  AND (? IS NULL OR created_at <= ?)
-  AND (? IS NULL OR LOWER(event_type) = LOWER(?))
-ORDER BY created_at DESC, id DESC
-LIMIT ?
-"#,
-        )
-        .bind(node_id)
-        .bind(
-            query
-                .from_unix_secs
-                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
-        )
-        .bind(
-            query
-                .from_unix_secs
-                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
-        )
-        .bind(
-            query
-                .to_unix_secs
-                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
-        )
-        .bind(
-            query
-                .to_unix_secs
-                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
-        )
-        .bind(query.event_type.as_deref())
-        .bind(query.event_type.as_deref())
-        .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
+        let mut builder = QueryBuilder::<Sqlite>::new(PROXY_NODE_EVENT_COLUMNS);
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "node_id",
+            node_id.to_string(),
+        );
+        if let Some(from_unix_secs) = query.from_unix_secs {
+            where_clause.push_next(&mut builder);
+            builder
+                .push("created_at >= ")
+                .push_bind(i64::try_from(from_unix_secs).unwrap_or(i64::MAX));
+        }
+        if let Some(to_unix_secs) = query.to_unix_secs {
+            where_clause.push_next(&mut builder);
+            builder
+                .push("created_at <= ")
+                .push_bind(i64::try_from(to_unix_secs).unwrap_or(i64::MAX));
+        }
+        if let Some(event_type) = query.event_type.as_deref() {
+            where_clause.push_next(&mut builder);
+            builder
+                .push("LOWER(event_type) = LOWER(")
+                .push_bind(event_type.to_string())
+                .push(")");
+        }
+        builder.push(" ORDER BY created_at DESC, id DESC");
+        push_limit(&mut builder, i64::try_from(query.limit).unwrap_or(i64::MAX));
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter().map(map_proxy_node_event_row).collect()
     }
 

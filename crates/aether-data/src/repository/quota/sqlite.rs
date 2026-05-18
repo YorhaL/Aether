@@ -1,25 +1,14 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
+use sqlx::{sqlite::SqliteRow, Row, Sqlite};
 
 use super::{
-    ProviderQuotaReadRepository, ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,
+    quota_snapshot_select, ProviderQuotaReadRepository, ProviderQuotaWriteRepository,
+    StoredProviderQuotaSnapshot,
 };
 use crate::driver::sqlite::{sqlite_optional_real, sqlite_real, SqlitePool};
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
-
-const QUOTA_COLUMNS: &str = r#"
-SELECT
-  id AS provider_id,
-  billing_type,
-  CAST(monthly_quota_usd AS REAL) AS monthly_quota_usd,
-  CAST(COALESCE(monthly_used_usd, 0) AS REAL) AS monthly_used_usd,
-  quota_reset_day,
-  quota_last_reset_at AS quota_last_reset_at_unix_secs,
-  quota_expires_at AS quota_expires_at_unix_secs,
-  is_active
-FROM providers
-"#;
+use aether_data_query::SqlDialect;
 
 #[derive(Debug, Clone)]
 pub struct SqliteProviderQuotaRepository {
@@ -38,8 +27,11 @@ impl ProviderQuotaReadRepository for SqliteProviderQuotaRepository {
         &self,
         provider_id: &str,
     ) -> Result<Option<StoredProviderQuotaSnapshot>, DataLayerError> {
-        let row = sqlx::query(&format!("{QUOTA_COLUMNS} WHERE id = ? LIMIT 1"))
-            .bind(provider_id)
+        let mut statement = quota_snapshot_select().statement::<Sqlite>(SqlDialect::Sqlite);
+        statement.where_eq("id", provider_id.to_string()).limit(1);
+        let row = statement
+            .finish()
+            .build()
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
@@ -54,16 +46,16 @@ impl ProviderQuotaReadRepository for SqliteProviderQuotaRepository {
             return Ok(Vec::new());
         }
 
-        let mut builder = QueryBuilder::<Sqlite>::new(QUOTA_COLUMNS);
-        builder.push(" WHERE id IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for provider_id in provider_ids {
-                separated.push_bind(provider_id);
-            }
-        }
-        builder.push(") ORDER BY id ASC");
-        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        let mut statement = quota_snapshot_select().statement::<Sqlite>(SqlDialect::Sqlite);
+        statement
+            .where_in("id", provider_ids)
+            .order_by_sql("id ASC");
+        let rows = statement
+            .finish()
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
         rows.iter().map(map_row).collect()
     }
 }

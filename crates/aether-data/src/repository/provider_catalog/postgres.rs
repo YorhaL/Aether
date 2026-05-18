@@ -11,6 +11,10 @@ use crate::{
     error::{postgres_error, SqlxResultExt},
     DataLayerError,
 };
+use aether_data_query::{
+    push_ci_contains_any, push_eq, push_in, push_limit_offset, push_optional_eq, SqlDialect,
+    WhereClause,
+};
 
 const LIST_PROVIDERS_BY_IDS_PREFIX: &str = r#"
 SELECT
@@ -358,43 +362,14 @@ impl SqlxProviderCatalogReadRepository {
         &self,
         active_only: bool,
     ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
-        collect_query_rows(
-            sqlx::query(
-                r#"
-SELECT
-  id,
-  name,
-  description,
-  website,
-  provider_type,
-  CAST(billing_type AS TEXT) AS billing_type,
-  CAST(monthly_quota_usd AS DOUBLE PRECISION) AS monthly_quota_usd,
-  CAST(monthly_used_usd AS DOUBLE PRECISION) AS monthly_used_usd,
-  quota_reset_day,
-  CAST(EXTRACT(EPOCH FROM quota_last_reset_at) AS BIGINT) AS quota_last_reset_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM quota_expires_at) AS BIGINT) AS quota_expires_at_unix_secs,
-  provider_priority,
-  is_active,
-  keep_priority_on_conversion,
-  enable_format_conversion,
-  concurrent_limit,
-  max_retries,
-  proxy,
-  request_timeout,
-  stream_first_byte_timeout,
-  config,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
-FROM providers
-WHERE ($1::boolean = false OR is_active = true)
-ORDER BY provider_priority ASC, name ASC
-"#,
-            )
-            .bind(active_only)
-            .fetch(&self.pool),
-            map_provider_row,
-        )
-        .await
+        let mut builder =
+            QueryBuilder::<Postgres>::new(select_prefix_for_in(LIST_PROVIDERS_BY_IDS_PREFIX));
+        let mut where_clause = WhereClause::new();
+        if active_only {
+            push_eq(&mut builder, &mut where_clause, "is_active", true);
+        }
+        builder.push(" ORDER BY provider_priority ASC, name ASC");
+        collect_query_rows(builder.build().fetch(&self.pool), map_provider_row).await
     }
 
     pub async fn list_endpoints_by_ids(
@@ -560,12 +535,6 @@ ORDER BY provider_priority ASC, name ASC
                 query.limit
             ))
         })?;
-        let search_pattern = query
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| format!("%{}%", value.to_ascii_lowercase()));
         let order_by = match query.order {
             ProviderCatalogKeyListOrder::Name => "internal_priority ASC, name ASC, id ASC",
             ProviderCatalogKeyListOrder::CreatedAt => {
@@ -585,99 +554,25 @@ ORDER BY provider_priority ASC, name ASC
             }
         };
 
-        let count_row = sqlx::query(
-            r#"
-SELECT COUNT(*)::BIGINT AS total
-FROM provider_api_keys
-WHERE provider_id = $1
-  AND ($2::TEXT IS NULL OR LOWER(name) LIKE $2 OR LOWER(id) LIKE $2)
-  AND ($3::BOOLEAN IS NULL OR is_active = $3)
-"#,
-        )
-        .bind(&query.provider_id)
-        .bind(search_pattern.as_deref())
-        .bind(query.is_active)
-        .fetch_one(&self.pool)
-        .await
-        .map_postgres_err()?;
-        let total = row_get::<i64>(&count_row, "total")?.max(0) as usize;
-
-        let sql = format!(
-            r#"
-SELECT
-  id,
-  provider_id,
-  name,
-  auth_type,
-  capabilities,
-  is_active,
-  api_formats,
-  auth_type_by_format,
-  allow_auth_channel_mismatch_formats,
-  COALESCE(api_key, encrypted_key) AS api_key,
-  auth_config,
-  note,
-  internal_priority,
-  rate_multipliers,
-  global_priority_by_format,
-  allowed_models,
-  EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_secs,
-  cache_ttl_minutes,
-  max_probe_interval_minutes,
-  proxy,
-  fingerprint,
-  rpm_limit,
-  concurrent_limit,
-  learned_rpm_limit,
-  concurrent_429_count,
-  rpm_429_count,
-  EXTRACT(EPOCH FROM last_429_at)::bigint AS last_429_at_unix_secs,
-  last_429_type,
-  adjustment_history,
-  utilization_samples,
-  EXTRACT(EPOCH FROM last_probe_increase_at)::bigint AS last_probe_increase_at_unix_secs,
-  last_rpm_peak,
-  request_count,
-  total_tokens,
-  CAST(total_cost_usd AS DOUBLE PRECISION) AS total_cost_usd,
-  success_count,
-  error_count,
-  total_response_time_ms,
-  EXTRACT(EPOCH FROM last_used_at)::bigint AS last_used_at_unix_secs,
-  auto_fetch_models,
-  EXTRACT(EPOCH FROM last_models_fetch_at)::bigint AS last_models_fetch_at_unix_secs,
-  last_models_fetch_error,
-  locked_models,
-  model_include_patterns,
-  model_exclude_patterns,
-  upstream_metadata,
-  EXTRACT(EPOCH FROM oauth_invalid_at)::bigint AS oauth_invalid_at_unix_secs,
-  oauth_invalid_reason,
-  status_snapshot,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs,
-  health_by_format,
-  circuit_breaker_by_format
-FROM provider_api_keys
-WHERE provider_id = $1
-  AND ($2::TEXT IS NULL OR LOWER(name) LIKE $2 OR LOWER(id) LIKE $2)
-  AND ($3::BOOLEAN IS NULL OR is_active = $3)
-ORDER BY {order_by}
-OFFSET $4
-LIMIT $5
-"#,
+        let mut count_builder = QueryBuilder::<Postgres>::new(
+            "SELECT COUNT(*)::BIGINT AS total FROM provider_api_keys",
         );
-        let items = collect_query_rows(
-            sqlx::query(&sql)
-                .bind(&query.provider_id)
-                .bind(search_pattern.as_deref())
-                .bind(query.is_active)
-                .bind(offset)
-                .bind(limit)
-                .fetch(&self.pool),
-            map_key_row,
-        )
-        .await?;
+        let mut count_where = WhereClause::new();
+        apply_key_page_filters(&mut count_builder, &mut count_where, query);
+        let total = count_builder
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?
+            .max(0) as usize;
+
+        let mut list_builder =
+            QueryBuilder::<Postgres>::new(select_prefix_for_in(LIST_KEYS_BY_IDS_PREFIX));
+        let mut list_where = WhereClause::new();
+        apply_key_page_filters(&mut list_builder, &mut list_where, query);
+        list_builder.push(" ORDER BY ").push(order_by);
+        push_limit_offset(&mut list_builder, limit, offset);
+        let items = collect_query_rows(list_builder.build().fetch(&self.pool), map_key_row).await?;
 
         Ok(StoredProviderCatalogKeyPage { items, total })
     }
@@ -1798,7 +1693,12 @@ SET
   updated_at = CASE
     WHEN $38::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($38::double precision)
-  END
+  END,
+  last_models_fetch_at = CASE
+    WHEN $42::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($42::double precision)
+  END,
+  last_models_fetch_error = $43
 WHERE id = $1
 "#,
         )
@@ -1846,6 +1746,8 @@ WHERE id = $1
         .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .bind(&key.auth_type_by_format)
         .bind(&key.allow_auth_channel_mismatch_formats)
+        .bind(key.last_models_fetch_at_unix_secs.map(|value| value as f64))
+        .bind(&key.last_models_fetch_error)
         .execute(&self.pool)
         .await
         .map_postgres_err()?
@@ -2150,14 +2052,54 @@ fn build_list_query<'a>(
     ids: &'a [String],
     suffix: &'static str,
 ) -> QueryBuilder<'a, Postgres> {
-    let mut builder = QueryBuilder::<Postgres>::new(prefix);
-    let mut separated = builder.separated(", ");
-    for id in ids {
-        separated.push_bind(id);
-    }
-    separated.push_unseparated(")");
+    let mut builder = QueryBuilder::<Postgres>::new(select_prefix_for_in(prefix));
+    let mut where_clause = WhereClause::new();
+    push_in(
+        &mut builder,
+        &mut where_clause,
+        in_column_for_prefix(prefix),
+        ids,
+    );
     builder.push(suffix);
     builder
+}
+
+fn select_prefix_for_in(prefix: &'static str) -> &'static str {
+    prefix
+        .rsplit_once("\nWHERE ")
+        .map(|(select_prefix, _)| select_prefix)
+        .expect("provider catalog IN query prefix must contain WHERE")
+}
+
+fn in_column_for_prefix(prefix: &'static str) -> &'static str {
+    prefix
+        .rsplit_once("\nWHERE ")
+        .and_then(|(_, predicate)| predicate.trim().strip_suffix("IN ("))
+        .map(str::trim)
+        .expect("provider catalog IN query prefix must end with IN (")
+}
+
+fn apply_key_page_filters<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    where_clause: &mut WhereClause,
+    query: &'a ProviderCatalogKeyListQuery,
+) {
+    push_eq(
+        builder,
+        where_clause,
+        "provider_id",
+        query.provider_id.clone(),
+    );
+    if let Some(search) = query.search.as_deref() {
+        push_ci_contains_any(
+            builder,
+            where_clause,
+            SqlDialect::Postgres,
+            &["name", "id"],
+            search,
+        );
+    }
+    push_optional_eq(builder, where_clause, "is_active", query.is_active);
 }
 
 fn row_get<T>(row: &PgRow, column: &str) -> Result<T, DataLayerError>
@@ -2623,8 +2565,9 @@ mod tests {
                     "auth_type_by_format,\n  allow_auth_channel_mismatch_formats,\n  COALESCE(api_key, encrypted_key) AS api_key",
                 )
                 .count()
-                >= 3
+                >= 2
         );
+        assert!(source.contains("QueryBuilder::<Postgres>::new(select_prefix_for_in("));
         assert!(source.contains(".bind(&key.allow_auth_channel_mismatch_formats)"));
         assert!(source.contains("row.try_get(\"allow_auth_channel_mismatch_formats\").ok()"));
     }
