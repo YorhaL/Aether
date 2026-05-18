@@ -170,7 +170,7 @@ pub fn build_windsurf_cascade_headers(
     header_rules: Option<&Value>,
     auth_header: &str,
     auth_value: &str,
-    upstream_is_stream: bool,
+    _upstream_is_stream: bool,
 ) -> Option<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for (name, value) in headers {
@@ -203,20 +203,16 @@ pub fn build_windsurf_cascade_headers(
         return None;
     }
 
-    out.insert("content-type".to_string(), "application/json".to_string());
+    out.insert(
+        "content-type".to_string(),
+        "application/connect+json".to_string(),
+    );
     out.insert("connect-protocol-version".to_string(), "1".to_string());
     out.insert(
         "user-agent".to_string(),
         format!("windsurf/{DEFAULT_IDE_VERSION}"),
     );
-    out.insert(
-        "accept".to_string(),
-        if upstream_is_stream {
-            "text/event-stream".to_string()
-        } else {
-            "application/json".to_string()
-        },
-    );
+    out.insert("accept".to_string(), "application/connect+json".to_string());
     if !auth_header.is_empty() {
         out.insert(auth_header, auth_value.trim().to_string());
     }
@@ -442,8 +438,12 @@ mod tests {
             Some("Bearer secret")
         );
         assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/connect+json")
+        );
+        assert_eq!(
             headers.get("accept").map(String::as_str),
-            Some("application/json")
+            Some("application/connect+json")
         );
     }
 

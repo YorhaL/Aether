@@ -14,7 +14,7 @@ use super::{provider_query_key_display_name, provider_query_provider_payload};
 use crate::ai_serving::{
     maybe_build_sync_finalize_outcome, GatewayControlDecision,
     ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME, GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND,
-    OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND,
+    OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND, OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND,
 };
 use crate::clock::current_unix_ms;
 use crate::execution_runtime;
@@ -1786,6 +1786,56 @@ async fn provider_query_execute_kiro_test_candidate(
     })
 }
 
+async fn provider_query_finalize_windsurf_result(
+    route_path: &str,
+    trace_id: &str,
+    requested_model: &str,
+    mapped_model: &str,
+    original_request_body: &Value,
+    result: &aether_contracts::ExecutionResult,
+) -> Result<Option<Value>, GatewayError> {
+    let decision = GatewayControlDecision::synthetic(
+        route_path,
+        Some("admin_proxy".to_string()),
+        Some("provider_query_manage".to_string()),
+        Some("test_model_failover".to_string()),
+        Some("openai:chat".to_string()),
+    );
+    let payload = GatewaySyncReportRequest {
+        trace_id: trace_id.to_string(),
+        report_kind: OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND.to_string(),
+        report_context: Some(json!({
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:chat",
+            "model": requested_model,
+            "mapped_model": mapped_model,
+            "needs_conversion": false,
+            "has_envelope": true,
+            "envelope_name": crate::provider_transport::windsurf::WINDSURF_ENVELOPE_NAME,
+            "original_request_body": original_request_body,
+        })),
+        status_code: result.status_code,
+        headers: result.headers.clone(),
+        body_json: result.body.as_ref().and_then(|body| body.json_body.clone()),
+        client_body_json: None,
+        body_base64: result
+            .body
+            .as_ref()
+            .and_then(|body| body.body_bytes_b64.clone()),
+        telemetry: result.telemetry.clone(),
+    };
+
+    let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, &decision, &payload)? else {
+        return Ok(None);
+    };
+    let bytes = to_bytes(outcome.response.into_body(), usize::MAX)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    serde_json::from_slice::<Value>(&bytes)
+        .map(Some)
+        .map_err(|err| GatewayError::Internal(err.to_string()))
+}
+
 fn provider_query_build_openai_image_test_request_body_for_route(
     payload: &Value,
     model: &str,
@@ -3194,7 +3244,7 @@ async fn provider_query_execute_windsurf_test_candidate(
         method: "POST".to_string(),
         url: request_url.clone(),
         headers: request_headers.clone(),
-        content_type: Some("application/json".to_string()),
+        content_type: Some("application/connect+json".to_string()),
         content_encoding: None,
         body: RequestBody::from_json(provider_request_body.clone()),
         stream: upstream_is_stream,
@@ -3211,7 +3261,19 @@ async fn provider_query_execute_windsurf_test_candidate(
     let result = state
         .execute_execution_runtime_sync_plan(Some(trace_id), &plan)
         .await?;
-    let response_body = result.body.as_ref().and_then(|body| body.json_body.clone());
+    let response_body = if result.status_code < 400 {
+        provider_query_finalize_windsurf_result(
+            route_path,
+            trace_id,
+            request_model,
+            request_model,
+            &request_body,
+            &result,
+        )
+        .await?
+    } else {
+        result.body.as_ref().and_then(|body| body.json_body.clone())
+    };
     let missing_success_body = result.status_code < 400 && response_body.is_none();
     let did_fail = result.status_code >= 400 || missing_success_body;
     let error_message = if did_fail {

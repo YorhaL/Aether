@@ -1470,11 +1470,16 @@ pub(crate) fn decode_response_body_bytes(
 }
 
 pub(crate) fn response_body_is_json(headers: &BTreeMap<String, String>, body_bytes: &[u8]) -> bool {
-    if headers
+    let content_type = headers
         .get("content-type")
         .map(|value| value.to_ascii_lowercase())
-        .is_some_and(|value| value.contains("json"))
+        .unwrap_or_default();
+    if content_type.contains("application/connect+json")
+        || content_type.contains("application/connect+proto")
     {
+        return false;
+    }
+    if content_type.contains("json") {
         return true;
     }
 
@@ -1508,7 +1513,7 @@ mod tests {
         build_browser_wreq_client, build_client, build_request_headers, execute_sync_plan,
         record_manual_proxy_request_failure, record_manual_proxy_request_outcome,
         record_manual_proxy_request_success, record_manual_proxy_stream_error,
-        resolve_execution_transport_controls, DirectSyncExecutionRuntime,
+        resolve_execution_transport_controls, response_body_is_json, DirectSyncExecutionRuntime,
         ExecutionRuntimeTransportError, ExecutionTransportControls,
     };
     use crate::constants::{
@@ -2762,6 +2767,17 @@ mod tests {
             ExecutionRuntimeTransportError::UnsupportedTransportProfile(backend)
                 if backend == "utls"
         ));
+    }
+
+    #[test]
+    fn connect_json_response_is_not_treated_as_plain_json() {
+        let headers = BTreeMap::from([(
+            "content-type".to_string(),
+            "application/connect+json".to_string(),
+        )]);
+        let body = [2, 0, 0, 0, 2, b'{', b'}'];
+
+        assert!(!response_body_is_json(&headers, &body));
     }
 
     #[tokio::test]

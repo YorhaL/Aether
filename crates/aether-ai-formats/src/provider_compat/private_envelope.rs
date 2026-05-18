@@ -182,6 +182,96 @@ fn transform_provider_private_stream_line_with_event_state(
     Ok(out)
 }
 
+const CONNECT_FRAME_HEADER_BYTES: usize = 5;
+const MAX_CONNECT_JSON_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+fn report_context_is_windsurf_envelope(report_context: &Value) -> bool {
+    report_context
+        .get("envelope_name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case(WINDSURF_ENVELOPE_NAME))
+}
+
+fn buffer_looks_like_connect_frame(buffer: &[u8]) -> bool {
+    let Some(flags) = buffer.first().copied() else {
+        return false;
+    };
+    if flags & !0x03 != 0 {
+        return false;
+    }
+    if buffer.len() < CONNECT_FRAME_HEADER_BYTES {
+        return true;
+    }
+    let len = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
+    len <= MAX_CONNECT_JSON_FRAME_BYTES
+}
+
+fn drain_windsurf_connect_json_frames(
+    buffer: &mut Vec<u8>,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    let mut output = Vec::new();
+    while buffer.len() >= CONNECT_FRAME_HEADER_BYTES {
+        let flags = buffer[0];
+        if flags & !0x03 != 0 {
+            return Err(AiSurfaceFinalizeError::new(format!(
+                "invalid Connect frame flags: {flags}"
+            )));
+        }
+        let len = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
+        if len > MAX_CONNECT_JSON_FRAME_BYTES {
+            return Err(AiSurfaceFinalizeError::new(format!(
+                "Connect frame size {len} exceeds {MAX_CONNECT_JSON_FRAME_BYTES}"
+            )));
+        }
+        if buffer.len() < CONNECT_FRAME_HEADER_BYTES + len {
+            break;
+        }
+        let payload = buffer[CONNECT_FRAME_HEADER_BYTES..CONNECT_FRAME_HEADER_BYTES + len].to_vec();
+        buffer.drain(..CONNECT_FRAME_HEADER_BYTES + len);
+
+        if flags & 0x01 != 0 {
+            return Err(AiSurfaceFinalizeError::new(
+                "compressed Connect JSON frames are not supported for Windsurf chat",
+            ));
+        }
+        if payload.is_empty() {
+            continue;
+        }
+        let body: Value = serde_json::from_slice(&payload)?;
+        if flags & 0x02 != 0 {
+            if let Some(error) = body.get("error") {
+                output.extend_from_slice(b"event: error\n");
+                output.extend_from_slice(b"data: ");
+                output.extend(serde_json::to_vec(error)?);
+                output.extend_from_slice(b"\n\n");
+            }
+            continue;
+        }
+        if looks_like_windsurf_error(&body) {
+            output.extend_from_slice(b"event: error\n");
+            output.extend_from_slice(b"data: ");
+            output.extend(serde_json::to_vec(&body)?);
+            output.extend_from_slice(b"\n\n");
+            continue;
+        }
+        let unwrapped = normalize_windsurf_stream_event_value(&body).unwrap_or(body);
+        let mut line = b"data: ".to_vec();
+        line.extend(serde_json::to_vec(&unwrapped)?);
+        line.extend_from_slice(b"\n\n");
+        output.extend(line);
+    }
+
+    if !buffer.is_empty()
+        && buffer.len() < CONNECT_FRAME_HEADER_BYTES
+        && !buffer_looks_like_connect_frame(buffer)
+    {
+        return Err(AiSurfaceFinalizeError::new(
+            "invalid partial Connect JSON frame",
+        ));
+    }
+    Ok(output)
+}
+
 enum ProviderPrivateStreamNormalizeMode {
     EnvelopeUnwrap,
     KiroToClaudeCli(Box<KiroToClaudeCliStreamState>),
@@ -243,6 +333,11 @@ impl ProviderPrivateStreamNormalizer<'_> {
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
                 self.buffered.extend_from_slice(chunk);
+                if report_context_is_windsurf_envelope(self.report_context)
+                    && buffer_looks_like_connect_frame(&self.buffered)
+                {
+                    return drain_windsurf_connect_json_frames(&mut self.buffered);
+                }
                 let mut output = Vec::new();
                 while let Some(line_end) = self.buffered.iter().position(|byte| *byte == b'\n') {
                     let line = self.buffered.drain(..=line_end).collect::<Vec<_>>();
@@ -268,6 +363,11 @@ impl ProviderPrivateStreamNormalizer<'_> {
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
                 if self.buffered.is_empty() {
                     return Ok(Vec::new());
+                }
+                if report_context_is_windsurf_envelope(self.report_context)
+                    && buffer_looks_like_connect_frame(&self.buffered)
+                {
+                    return drain_windsurf_connect_json_frames(&mut self.buffered);
                 }
                 let line = std::mem::take(&mut self.buffered);
                 transform_provider_private_stream_line_with_event_state(
@@ -726,6 +826,39 @@ mod tests {
 
         assert!(text.contains(r#""object":"chat.completion.chunk""#));
         assert!(text.contains(r#""content":"chunk""#));
+    }
+
+    #[test]
+    fn unwraps_windsurf_connect_json_stream_frames() {
+        let report_context = json!({
+            "has_envelope": true,
+            "envelope_name": "windsurf:GetChatMessage",
+            "provider_api_format": "openai:chat",
+        });
+        let mut normalizer = maybe_build_provider_private_stream_normalizer(Some(&report_context))
+            .expect("normalizer should exist");
+        let mut framed = connect_json_frame(
+            0,
+            br#"{"responseId":"ws-3","response":{"text":"frame chunk"}}"#,
+        );
+        framed.extend(connect_json_frame(2, b"{}"));
+
+        let mut output = normalizer
+            .push_chunk(&framed)
+            .expect("connect frame should normalize");
+        output.extend(normalizer.finish().expect("finish should succeed"));
+        let text = String::from_utf8(output).expect("utf8");
+
+        assert!(text.contains(r#""object":"chat.completion.chunk""#));
+        assert!(text.contains(r#""content":"frame chunk""#));
+    }
+
+    fn connect_json_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(5 + payload.len());
+        out.push(flags);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
     }
 
     #[test]
