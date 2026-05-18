@@ -13,6 +13,7 @@ use crate::constants::{
 };
 use crate::headers::extract_or_generate_trace_id;
 use crate::log_ids::short_request_id;
+use aether_ai_formats::api::sanitize_request_path_and_query;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RequestLogEmitted;
@@ -52,14 +53,19 @@ pub(crate) fn should_downgrade_access_log(method: &Method, path: &str) -> bool {
         || normalized_path.starts_with("/api/admin/monitoring/trace/")
 }
 
+pub(crate) fn sanitize_access_log_path(path: &str) -> String {
+    sanitize_request_path_and_query(path, None).unwrap_or_else(|| "/".to_string())
+}
+
 pub(crate) async fn access_log_middleware(mut request: Request<Body>, next: Next) -> Response {
     let started_at = Instant::now();
     let method = request.method().clone();
-    let path = request
+    let raw_path = request
         .uri()
         .path_and_query()
         .map(|value| value.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
+    let path = sanitize_access_log_path(&raw_path);
     let trace_id = extract_or_generate_trace_id(request.headers());
     if !request.headers().contains_key(TRACE_ID_HEADER) {
         request.headers_mut().insert(
@@ -158,7 +164,7 @@ pub(crate) async fn access_log_middleware(mut request: Request<Body>, next: Next
 
 #[cfg(test)]
 mod tests {
-    use super::{access_log_middleware, should_downgrade_access_log};
+    use super::{access_log_middleware, sanitize_access_log_path, should_downgrade_access_log};
     use crate::constants::{
         CONTROL_REQUEST_ID_HEADER, CONTROL_ROUTE_CLASS_HEADER, EXECUTION_PATH_HEADER,
         TRACE_ID_HEADER,
@@ -210,6 +216,56 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             SharedBufferWriter(Arc::clone(&self.0))
         }
+    }
+
+    #[test]
+    fn access_log_path_redacts_credential_query_values() {
+        assert_eq!(
+            sanitize_access_log_path(
+                "/v1beta/models/gemini-3-flash-preview:generateContent?key=secret&alt=sse&pageSize=10&token=hidden"
+            ),
+            "/v1beta/models/gemini-3-flash-preview:generateContent?alt=sse&pageSize=10"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn access_log_emits_sanitized_path() {
+        let writer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let app = Router::new()
+            .route(
+                "/v1beta/models/gemini-3-flash-preview:generateContent",
+                get(|| async { Response::new(Body::empty()) }),
+            )
+            .layer(axum::middleware::from_fn(access_log_middleware));
+
+        let _response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1beta/models/gemini-3-flash-preview:generateContent?key=secret&alt=sse")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let logs = writer.lines();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0]["path"],
+            "/v1beta/models/gemini-3-flash-preview:generateContent?alt=sse"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

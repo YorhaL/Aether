@@ -7,7 +7,7 @@ use crate::constants::{
 };
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
-use crate::middleware::{should_downgrade_access_log, RequestLogEmitted};
+use crate::middleware::{sanitize_access_log_path, should_downgrade_access_log, RequestLogEmitted};
 use crate::AppState;
 use aether_runtime::{maybe_hold_axum_response_permit, AdmissionPermit};
 use axum::body::{Body, Bytes};
@@ -95,11 +95,12 @@ pub(super) fn finalize_gateway_response(
         .map(|auth_context| auth_context.api_key_id.as_str())
         .unwrap_or("-");
     let status_code = response.status().as_u16();
+    let sanitized_path_and_query = sanitize_access_log_path(path_and_query);
     emit_admin_audit(
         &mut response,
         trace_id,
         method,
-        path_and_query,
+        sanitized_path_and_query.as_str(),
         control_decision,
     );
     if response.status().is_server_error() {
@@ -112,7 +113,7 @@ pub(super) fn finalize_gateway_response(
             request_id,
             remote_addr = %remote_addr,
             method = %method,
-            path = %path_and_query,
+            path = %sanitized_path_and_query,
             user_id,
             api_key_id,
             route_class,
@@ -122,7 +123,7 @@ pub(super) fn finalize_gateway_response(
             elapsed_ms,
             "gateway request failed"
         );
-    } else if should_downgrade_access_log(method, path_and_query) {
+    } else if should_downgrade_access_log(method, sanitized_path_and_query.as_str()) {
         trace!(
             event_name = "http_request_completed",
             log_type = "access",
@@ -132,7 +133,7 @@ pub(super) fn finalize_gateway_response(
             request_id,
             remote_addr = %remote_addr,
             method = %method,
-            path = %path_and_query,
+            path = %sanitized_path_and_query,
             user_id,
             api_key_id,
             route_class,
@@ -152,7 +153,7 @@ pub(super) fn finalize_gateway_response(
             request_id,
             remote_addr = %remote_addr,
             method = %method,
-            path = %path_and_query,
+            path = %sanitized_path_and_query,
             user_id,
             api_key_id,
             route_class,
@@ -253,4 +254,107 @@ pub(super) fn finalize_gateway_response_with_context(
         started_at,
         request_permit,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finalize_gateway_response;
+    use crate::control::GatewayControlDecision;
+    use crate::AppState;
+    use axum::body::Body;
+    use axum::http::{Method, Response, StatusCode};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedBufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        fn lines(&self) -> Vec<serde_json::Value> {
+            String::from_utf8(self.0.lock().expect("buffer should lock").clone())
+                .expect("buffer should contain valid utf-8")
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).expect("json log line should parse"))
+                .collect()
+        }
+    }
+
+    impl std::io::Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("buffer should lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedBuffer {
+        type Writer = SharedBufferWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedBufferWriter(Arc::clone(&self.0))
+        }
+    }
+
+    #[test]
+    fn finalize_gateway_response_logs_sanitized_path_and_query() {
+        let state = AppState::new().expect("gateway state should build");
+        let writer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let remote_addr = "127.0.0.1:8080"
+            .parse()
+            .expect("remote address should parse");
+        let control_decision = GatewayControlDecision::synthetic(
+            "/v1beta/models/gemini-3-flash-preview:generateContent",
+            Some("ai_public".to_string()),
+            Some("gemini".to_string()),
+            Some("generate_content".to_string()),
+            Some("gemini:generate_content".to_string()),
+        );
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .expect("response should build");
+
+        let _response = finalize_gateway_response(
+            &state,
+            response,
+            "trace-finalize",
+            &remote_addr,
+            &Method::GET,
+            "/v1beta/models/gemini-3-flash-preview:generateContent?key=secret&alt=sse",
+            Some(&control_decision),
+            "execution_runtime_sync",
+            &Instant::now(),
+            None,
+        );
+
+        let logs = writer.lines();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0]["path"],
+            "/v1beta/models/gemini-3-flash-preview:generateContent?alt=sse"
+        );
+    }
 }
