@@ -38,7 +38,7 @@ pub fn build_core_error_body_for_client_format(
     error_object.insert("message".to_string(), Value::String(message.to_string()));
 
     match aether_ai_formats::normalize_api_format_alias(client_api_format).as_str() {
-        "openai:chat" | "openai:responses" | "openai:responses:compact" => {
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "openai:embedding" => {
             error_object.insert(
                 "type".to_string(),
                 Value::String(map_local_sync_error_kind_to_openai_type(kind).to_string()),

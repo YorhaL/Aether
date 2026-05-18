@@ -64,7 +64,8 @@ pub(crate) use self::transport::{
     candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
     request_conversion_direct_auth, request_conversion_enabled_for_transport,
     request_conversion_transport_supported, request_conversion_transport_unsupported_reason,
-    request_pair_allowed_for_transport, CandidateTransportPolicyFacts,
+    request_pair_allowed_for_transport, request_pair_direct_auth,
+    request_pair_transport_unsupported_reason, CandidateTransportPolicyFacts,
 };
 pub(crate) use crate::control::GatewayControlDecision;
 pub(crate) use crate::execution_runtime::{ConversionMode, ExecutionStrategy};
@@ -94,6 +95,28 @@ pub(crate) fn build_provider_transport_request_url(
             request_query,
             kiro_api_region,
         },
+    )
+}
+
+pub(crate) fn build_provider_transport_request_url_for_request_body(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+    mapped_model: Option<&str>,
+    upstream_is_stream: bool,
+    request_query: Option<&str>,
+    kiro_api_region: Option<&str>,
+    provider_request_body: Option<&serde_json::Value>,
+) -> Option<String> {
+    self::transport::build_transport_request_url_for_request_body(
+        transport,
+        self::transport::TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model,
+            upstream_is_stream,
+            request_query,
+            kiro_api_region,
+        },
+        provider_request_body,
     )
 }
 

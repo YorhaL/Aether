@@ -258,7 +258,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         .eq_ignore_ascii_case("grok");
     let transport_profile =
         crate::ai_serving::transport::resolve_transport_profile(&prepared.transport);
-    let Some(upstream_url) = (if is_grok {
+    let upstream_url = if is_grok {
         Some(build_grok_upstream_url(&prepared.transport, GROK_CHAT_PATH))
     } else {
         super::super::request::build_same_format_upstream_url(
@@ -269,8 +269,10 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             spec,
             prepared.upstream_is_stream,
             prepared.kiro_auth.as_ref(),
+            Some(&provider_request_body),
         )
-    }) else {
+    };
+    let Some(upstream_url) = upstream_url else {
         mark_skipped_local_same_format_provider_candidate_with_failure_diagnostic(
             state,
             input,

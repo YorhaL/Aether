@@ -104,6 +104,17 @@ pub(super) fn classify_ai_public_route(
                 "gemini:video",
                 true,
             ))
+        } else if normalized_path.ends_with(":embedContent")
+            || normalized_path.ends_with(":batchEmbedContents")
+        {
+            Some(classified_with_request_auth_channel(
+                "ai_public",
+                "gemini",
+                "embedding",
+                "api_key",
+                "gemini:embedding",
+                true,
+            ))
         } else if is_gemini_cli_request(headers) {
             Some(classified_with_request_auth_channel(
                 "ai_public",

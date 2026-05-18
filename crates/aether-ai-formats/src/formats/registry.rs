@@ -228,11 +228,16 @@ mod tests {
             &FormatContext::default().with_mapped_model("gemini-embedding-001"),
         )
         .expect("gemini embedding conversion should succeed");
-        assert_eq!(gemini["model"], "gemini-embedding-001");
+        assert!(gemini.get("model").is_none());
+        assert_eq!(
+            gemini["requests"][0]["model"],
+            "models/gemini-embedding-001"
+        );
         assert_eq!(
             gemini["requests"][0]["content"]["parts"][0]["text"],
             "alpha"
         );
+        assert_eq!(gemini["requests"][0]["outputDimensionality"], 2);
         assert!(gemini.get("messages").is_none());
 
         let doubao = convert_request(

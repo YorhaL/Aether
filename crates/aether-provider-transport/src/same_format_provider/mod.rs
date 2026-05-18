@@ -27,7 +27,10 @@ use crate::vertex::{
     is_vertex_service_account_transport_context, is_vertex_transport_context,
     local_vertex_gemini_transport_unsupported_reason_with_network,
 };
-use crate::{build_transport_request_url, ensure_upstream_auth_header, TransportRequestUrlParams};
+use crate::{
+    build_transport_request_url_for_request_body, ensure_upstream_auth_header,
+    TransportRequestUrlParams,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameFormatProviderFamily {
@@ -77,6 +80,7 @@ pub struct SameFormatProviderUpstreamUrlParams<'a> {
     pub upstream_is_stream: bool,
     pub request_query: Option<&'a str>,
     pub kiro_api_region: Option<&'a str>,
+    pub provider_request_body: Option<&'a Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -257,7 +261,7 @@ pub fn build_same_format_provider_upstream_url(
     transport: &GatewayProviderTransportSnapshot,
     params: SameFormatProviderUpstreamUrlParams<'_>,
 ) -> Option<String> {
-    build_transport_request_url(
+    build_transport_request_url_for_request_body(
         transport,
         TransportRequestUrlParams {
             provider_api_format: params.provider_api_format,
@@ -266,6 +270,7 @@ pub fn build_same_format_provider_upstream_url(
             request_query: params.request_query,
             kiro_api_region: params.kiro_api_region,
         },
+        params.provider_request_body,
     )
 }
 

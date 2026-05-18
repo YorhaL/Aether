@@ -14,6 +14,7 @@ pub(crate) fn build_same_format_upstream_url(
     spec: LocalSameFormatProviderSpec,
     upstream_is_stream: bool,
     kiro_auth: Option<&crate::ai_serving::transport::kiro::KiroRequestAuth>,
+    provider_request_body: Option<&serde_json::Value>,
 ) -> Option<String> {
     build_same_format_provider_upstream_url_impl(
         transport,
@@ -23,6 +24,7 @@ pub(crate) fn build_same_format_upstream_url(
             upstream_is_stream,
             request_query: parts.uri.query(),
             kiro_api_region: kiro_auth.map(|auth| auth.auth_config.effective_api_region()),
+            provider_request_body,
         },
     )
 }

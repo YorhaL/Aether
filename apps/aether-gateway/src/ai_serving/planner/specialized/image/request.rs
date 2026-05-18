@@ -393,6 +393,7 @@ async fn resolve_local_openai_image_to_gemini_candidate_payload_parts(
         &converted.mapped_model,
         provider_api_format,
         upstream_is_stream,
+        Some(&converted.body_json),
     ) else {
         mark_skipped_local_openai_image_candidate_with_failure_diagnostic(
             state,

@@ -169,7 +169,11 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
     }
 
     let mut provider_request_body = match format_value.as_str() {
-        "openai:chat" | "claude:messages" => json!({
+        "openai:chat" => json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Health check"}],
+        }),
+        "claude:messages" => json!({
             "model": model,
             "messages": [{"role": "user", "content": "Health check"}],
             "max_tokens": 5,
@@ -179,9 +183,6 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
                 "role": "user",
                 "parts": [{"text": "Health check"}],
             }],
-            "generationConfig": {
-                "maxOutputTokens": 5,
-            },
         }),
         _ => return None,
     };

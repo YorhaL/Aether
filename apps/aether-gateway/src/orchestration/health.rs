@@ -155,7 +155,8 @@ fn local_candidate_failure_should_project_health(
         LocalFailoverClassification::UseDefault | LocalFailoverClassification::StopStatusCode => {
             status_code >= 500
         }
-        LocalFailoverClassification::StopErrorPattern => false,
+        LocalFailoverClassification::StopErrorPattern
+        | LocalFailoverClassification::StopExecutionError => false,
     }
 }
 

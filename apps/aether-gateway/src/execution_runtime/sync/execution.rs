@@ -3,7 +3,10 @@ use std::io::Error as IoError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aether_contracts::{ExecutionPlan, ExecutionResult, ExecutionTelemetry};
+use aether_contracts::{
+    ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan, ExecutionResult,
+    ExecutionTelemetry,
+};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::{
     execution_error_details, parse_request_candidate_report_context,
@@ -26,8 +29,8 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};
 
 use crate::ai_serving::api::{
-    implicit_sync_finalize_report_kind, maybe_build_sync_finalize_outcome,
-    LocalCoreSyncFinalizeOutcome,
+    build_core_error_body_for_client_format, implicit_sync_finalize_report_kind,
+    maybe_build_sync_finalize_outcome, LocalCoreSyncErrorKind, LocalCoreSyncFinalizeOutcome,
 };
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
@@ -182,6 +185,55 @@ fn build_sync_report_payload(
         body_base64,
         telemetry,
     }
+}
+
+fn invalid_gemini_provider_success_message(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    status_code: u16,
+    body_json: Option<&Value>,
+) -> Option<&'static str> {
+    if status_code >= 400 {
+        return None;
+    }
+    let provider_api_format = report_context
+        .and_then(|value| value.get("provider_api_format"))
+        .and_then(Value::as_str)
+        .unwrap_or(plan.provider_api_format.as_str());
+    if aether_ai_formats::normalize_api_format_alias(provider_api_format)
+        != "gemini:generate_content"
+    {
+        return None;
+    }
+    let body_json = body_json?;
+    if body_json
+        .as_object()
+        .is_some_and(|object| object.get("error").is_some_and(|error| !error.is_null()))
+    {
+        return None;
+    }
+    if aether_ai_formats::formats::gemini::generate_content::response::from_raw(body_json).is_some()
+    {
+        return None;
+    }
+    Some("Provider returned HTTP 200 but the Gemini response did not contain visible model output; refusing to finalize it as a successful response.")
+}
+
+fn build_invalid_provider_success_body(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    message: &str,
+) -> Option<Value> {
+    let client_api_format = report_context
+        .and_then(|value| value.get("client_api_format"))
+        .and_then(Value::as_str)
+        .unwrap_or(plan.client_api_format.as_str());
+    build_core_error_body_for_client_format(
+        client_api_format,
+        message,
+        Some("invalid_provider_success_response"),
+        LocalCoreSyncErrorKind::ServerError,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1446,19 +1498,37 @@ async fn execute_execution_runtime_sync_impl(
         local_failover_response_text,
         local_failover_analysis,
     ) = loop {
-        let result_body_json = result
-            .body
-            .as_ref()
-            .and_then(|body| body.json_body.as_ref());
-        let (result_error_type, result_error_message) =
-            execution_error_details(result.error.as_ref(), result_body_json);
         let result_latency_ms = result
             .telemetry
             .as_ref()
             .and_then(|telemetry| telemetry.elapsed_ms);
         let mut headers = std::mem::take(&mut result.headers);
-        let (body_bytes, body_json, body_base64) =
+        let (body_bytes, mut body_json, body_base64) =
             decode_execution_result_body(result.body.take(), &mut headers)?;
+        if let Some(message) = invalid_gemini_provider_success_message(
+            &plan,
+            report_context.as_ref(),
+            result.status_code,
+            body_json.as_ref(),
+        ) {
+            result.status_code = StatusCode::BAD_GATEWAY.as_u16();
+            result.error = Some(ExecutionError {
+                kind: ExecutionErrorKind::Upstream5xx,
+                phase: ExecutionPhase::Finalize,
+                message: message.to_string(),
+                upstream_status: Some(StatusCode::OK.as_u16()),
+                retryable: false,
+                failover_recommended: false,
+            });
+            if let Some(error_body) =
+                build_invalid_provider_success_body(&plan, report_context.as_ref(), message)
+            {
+                body_json = Some(error_body);
+                headers.insert("content-type".to_string(), "application/json".to_string());
+            }
+        }
+        let (result_error_type, result_error_message) =
+            execution_error_details(result.error.as_ref(), body_json.as_ref());
         let local_failover_response_text = local_failover_response_text(
             body_json.as_ref(),
             &body_bytes,
@@ -2165,6 +2235,41 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    fn test_gemini_chat_plan() -> ExecutionPlan {
+        let mut plan = test_openai_image_plan(false);
+        plan.client_api_format = "openai:chat".to_string();
+        plan.provider_api_format = "gemini:generate_content".to_string();
+        plan.model_name = Some("gemini-3-flash-preview".to_string());
+        plan
+    }
+
+    #[test]
+    fn invalid_gemini_provider_success_uses_plan_format_when_context_is_missing() {
+        let plan = test_gemini_chat_plan();
+        let body = json!({
+            "candidates": [{
+                "content": {"role": "model"},
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 8,
+                "candidatesTokenCount": 1,
+                "thoughtsTokenCount": 25,
+                "totalTokenCount": 34
+            }
+        });
+
+        let message = invalid_gemini_provider_success_message(
+            &plan,
+            None,
+            StatusCode::OK.as_u16(),
+            Some(&body),
+        )
+        .expect("empty Gemini 200 response should be rejected from plan format");
+
+        assert!(message.contains("visible model output"));
     }
 
     #[tokio::test]

@@ -9,9 +9,10 @@ use aether_ai_formats::formats::conversion::response::{
 };
 use aether_ai_formats::formats::registry::{convert_response, FormatContext};
 use aether_ai_formats::{
-    canonical_to_claude_response, canonical_to_gemini_response, canonical_to_openai_chat_response,
-    canonical_to_openai_responses_compact_response, canonical_to_openai_responses_response,
-    from_claude_to_canonical_response, from_gemini_to_canonical_response,
+    canonical_to_claude_response, canonical_to_embedding_response, canonical_to_gemini_response,
+    canonical_to_openai_chat_response, canonical_to_openai_responses_compact_response,
+    canonical_to_openai_responses_response, from_claude_to_canonical_response,
+    from_embedding_to_canonical_response, from_gemini_to_canonical_response,
     from_openai_chat_to_canonical_response, from_openai_responses_to_canonical_response,
     sync_chat_response_conversion_kind, sync_cli_response_conversion_kind,
 };
@@ -330,6 +331,18 @@ pub fn maybe_build_standard_sync_finalize_product_from_normalized_payload(
         )));
     }
 
+    if let Some(product) = maybe_build_embedding_cross_format_sync_product_from_normalized_payload(
+        report_kind,
+        status_code,
+        report_context,
+        body_json,
+        body_base64,
+    )? {
+        return Ok(Some(StandardSyncFinalizeNormalizedProduct::CrossFormat(
+            product,
+        )));
+    }
+
     Ok(
         maybe_build_standard_cross_format_sync_product_from_normalized_payload(
             report_kind,
@@ -340,6 +353,90 @@ pub fn maybe_build_standard_sync_finalize_product_from_normalized_payload(
         )?
         .map(StandardSyncFinalizeNormalizedProduct::CrossFormat),
     )
+}
+
+pub fn maybe_build_embedding_cross_format_sync_product_from_normalized_payload(
+    report_kind: &str,
+    status_code: u16,
+    report_context: Option<&Value>,
+    body_json: Option<&Value>,
+    body_base64: Option<&str>,
+) -> Result<Option<StandardCrossFormatSyncProduct>, AiSurfaceFinalizeError> {
+    if report_kind != crate::contracts::OPENAI_EMBEDDING_SYNC_FINALIZE_REPORT_KIND
+        || status_code >= 400
+    {
+        return Ok(None);
+    }
+
+    let Some(report_context) = report_context else {
+        return Ok(None);
+    };
+    let provider_api_format = report_context
+        .get("provider_api_format")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let client_api_format = report_context
+        .get("client_api_format")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    if provider_api_format == client_api_format {
+        return Ok(None);
+    }
+
+    let Some(provider_namespace) =
+        embedding_response_namespace_for_api_format(&provider_api_format)
+    else {
+        return Ok(None);
+    };
+    let Some(client_namespace) = embedding_response_namespace_for_api_format(&client_api_format)
+    else {
+        return Ok(None);
+    };
+
+    let provider_body_json = match body_base64 {
+        Some(body_base64) => {
+            let body_bytes = base64::engine::general_purpose::STANDARD.decode(body_base64)?;
+            serde_json::from_slice::<Value>(&body_bytes).ok()
+        }
+        None => body_json.cloned(),
+    };
+    let Some(provider_body_json) =
+        provider_body_json.filter(|value| !is_error_like_sync_body(value))
+    else {
+        return Ok(None);
+    };
+
+    let mut canonical =
+        match from_embedding_to_canonical_response(&provider_body_json, provider_namespace) {
+            Some(canonical) => canonical,
+            None => return Ok(None),
+        };
+    apply_report_context_model_fallback(&mut canonical.model, report_context);
+    let Some(client_body_json) = canonical_to_embedding_response(&canonical, client_namespace)
+    else {
+        return Ok(None);
+    };
+    let client_body_json =
+        client_body_with_report_context_model(client_body_json, report_context, &client_api_format);
+
+    Ok(Some(StandardCrossFormatSyncProduct {
+        client_body_json,
+        provider_body_json,
+    }))
+}
+
+fn embedding_response_namespace_for_api_format(api_format: &str) -> Option<&'static str> {
+    match aether_ai_formats::normalize_api_format_alias(api_format).as_str() {
+        "openai:embedding" => Some("openai"),
+        "jina:embedding" => Some("jina"),
+        "gemini:embedding" => Some("gemini"),
+        _ => None,
+    }
 }
 
 fn maybe_build_standard_same_format_sync_body(
@@ -829,6 +926,9 @@ fn client_body_with_report_context_model(
         "openai:chat" | "openai:responses" | "openai:responses:compact" | "claude:messages" => {
             object.insert("model".to_string(), Value::String(display_model));
         }
+        "openai:embedding" | "jina:embedding" => {
+            object.insert("model".to_string(), Value::String(display_model));
+        }
         "gemini:generate_content" => {
             object.insert("modelVersion".to_string(), Value::String(display_model));
         }
@@ -1310,6 +1410,7 @@ fn standard_same_format_api_format(report_kind: &str) -> Option<&'static str> {
         "openai_chat_sync_finalize" => Some("openai:chat"),
         "claude_chat_sync_finalize" => Some("claude:messages"),
         "gemini_chat_sync_finalize" => Some("gemini:generate_content"),
+        "openai_embedding_sync_finalize" => Some("openai:embedding"),
         "claude_cli_sync_finalize" => Some("claude:messages"),
         "gemini_cli_sync_finalize" => Some("gemini:generate_content"),
         _ => None,

@@ -324,11 +324,15 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
                 )
         }
         "vertex_ai" => {
-            (auth_type == "api_key" && api_format == "gemini:generate_content")
+            (auth_type == "api_key"
+                && matches!(
+                    api_format.as_str(),
+                    "gemini:generate_content" | "gemini:embedding"
+                ))
                 || (matches!(auth_type.as_str(), "service_account" | "vertex_ai")
                     && matches!(
                         api_format.as_str(),
-                        "claude:messages" | "gemini:generate_content"
+                        "claude:messages" | "gemini:generate_content" | "gemini:embedding"
                     ))
         }
         _ => auth_type != "oauth",

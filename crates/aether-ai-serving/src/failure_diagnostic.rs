@@ -162,6 +162,21 @@ impl CandidateFailureDiagnostic {
         .source(source)
     }
 
+    pub fn request_conversion_failed(
+        client_api_format: impl Into<String>,
+        provider_api_format: impl Into<String>,
+        source: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            CandidateFailureDiagnosticKind::RequestConversion,
+            "$",
+            message,
+        )
+        .formats(client_api_format, provider_api_format)
+        .source(source)
+    }
+
     pub fn envelope_build_failed(
         client_api_format: impl Into<String>,
         provider_api_format: impl Into<String>,

@@ -4,9 +4,9 @@ use url::form_urlencoded;
 use crate::contracts::{
     CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
     CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
-    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_FILES_DELETE_PLAN_KIND,
-    GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND, GEMINI_FILES_LIST_PLAN_KIND,
-    GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
+    GEMINI_FILES_DELETE_PLAN_KIND, GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND,
+    GEMINI_FILES_LIST_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
     GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
     OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
     OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
@@ -164,6 +164,14 @@ pub fn resolve_execution_runtime_sync_plan_kind(
         && path.ends_with(":predictLongRunning")
     {
         return Some(GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND);
+    }
+
+    if route_family == Some("gemini")
+        && route_kind == Some("embedding")
+        && *method == Method::POST
+        && (path.ends_with(":embedContent") || path.ends_with(":batchEmbedContents"))
+    {
+        return Some(GEMINI_EMBEDDING_SYNC_PLAN_KIND);
     }
 
     if route_family == Some("openai")
@@ -411,6 +419,7 @@ pub fn supports_sync_execution_decision_kind(plan_kind: &str) -> bool {
             | CLAUDE_CLI_SYNC_PLAN_KIND
             | GEMINI_CHAT_SYNC_PLAN_KIND
             | GEMINI_CLI_SYNC_PLAN_KIND
+            | GEMINI_EMBEDDING_SYNC_PLAN_KIND
             | GEMINI_FILES_UPLOAD_PLAN_KIND
             | OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND
             | OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND
@@ -455,9 +464,9 @@ mod tests {
     use crate::contracts::{
         CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
         CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
-        GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND,
-        OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND,
-        OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND,
+        GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
+        OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
+        OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND,
         OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
         OPENAI_RESPONSES_STREAM_PLAN_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
     };
@@ -780,6 +789,35 @@ mod tests {
         );
         assert!(supports_sync_execution_decision_kind(
             OPENAI_EMBEDDING_SYNC_PLAN_KIND
+        ));
+    }
+
+    #[test]
+    fn resolves_gemini_embedding_sync_plan_kind() {
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("gemini"),
+                Some("embedding"),
+                Some("api_key"),
+                &Method::POST,
+                "/v1beta/models/gemini-embedding-2-preview:embedContent",
+            ),
+            Some(GEMINI_EMBEDDING_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("gemini"),
+                Some("embedding"),
+                Some("api_key"),
+                &Method::POST,
+                "/v1beta/models/gemini-embedding-2-preview:batchEmbedContents",
+            ),
+            Some(GEMINI_EMBEDDING_SYNC_PLAN_KIND)
+        );
+        assert!(supports_sync_execution_decision_kind(
+            GEMINI_EMBEDDING_SYNC_PLAN_KIND
         ));
     }
 

@@ -57,7 +57,10 @@ const fn decision_from_classification(
     match classification {
         LocalFailoverClassification::UseDefault => LocalFailoverDecision::UseDefault,
         LocalFailoverClassification::StopStatusCode
-        | LocalFailoverClassification::StopErrorPattern => LocalFailoverDecision::StopLocalFailover,
+        | LocalFailoverClassification::StopErrorPattern
+        | LocalFailoverClassification::StopExecutionError => {
+            LocalFailoverDecision::StopLocalFailover
+        }
         LocalFailoverClassification::RetrySuccessPattern
         | LocalFailoverClassification::RetryStatusCode
         | LocalFailoverClassification::RetryUpstreamFailure => {

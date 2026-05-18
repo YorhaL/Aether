@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde_json::Value;
 use url::form_urlencoded;
 
 use crate::antigravity::{
@@ -12,11 +13,14 @@ use crate::claude_code::build_claude_code_messages_url;
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
-    build_openai_responses_url, build_passthrough_path_url, normalize_gemini_content_action_path,
+    build_openai_responses_url, build_passthrough_path_url,
+    google_openai_compat_base_includes_api_root, normalize_gemini_content_action_path,
 };
 use crate::vertex::{
-    build_vertex_api_key_gemini_content_url, build_vertex_service_account_gemini_content_url,
-    resolve_local_vertex_api_key_query_auth, resolve_local_vertex_service_account_auth_config,
+    build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
+    build_vertex_service_account_gemini_content_url,
+    build_vertex_service_account_gemini_embedding_url, resolve_local_vertex_api_key_query_auth,
+    resolve_local_vertex_service_account_auth_config,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -32,20 +36,51 @@ pub fn build_transport_request_url(
     transport: &GatewayProviderTransportSnapshot,
     params: TransportRequestUrlParams<'_>,
 ) -> Option<String> {
+    build_transport_request_url_inner(transport, params, false)
+}
+
+pub fn build_transport_request_url_for_request_body(
+    transport: &GatewayProviderTransportSnapshot,
+    params: TransportRequestUrlParams<'_>,
+    provider_request_body: Option<&Value>,
+) -> Option<String> {
+    let gemini_embedding_batch =
+        gemini_embedding_request_body_uses_batch(params.provider_api_format, provider_request_body);
+    build_transport_request_url_inner(transport, params, gemini_embedding_batch)
+}
+
+pub fn gemini_embedding_request_body_uses_batch(
+    provider_api_format: &str,
+    provider_request_body: Option<&Value>,
+) -> bool {
+    aether_ai_formats::normalize_api_format_alias(provider_api_format) == "gemini:embedding"
+        && provider_request_body
+            .and_then(|body| body.get("requests"))
+            .and_then(Value::as_array)
+            .is_some_and(|requests| !requests.is_empty())
+}
+
+fn build_transport_request_url_inner(
+    transport: &GatewayProviderTransportSnapshot,
+    params: TransportRequestUrlParams<'_>,
+    gemini_embedding_batch: bool,
+) -> Option<String> {
+    let provider_api_format = params.provider_api_format.trim().to_ascii_lowercase();
+    let normalized_provider_api_format =
+        aether_ai_formats::normalize_api_format_alias(&provider_api_format);
     if let Some(url) = build_transport_hook_url(transport, params) {
         return Some(url);
     }
 
-    let provider_api_format = params.provider_api_format.trim().to_ascii_lowercase();
-    let normalized_provider_api_format =
-        aether_ai_formats::normalize_api_format_alias(&provider_api_format);
     let custom_path = transport
         .endpoint
         .custom_path
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|path| expand_custom_path_template(path, build_path_params(params)));
+        .map(|path| {
+            expand_custom_path_template(path, build_path_params(params, gemini_embedding_batch))
+        });
 
     if let Some(path) = custom_path.as_deref() {
         let blocked_keys = if normalized_provider_api_format.starts_with("gemini:") {
@@ -55,6 +90,8 @@ pub fn build_transport_request_url(
         };
         let normalized_path = if normalized_provider_api_format == "gemini:generate_content" {
             normalize_gemini_content_action_path(path, params.upstream_is_stream)
+        } else if normalized_provider_api_format == "gemini:embedding" {
+            normalize_gemini_embedding_action_path(path, gemini_embedding_batch)
         } else {
             path.to_string()
         };
@@ -106,6 +143,7 @@ pub fn build_transport_request_url(
             &transport.endpoint.base_url,
             params.mapped_model?,
             params.request_query,
+            gemini_embedding_batch,
         ),
         "doubao:embedding" => build_passthrough_path_url(
             &transport.endpoint.base_url,
@@ -246,25 +284,42 @@ fn build_transport_hook_url(
         ));
     }
 
-    if aether_ai_formats::normalize_api_format_alias(params.provider_api_format)
-        == "gemini:generate_content"
-    {
-        if let Some(auth) = resolve_local_vertex_api_key_query_auth(transport) {
-            return build_vertex_api_key_gemini_content_url(
-                params.mapped_model?,
-                params.upstream_is_stream,
-                &auth.value,
-                params.request_query,
-            );
+    match aether_ai_formats::normalize_api_format_alias(params.provider_api_format).as_str() {
+        "gemini:generate_content" => {
+            if let Some(auth) = resolve_local_vertex_api_key_query_auth(transport) {
+                return build_vertex_api_key_gemini_content_url(
+                    params.mapped_model?,
+                    params.upstream_is_stream,
+                    &auth.value,
+                    params.request_query,
+                );
+            }
+            if let Some(auth_config) = resolve_local_vertex_service_account_auth_config(transport) {
+                return build_vertex_service_account_gemini_content_url(
+                    params.mapped_model?,
+                    params.upstream_is_stream,
+                    &auth_config,
+                    params.request_query,
+                );
+            }
         }
-        if let Some(auth_config) = resolve_local_vertex_service_account_auth_config(transport) {
-            return build_vertex_service_account_gemini_content_url(
-                params.mapped_model?,
-                params.upstream_is_stream,
-                &auth_config,
-                params.request_query,
-            );
+        "gemini:embedding" => {
+            if let Some(auth) = resolve_local_vertex_api_key_query_auth(transport) {
+                return build_vertex_api_key_gemini_embedding_url(
+                    params.mapped_model?,
+                    &auth.value,
+                    params.request_query,
+                );
+            }
+            if let Some(auth_config) = resolve_local_vertex_service_account_auth_config(transport) {
+                return build_vertex_service_account_gemini_embedding_url(
+                    params.mapped_model?,
+                    &auth_config,
+                    params.request_query,
+                );
+            }
         }
+        _ => {}
     }
 
     if is_antigravity_provider_transport(transport) {
@@ -287,7 +342,10 @@ fn build_transport_hook_url(
     None
 }
 
-fn build_path_params(params: TransportRequestUrlParams<'_>) -> BTreeMap<&'static str, &str> {
+fn build_path_params(
+    params: TransportRequestUrlParams<'_>,
+    gemini_embedding_batch: bool,
+) -> BTreeMap<&'static str, &str> {
     let mut path_params = BTreeMap::new();
     if let Some(model) = params
         .mapped_model
@@ -302,7 +360,11 @@ fn build_path_params(params: TransportRequestUrlParams<'_>) -> BTreeMap<&'static
         path_params.insert(
             "action",
             if provider_api_format == "gemini:embedding" {
-                "embedContent"
+                if gemini_embedding_batch {
+                    "batchEmbedContents"
+                } else {
+                    "embedContent"
+                }
             } else if params.upstream_is_stream {
                 "streamGenerateContent"
             } else {
@@ -311,6 +373,14 @@ fn build_path_params(params: TransportRequestUrlParams<'_>) -> BTreeMap<&'static
         );
     }
     path_params
+}
+
+fn normalize_gemini_embedding_action_path(path: &str, batch: bool) -> String {
+    if batch {
+        path.replace(":embedContent", ":batchEmbedContents")
+    } else {
+        path.replace(":batchEmbedContents", ":embedContent")
+    }
 }
 
 fn build_provider_embedding_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
@@ -333,7 +403,9 @@ fn build_provider_v1_url(
         .map(|(base, _)| base)
         .unwrap_or_else(|| upstream_base_url.trim())
         .trim_end_matches('/');
-    let path = if base_without_query.ends_with("/v1") {
+    let path = if base_without_query.ends_with("/v1")
+        || google_openai_compat_base_includes_api_root(base_without_query)
+    {
         v1_path
     } else {
         default_path
@@ -345,6 +417,7 @@ fn build_gemini_embedding_url(
     upstream_base_url: &str,
     model: &str,
     query: Option<&str>,
+    batch: bool,
 ) -> Option<String> {
     let trimmed_base_url = upstream_base_url
         .trim()
@@ -357,12 +430,17 @@ fn build_gemini_embedding_url(
         return None;
     }
 
-    let path = if trimmed_base_url.ends_with("/v1beta") {
-        format!("/models/{trimmed_model}:embedContent")
-    } else if trimmed_base_url.contains("/v1beta/models/") {
-        ":embedContent".to_string()
+    let action = if batch {
+        "batchEmbedContents"
     } else {
-        format!("/v1beta/models/{trimmed_model}:embedContent")
+        "embedContent"
+    };
+    let path = if trimmed_base_url.ends_with("/v1beta") {
+        format!("/models/{trimmed_model}:{action}")
+    } else if trimmed_base_url.contains("/v1beta/models/") {
+        format!(":{action}")
+    } else {
+        format!("/v1beta/models/{trimmed_model}:{action}")
     };
     build_passthrough_path_url(upstream_base_url, &path, query, &["key"])
 }
@@ -440,12 +518,13 @@ fn custom_path_template_regex() -> &'static Regex {
 mod tests {
     use super::{
         build_kiro_cross_format_upstream_url, build_transport_request_url,
-        TransportRequestUrlParams,
+        build_transport_request_url_for_request_body, TransportRequestUrlParams,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
+    use serde_json::json;
 
     fn sample_transport(
         provider_type: &str,
@@ -569,6 +648,96 @@ mod tests {
         assert_eq!(
             url,
             "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-3.1-pro-preview:generateContent?foo=bar"
+        );
+    }
+
+    #[test]
+    fn uses_vertex_service_account_hook_for_gemini_embedding_url() {
+        let mut transport = sample_transport(
+            "vertex_ai",
+            "gemini:embedding",
+            "https://aiplatform.googleapis.com",
+            None,
+        );
+        transport.endpoint.endpoint_kind = Some("embedding".to_string());
+        transport.key.auth_type = "service_account".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "client_email":"svc@example.iam.gserviceaccount.com",
+                "private_key":"TEST-PRIVATE-KEY",
+                "project_id":"demo-project"
+            }"#
+            .to_string(),
+        );
+
+        let provider_request_body = json!({
+            "content": {"parts": [{"text": "hello"}]}
+        });
+        let url = build_transport_request_url_for_request_body(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "gemini:embedding",
+                mapped_model: Some("gemini-embedding-2"),
+                upstream_is_stream: false,
+                request_query: Some("foo=bar&beta=1"),
+                kiro_api_region: None,
+            },
+            Some(&provider_request_body),
+        )
+        .expect("vertex embedding service account hook url");
+
+        assert_eq!(
+            url,
+            "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:predict?foo=bar"
+        );
+    }
+
+    #[test]
+    fn vertex_gemini_embedding_batch_request_uses_vertex_predict_endpoint() {
+        let mut transport = sample_transport(
+            "vertex_ai",
+            "gemini:embedding",
+            "https://aiplatform.googleapis.com",
+            None,
+        );
+        transport.endpoint.endpoint_kind = Some("embedding".to_string());
+        transport.key.auth_type = "service_account".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "client_email":"svc@example.iam.gserviceaccount.com",
+                "private_key":"TEST-PRIVATE-KEY",
+                "project_id":"demo-project"
+            }"#
+            .to_string(),
+        );
+
+        let batch_body = json!({
+            "requests": [
+                {
+                    "model": "models/gemini-embedding-2",
+                    "content": {"parts": [{"text": "alpha"}]}
+                }
+            ]
+        });
+
+        assert_eq!(
+            build_transport_request_url_for_request_body(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:embedding",
+                    mapped_model: Some("gemini-embedding-2"),
+                    upstream_is_stream: false,
+                    request_query: None,
+                    kiro_api_region: None,
+                },
+                Some(&batch_body),
+            )
+            .as_deref(),
+            Some(
+                "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:predict"
+            )
         );
     }
 
@@ -826,6 +995,129 @@ mod tests {
             )
             .as_deref(),
             Some("https://ark.volces.example/api/v3/embeddings")
+        );
+    }
+
+    #[test]
+    fn embedding_request_url_preserves_google_openai_compat_roots() {
+        let developer_api_openai = sample_transport(
+            "custom",
+            "openai:embedding",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            None,
+        );
+        let vertex_openai = sample_transport(
+            "custom",
+            "openai:embedding",
+            "https://aiplatform.googleapis.com/v1/projects/project-1/locations/global/endpoints/openapi",
+            None,
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &developer_api_openai,
+                TransportRequestUrlParams {
+                    provider_api_format: "openai:embedding",
+                    mapped_model: Some("gemini-embedding-001"),
+                    upstream_is_stream: false,
+                    request_query: Some("trace=1"),
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai/embeddings?trace=1")
+        );
+        assert_eq!(
+            build_transport_request_url(
+                &vertex_openai,
+                TransportRequestUrlParams {
+                    provider_api_format: "openai:embedding",
+                    mapped_model: Some("gemini-embedding-001"),
+                    upstream_is_stream: false,
+                    request_query: None,
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some(
+                "https://aiplatform.googleapis.com/v1/projects/project-1/locations/global/endpoints/openapi/embeddings"
+            )
+        );
+    }
+
+    #[test]
+    fn gemini_embedding_batch_body_uses_batch_endpoint() {
+        let gemini = sample_transport(
+            "gemini",
+            "gemini:embedding",
+            "https://generativelanguage.googleapis.com/v1beta",
+            None,
+        );
+        let batch_body = json!({
+            "requests": [
+                {
+                    "model": "models/gemini-embedding-001",
+                    "content": {"parts": [{"text": "alpha"}]}
+                },
+                {
+                    "model": "models/gemini-embedding-001",
+                    "content": {"parts": [{"text": "beta"}]}
+                }
+            ]
+        });
+
+        assert_eq!(
+            build_transport_request_url_for_request_body(
+                &gemini,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:embedding",
+                    mapped_model: Some("gemini-embedding-001"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-key&foo=bar"),
+                    kiro_api_region: None,
+                },
+                Some(&batch_body),
+            )
+            .as_deref(),
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents?foo=bar"
+            )
+        );
+    }
+
+    #[test]
+    fn gemini_embedding_custom_action_template_follows_batch_body() {
+        let gemini = sample_transport(
+            "gemini",
+            "gemini:embedding",
+            "https://generativelanguage.googleapis.com",
+            Some("/v1beta/models/{model}:{action}"),
+        );
+        let batch_body = json!({
+            "requests": [
+                {
+                    "model": "models/gemini-embedding-001",
+                    "content": {"parts": [{"text": "alpha"}]}
+                }
+            ]
+        });
+
+        assert_eq!(
+            build_transport_request_url_for_request_body(
+                &gemini,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:embedding",
+                    mapped_model: Some("gemini-embedding-001"),
+                    upstream_is_stream: false,
+                    request_query: None,
+                    kiro_api_region: None,
+                },
+                Some(&batch_body),
+            )
+            .as_deref(),
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents"
+            )
         );
     }
 

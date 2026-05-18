@@ -821,7 +821,8 @@ fn local_candidate_failure_should_invalidate_affinity(
         LocalFailoverClassification::UseDefault | LocalFailoverClassification::StopStatusCode => {
             status_code >= 500
         }
-        LocalFailoverClassification::StopErrorPattern => false,
+        LocalFailoverClassification::StopErrorPattern
+        | LocalFailoverClassification::StopExecutionError => false,
     }
 }
 

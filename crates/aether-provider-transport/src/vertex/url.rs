@@ -13,7 +13,12 @@ pub fn build_vertex_api_key_gemini_content_url(
     api_key: &str,
     request_query: Option<&str>,
 ) -> Option<String> {
-    build_vertex_api_key_google_model_url(model, stream, api_key, request_query)
+    let action = if stream {
+        "streamGenerateContent"
+    } else {
+        "generateContent"
+    };
+    build_vertex_api_key_google_model_url(model, action, stream, api_key, request_query)
 }
 
 pub fn build_vertex_api_key_imagen_content_url(
@@ -22,7 +27,20 @@ pub fn build_vertex_api_key_imagen_content_url(
     api_key: &str,
     request_query: Option<&str>,
 ) -> Option<String> {
-    build_vertex_api_key_google_model_url(model, stream, api_key, request_query)
+    let action = if stream {
+        "streamGenerateContent"
+    } else {
+        "generateContent"
+    };
+    build_vertex_api_key_google_model_url(model, action, stream, api_key, request_query)
+}
+
+pub fn build_vertex_api_key_gemini_embedding_url(
+    model: &str,
+    api_key: &str,
+    request_query: Option<&str>,
+) -> Option<String> {
+    build_vertex_api_key_google_model_url(model, "predict", false, api_key, request_query)
 }
 
 pub fn build_vertex_service_account_gemini_content_url(
@@ -31,56 +49,69 @@ pub fn build_vertex_service_account_gemini_content_url(
     auth_config: &VertexServiceAccountAuthConfig,
     request_query: Option<&str>,
 ) -> Option<String> {
-    build_vertex_service_account_google_model_url(model, stream, auth_config, request_query)
-}
-
-fn build_vertex_api_key_google_model_url(
-    model: &str,
-    stream: bool,
-    api_key: &str,
-    request_query: Option<&str>,
-) -> Option<String> {
-    let trimmed_model = model.trim();
-    let trimmed_api_key = api_key.trim();
-    if trimmed_model.is_empty() || trimmed_api_key.is_empty() {
-        return None;
-    }
-
     let action = if stream {
         "streamGenerateContent"
     } else {
         "generateContent"
     };
-    let path = format!("/v1/publishers/google/models/{trimmed_model}:{action}");
+    build_vertex_service_account_google_model_url(model, action, stream, auth_config, request_query)
+}
+
+pub fn build_vertex_service_account_gemini_embedding_url(
+    model: &str,
+    auth_config: &VertexServiceAccountAuthConfig,
+    request_query: Option<&str>,
+) -> Option<String> {
+    build_vertex_service_account_google_model_url(
+        model,
+        "predict",
+        false,
+        auth_config,
+        request_query,
+    )
+}
+
+fn build_vertex_api_key_google_model_url(
+    model: &str,
+    action: &str,
+    stream: bool,
+    api_key: &str,
+    request_query: Option<&str>,
+) -> Option<String> {
+    let trimmed_model = model.trim();
+    let trimmed_action = action.trim();
+    let trimmed_api_key = api_key.trim();
+    if trimmed_model.is_empty() || trimmed_action.is_empty() || trimmed_api_key.is_empty() {
+        return None;
+    }
+
+    let path = format!("/v1/publishers/google/models/{trimmed_model}:{trimmed_action}");
     let merged_query = build_vertex_api_key_query(trimmed_api_key, request_query, stream);
     build_passthrough_path_url(VERTEX_API_KEY_BASE_URL, &path, merged_query.as_deref(), &[])
 }
 
 fn build_vertex_service_account_google_model_url(
     model: &str,
+    action: &str,
     stream: bool,
     auth_config: &VertexServiceAccountAuthConfig,
     request_query: Option<&str>,
 ) -> Option<String> {
     let trimmed_model = model.trim();
+    let trimmed_action = action.trim();
     let project_id = auth_config.project_id.trim();
-    if trimmed_model.is_empty() || project_id.is_empty() {
+    if trimmed_model.is_empty() || trimmed_action.is_empty() || project_id.is_empty() {
         return None;
     }
 
     let region = resolve_vertex_service_account_region(trimmed_model, auth_config);
-    let action = if stream {
-        "streamGenerateContent"
-    } else {
-        "generateContent"
-    };
     let base_url = if region == "global" {
         VERTEX_API_KEY_BASE_URL.to_string()
     } else {
         format!("https://{region}-aiplatform.googleapis.com")
     };
     let path = format!(
-        "/v1/projects/{project_id}/locations/{region}/publishers/google/models/{trimmed_model}:{action}"
+        "/v1/projects/{project_id}/locations/{region}/publishers/google/models/{trimmed_model}:{trimmed_action}"
     );
     let merged_query = build_vertex_service_account_query(request_query, stream);
     build_passthrough_path_url(&base_url, &path, merged_query.as_deref(), &[])

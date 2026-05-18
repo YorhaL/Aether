@@ -1951,6 +1951,10 @@ async fn gateway_handles_public_test_connection_without_hitting_fallback_probe()
                 );
                 assert_eq!(body_json["model"], "gpt-5");
                 assert_eq!(body_json["messages"][0]["content"], "Health check");
+                assert!(
+                    body_json.get("max_tokens").is_none(),
+                    "public OpenAI-compatible test connection must not force a tiny max_tokens value"
+                );
                 Json(json!({"id": "resp_local_test"})).into_response()
             }
         }),
@@ -2006,6 +2010,91 @@ async fn gateway_handles_public_test_connection_without_hitting_fallback_probe()
 
     gateway_handle.abort();
     fallback_probe_handle.abort();
+    provider_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_gemini_test_connection_does_not_force_low_max_output_tokens() {
+    let provider_hits = Arc::new(Mutex::new(0usize));
+    let provider_hits_clone = Arc::clone(&provider_hits);
+    let provider = Router::new().route(
+        "/{*path}",
+        any(move |request: Request| {
+            let provider_hits_inner = Arc::clone(&provider_hits_clone);
+            async move {
+                *provider_hits_inner.lock().expect("mutex should lock") += 1;
+                let body = to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .expect("body should read");
+                let body_json: serde_json::Value =
+                    serde_json::from_slice(&body).expect("json body should parse");
+                assert_eq!(body_json["contents"][0]["parts"][0]["text"], "Health check");
+                assert!(
+                    body_json
+                        .get("generationConfig")
+                        .and_then(|config| config.get("maxOutputTokens"))
+                        .is_none(),
+                    "Gemini test connection must not force a tiny maxOutputTokens value"
+                );
+                Json(json!({
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": "ok"}]
+                        },
+                        "finishReason": "STOP"
+                    }],
+                    "responseId": "gemini_test_connection_ok"
+                }))
+                .into_response()
+            }
+        }),
+    );
+
+    let (provider_url, provider_handle) = start_server(provider).await;
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-gemini", "google", 10)],
+        vec![sample_endpoint(
+            "endpoint-gemini",
+            "provider-gemini",
+            "gemini:generate_content",
+            &provider_url,
+        )],
+        vec![sample_key(
+            "key-gemini",
+            "provider-gemini",
+            "gemini:generate_content",
+            "google-api-key",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/v1/test-connection?provider=provider-gemini&model=gemini-3-flash-preview&api_format=gemini:generate_content"
+        ))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["status"], "success");
+    assert_eq!(payload["provider_id"], "provider-gemini");
+    assert_eq!(payload["endpoint_id"], "endpoint-gemini");
+    assert_eq!(payload["api_format"], "gemini:generate_content");
+    assert_eq!(*provider_hits.lock().expect("mutex should lock"), 1);
+
+    gateway_handle.abort();
     provider_handle.abort();
 }
 

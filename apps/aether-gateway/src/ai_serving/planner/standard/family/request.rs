@@ -190,15 +190,18 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         });
     }
 
-    let Some(conversion_kind) =
-        crate::ai_serving::request_conversion_kind(spec_metadata.api_format, provider_api_format)
-    else {
-        return None;
-    };
-
-    if let Some(skip_reason) = crate::ai_serving::request_conversion_transport_unsupported_reason(
+    if !crate::ai_serving::request_pair_allowed_for_transport(
         transport,
-        conversion_kind,
+        spec_metadata.api_format,
+        provider_api_format,
+    ) {
+        return None;
+    }
+
+    if let Some(skip_reason) = crate::ai_serving::request_pair_transport_unsupported_reason(
+        transport,
+        spec_metadata.api_format,
+        provider_api_format,
     ) {
         mark_skipped_local_standard_candidate(
             state,
@@ -271,7 +274,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             planner_state,
             transport,
             candidate,
-            crate::ai_serving::request_conversion_direct_auth(transport, conversion_kind),
+            crate::ai_serving::request_pair_direct_auth(transport, provider_api_format),
             oauth_context,
         )
         .await
@@ -353,6 +356,29 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         upstream_is_stream,
         request_requires_body_stream_field(body_json, force_body_stream_field),
     );
+    if let Err(err) = apply_transport_request_body_semantics(
+        &mut provider_request_body,
+        transport,
+        provider_api_format,
+    ) {
+        mark_skipped_local_standard_candidate_with_failure_diagnostic(
+            state,
+            input,
+            trace_id,
+            candidate,
+            attempt.candidate_index,
+            &attempt.candidate_id,
+            "transport_request_body_semantics_failed",
+            CandidateFailureDiagnostic::request_conversion_failed(
+                spec_metadata.api_format,
+                provider_api_format,
+                "standard_family_transport_body_semantics",
+                err.to_string(),
+            ),
+        )
+        .await;
+        return None;
+    }
     if let Some(mapping) =
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
             state,
@@ -373,6 +399,29 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             upstream_is_stream,
             request_requires_body_stream_field(body_json, force_body_stream_field),
         );
+        if let Err(err) = apply_transport_request_body_semantics(
+            &mut provider_request_body,
+            transport,
+            provider_api_format,
+        ) {
+            mark_skipped_local_standard_candidate_with_failure_diagnostic(
+                state,
+                input,
+                trace_id,
+                candidate,
+                attempt.candidate_index,
+                &attempt.candidate_id,
+                "transport_request_body_semantics_failed",
+                CandidateFailureDiagnostic::request_conversion_failed(
+                    spec_metadata.api_format,
+                    provider_api_format,
+                    "standard_family_transport_body_semantics_after_model_directives",
+                    err.to_string(),
+                ),
+            )
+            .await;
+            return None;
+        }
     }
 
     if let Some(kiro_auth) = kiro_auth.as_ref() {
@@ -401,6 +450,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         &prepared_candidate.mapped_model,
         provider_api_format,
         upstream_is_stream,
+        Some(&provider_request_body),
     ) {
         Some(url) => url,
         None => {
@@ -478,6 +528,18 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         transport: Arc::clone(transport),
         transport_profile: None,
     })
+}
+
+fn apply_transport_request_body_semantics(
+    provider_request_body: &mut Value,
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) -> Result<(), crate::ai_serving::transport::TransportRequestBodySemanticsError> {
+    crate::ai_serving::transport::apply_transport_request_body_semantics(
+        provider_request_body,
+        transport,
+        provider_api_format,
+    )
 }
 
 async fn resolve_local_gemini_image_to_openai_image_candidate_payload_parts(

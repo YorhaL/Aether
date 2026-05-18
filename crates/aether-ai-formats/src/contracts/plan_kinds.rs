@@ -22,6 +22,7 @@ pub const OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND: &str = "openai_video_create_sync";
 pub const OPENAI_CHAT_SYNC_PLAN_KIND: &str = "openai_chat_sync";
 pub const OPENAI_EMBEDDING_SYNC_PLAN_KIND: &str = "openai_embedding_sync";
 pub const OPENAI_RERANK_SYNC_PLAN_KIND: &str = "openai_rerank_sync";
+pub const GEMINI_EMBEDDING_SYNC_PLAN_KIND: &str = "gemini_embedding_sync";
 pub const OPENAI_RESPONSES_SYNC_PLAN_KIND: &str = "openai_responses_sync";
 pub const OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND: &str = "openai_responses_compact_sync";
 pub const CLAUDE_CHAT_SYNC_PLAN_KIND: &str = "claude_chat_sync";

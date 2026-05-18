@@ -24,8 +24,9 @@ pub use policy::{
     supports_local_vertex_gemini_transport_with_network,
 };
 pub use url::{
-    build_vertex_api_key_gemini_content_url, build_vertex_api_key_imagen_content_url,
-    build_vertex_service_account_gemini_content_url, resolve_vertex_service_account_region,
+    build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
+    build_vertex_api_key_imagen_content_url, build_vertex_service_account_gemini_content_url,
+    build_vertex_service_account_gemini_embedding_url, resolve_vertex_service_account_region,
     VERTEX_API_KEY_BASE_URL,
 };
 

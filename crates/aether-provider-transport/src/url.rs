@@ -2,15 +2,17 @@ use std::collections::BTreeMap;
 
 use super::provider_types::is_codex_cli_backend_url;
 use url::form_urlencoded;
+use url::Url;
 
 pub fn build_openai_chat_url(upstream_base_url: &str, query: Option<&str>) -> String {
     let (trimmed, base_query) = split_base_url_query(upstream_base_url);
     let trimmed = trimmed.trim_end_matches('/');
-    let mut url = if trimmed.ends_with("/v1") {
-        format!("{trimmed}/chat/completions")
-    } else {
-        format!("{trimmed}/v1/chat/completions")
-    };
+    let mut url =
+        if trimmed.ends_with("/v1") || google_openai_compat_base_includes_api_root(trimmed) {
+            format!("{trimmed}/chat/completions")
+        } else {
+            format!("{trimmed}/v1/chat/completions")
+        };
     append_merged_query(&mut url, base_query, None, query, &[]);
     url
 }
@@ -195,6 +197,33 @@ fn split_base_url_query(base_url: &str) -> (&str, Option<&str>) {
         .unwrap_or((trimmed, None))
 }
 
+pub(crate) fn google_openai_compat_base_includes_api_root(base_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str().map(|value| value.to_ascii_lowercase()) else {
+        return false;
+    };
+    let path = parsed.path().trim_end_matches('/');
+
+    if host == "generativelanguage.googleapis.com" {
+        return path == "/v1beta/openai" || path == "/v1/openai";
+    }
+
+    if looks_like_vertex_ai_host(&host) {
+        return path.ends_with("/endpoints/openapi");
+    }
+
+    false
+}
+
+fn looks_like_vertex_ai_host(host: &str) -> bool {
+    const VERTEX_AI_HOST: &str = "aiplatform.googleapis.com";
+    host == VERTEX_AI_HOST
+        || host.ends_with(&format!(".{VERTEX_AI_HOST}"))
+        || host.ends_with(&format!("-{VERTEX_AI_HOST}"))
+}
+
 fn split_path_query(path: &str) -> (&str, Option<&str>) {
     path.split_once('?')
         .map(|(path, query)| (path, Some(query)))
@@ -291,6 +320,24 @@ mod tests {
                 Some("mode=fast&tenant=override")
             ),
             "https://api.openai.example/v1/chat/completions?mode=fast&tenant=override"
+        );
+    }
+
+    #[test]
+    fn openai_chat_url_preserves_google_openai_compat_roots() {
+        assert_eq!(
+            build_openai_chat_url(
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                Some("trace=1")
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions?trace=1"
+        );
+        assert_eq!(
+            build_openai_chat_url(
+                "https://aiplatform.googleapis.com/v1/projects/project-1/locations/global/endpoints/openapi",
+                None,
+            ),
+            "https://aiplatform.googleapis.com/v1/projects/project-1/locations/global/endpoints/openapi/chat/completions"
         );
     }
 

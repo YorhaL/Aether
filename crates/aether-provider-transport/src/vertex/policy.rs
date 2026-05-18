@@ -42,9 +42,12 @@ fn local_vertex_gemini_transport_unsupported_reason_with_network_impl(
             Some("key_inactive")
         };
     }
-    if aether_ai_formats::normalize_api_format_alias(&transport.endpoint.api_format)
-        != "gemini:generate_content"
-    {
+    let endpoint_api_format =
+        aether_ai_formats::normalize_api_format_alias(&transport.endpoint.api_format);
+    if !matches!(
+        endpoint_api_format.as_str(),
+        "gemini:generate_content" | "gemini:embedding"
+    ) {
         return Some("transport_api_format_mismatch");
     }
     if !is_vertex_transport_family(transport) {
@@ -294,6 +297,28 @@ mod tests {
         );
 
         assert!(!supports_local_vertex_api_key_gemini_transport_with_network(&transport));
+        assert!(supports_local_vertex_gemini_transport_with_network(
+            &transport
+        ));
+    }
+
+    #[test]
+    fn supports_vertex_service_account_gemini_embedding_transport_with_network() {
+        let mut transport = sample_transport();
+        transport.endpoint.api_format = "gemini:embedding".to_string();
+        transport.endpoint.endpoint_kind = Some("embedding".to_string());
+        transport.key.api_formats = Some(vec!["gemini:embedding".to_string()]);
+        transport.key.auth_type = "service_account".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "client_email":"svc@example.iam.gserviceaccount.com",
+                "private_key":"TEST-PRIVATE-KEY",
+                "project_id":"demo-project"
+            }"#
+            .to_string(),
+        );
+
         assert!(supports_local_vertex_gemini_transport_with_network(
             &transport
         ));

@@ -350,6 +350,27 @@ describe('provider key concurrent_limit form behavior', () => {
     }))
   })
 
+  it('keeps Gemini embedding selectable for Vertex AI keys', async () => {
+    const root = mountDialog(KeyFormDialog, {
+      open: true,
+      endpoint: null,
+      editingKey: null,
+      providerId: 'provider-vertex',
+      providerType: 'vertex_ai',
+      availableApiFormats: ['gemini:generate_content', 'gemini:embedding', 'claude:messages'],
+    })
+    await settle()
+
+    expect(root.textContent).toContain('Gemini Embedding')
+
+    const serviceAccountOption = root.querySelector<HTMLButtonElement>('[data-select-item="service_account"]')
+    expect(serviceAccountOption).not.toBeNull()
+    serviceAccountOption?.click()
+    await settle()
+
+    expect(root.textContent).toContain('Gemini Embedding')
+  })
+
   it('hydrates and serializes a positive concurrent_limit number from the normal key form', async () => {
     const root = mountDialog(KeyFormDialog, {
       open: true,

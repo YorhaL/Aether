@@ -63,10 +63,10 @@ pub(super) fn provider_query_standard_test_unsupported_reason(
                 api_format,
             )
         }
-        "gemini:generate_content"
-            if crate::provider_transport::is_vertex_api_key_transport_context(transport) =>
+        "gemini:generate_content" | "gemini:embedding"
+            if crate::provider_transport::is_vertex_transport_context(transport) =>
         {
-            aether_provider_transport::vertex::local_vertex_api_key_gemini_transport_unsupported_reason_with_network(
+            aether_provider_transport::vertex::local_vertex_gemini_transport_unsupported_reason_with_network(
                 transport,
             )
         }

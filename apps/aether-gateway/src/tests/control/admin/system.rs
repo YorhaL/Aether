@@ -1154,6 +1154,14 @@ async fn gateway_handles_admin_system_api_formats_locally_with_trusted_admin_pri
         .expect("formats should be an array");
     assert_eq!(formats[0]["value"], "openai:chat");
     assert_eq!(formats[0]["default_path"], "/v1/chat/completions");
+    let gemini_embedding = formats
+        .iter()
+        .find(|item| item["value"] == "gemini:embedding")
+        .expect("gemini embedding format should exist");
+    assert_eq!(
+        gemini_embedding["default_path"],
+        "/v1beta/models/{model}:{action}"
+    );
     assert!(formats
         .iter()
         .any(|item| item["value"] == "openai:embedding"));

@@ -229,6 +229,8 @@ pub(super) fn is_gemini_models_route(path: &str) -> bool {
     (path.starts_with("/v1/models/") || path.starts_with("/v1beta/models/"))
         && (path.contains(":generateContent")
             || path.contains(":streamGenerateContent")
+            || path.contains(":embedContent")
+            || path.contains(":batchEmbedContents")
             || path.contains(":predictLongRunning"))
 }
 

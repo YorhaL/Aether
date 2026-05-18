@@ -1257,6 +1257,146 @@ async fn gateway_handles_admin_provider_query_gemini_embedding_model_test() {
 }
 
 #[tokio::test]
+async fn gateway_handles_admin_provider_query_vertex_gemini_embedding_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-vertex-ai");
+            assert_eq!(plan.endpoint_id, "endpoint-vertex-gemini-embedding");
+            assert_eq!(plan.key_id, "key-vertex-gemini-embedding");
+            assert_eq!(plan.client_api_format, "openai:embedding");
+            assert_eq!(plan.provider_api_format, "gemini:embedding");
+            assert_eq!(
+                plan.url,
+                "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-embedding-2:predict?key=sk-vertex-gemini-embedding"
+            );
+            assert_eq!(plan.model_name.as_deref(), Some("gemini-embedding-2"));
+            assert!(!plan.stream);
+            let body = plan.body.json_body.as_ref().expect("json body");
+            assert!(
+                body.get("model").is_none(),
+                "Vertex predict carries the model in the URL path; the test body must not repeat it"
+            );
+            assert_eq!(
+                body["instances"][0]["content"],
+                json!("This is a test embedding input.")
+            );
+            assert!(body.get("content").is_none());
+            assert!(body.get("requests").is_none());
+            assert!(
+                body.get("stream").is_none(),
+                "gemini embedding provider body must not carry stream"
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "predictions": [
+                            {
+                                "embeddings": {
+                                    "values": [0.1, 0.2, 0.3]
+                                }
+                            }
+                        ],
+                        "deployedModelId": "gemini-embedding-2"
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 27
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-vertex-ai", "Vertex AI", 10);
+    provider.provider_type = "vertex_ai".to_string();
+    let mut key = sample_key(
+        "key-vertex-gemini-embedding",
+        "provider-vertex-ai",
+        "gemini:embedding",
+        "sk-vertex-gemini-embedding",
+    );
+    key.allowed_models = Some(json!(["gemini-embedding-2"]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-vertex-gemini-embedding",
+            "provider-vertex-ai",
+            "gemini:embedding",
+            "https://aiplatform.googleapis.com",
+        )],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-vertex-ai",
+            "model": "gemini-embedding-2",
+            "api_format": "gemini:embedding",
+            "endpoint_id": "endpoint-vertex-gemini-embedding",
+            "request_body": {
+                "model": "gemini-embedding-2",
+                "input": "This is a test embedding input."
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["error"], serde_json::Value::Null);
+    assert_eq!(payload["attempts"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["instances"][0]["content"],
+        json!("This is a test embedding input.")
+    );
+    assert_eq!(
+        payload["attempts"][0]["endpoint_product"],
+        json!("Vertex AI")
+    );
+    assert_eq!(
+        payload["attempts"][0]["endpoint_variant"],
+        json!("vertex_native")
+    );
+    assert_eq!(payload["attempts"][0]["endpoint_action"], json!("predict"));
+    assert_eq!(
+        payload["attempts"][0]["endpoint_batch_strategy"],
+        json!("single_instance")
+    );
+    assert!(
+        payload["attempts"][0]["request_body"]
+            .get("model")
+            .is_none(),
+        "attempt debug payload must expose the exact Vertex body without a duplicate model"
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_provider_query_jina_embedding_model_test() {
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",

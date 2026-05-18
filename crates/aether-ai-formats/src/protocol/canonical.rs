@@ -684,6 +684,7 @@ pub fn from_embedding_to_canonical_response(
             crate::formats::openai::embedding::response::from_namespace(body_json, "openai")
         }
         "jina" => crate::formats::openai::embedding::response::from_namespace(body_json, "jina"),
+        "gemini" => crate::formats::gemini::embedding::response::from(body_json),
         _ => None,
     }
 }
@@ -4830,10 +4831,16 @@ mod tests {
         let gemini =
             super::canonical_to_embedding_request(&canonical, "gemini-embedding-001", "gemini")
                 .expect("gemini embedding request");
+        assert!(gemini.get("model").is_none());
+        assert_eq!(
+            gemini["requests"][0]["model"],
+            "models/gemini-embedding-001"
+        );
         assert_eq!(
             gemini["requests"][0]["content"]["parts"][0]["text"],
             "alpha"
         );
+        assert_eq!(gemini["requests"][0]["outputDimensionality"], 2);
         assert!(gemini.get("messages").is_none());
 
         let doubao = super::canonical_to_embedding_request(

@@ -82,7 +82,20 @@ fn is_vertex_host_format_context(transport: &GatewayProviderTransportSnapshot) -
     }
 
     let endpoint_api_format = transport.endpoint.api_format.trim().to_ascii_lowercase();
-    endpoint_api_format.starts_with("gemini:") || endpoint_api_format.starts_with("claude:")
+    endpoint_api_format.starts_with("gemini:")
+        || endpoint_api_format.starts_with("claude:")
+        || (endpoint_api_format.starts_with("openai:")
+            && looks_like_vertex_openai_compat_base(&transport.endpoint.base_url))
+}
+
+fn looks_like_vertex_openai_compat_base(base_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(base_url.trim()) else {
+        return false;
+    };
+    parsed
+        .path()
+        .trim_end_matches('/')
+        .ends_with("/endpoints/openapi")
 }
 
 #[cfg(test)]
@@ -197,5 +210,29 @@ mod tests {
             &transport,
             "claude:messages"
         ));
+    }
+
+    #[test]
+    fn infers_vertex_service_account_context_for_openai_compat_endpoint_root() {
+        let mut transport = sample_transport();
+        transport.endpoint.api_format = "openai:chat".to_string();
+        transport.endpoint.base_url =
+            "https://aiplatform.googleapis.com/v1/projects/project-1/locations/global/endpoints/openapi"
+                .to_string();
+        transport.key.auth_type = "service_account".to_string();
+
+        assert!(is_vertex_service_account_transport_context(&transport));
+        assert!(is_vertex_transport_context(&transport));
+    }
+
+    #[test]
+    fn does_not_infer_vertex_context_for_generic_openai_format_on_aiplatform_root() {
+        let mut transport = sample_transport();
+        transport.endpoint.api_format = "openai:chat".to_string();
+        transport.endpoint.base_url = "https://aiplatform.googleapis.com".to_string();
+        transport.key.auth_type = "service_account".to_string();
+
+        assert!(!is_vertex_service_account_transport_context(&transport));
+        assert!(!is_vertex_transport_context(&transport));
     }
 }

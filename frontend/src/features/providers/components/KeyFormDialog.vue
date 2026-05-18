@@ -467,10 +467,10 @@ function getAuthTypeOptions(providerType: ProviderType | null): AuthTypeOption[]
 
 function getVertexAllowedFormatsByAuth(authType: ProviderKeyFormAuthType): Set<string> {
   if (authType === 'api_key') {
-    return new Set(['gemini:generate_content'])
+    return new Set(['gemini:generate_content', 'gemini:embedding'])
   }
   if (authType === 'service_account') {
-    return new Set(['gemini:generate_content', 'claude:messages'])
+    return new Set(['gemini:generate_content', 'gemini:embedding', 'claude:messages'])
   }
   return new Set()
 }

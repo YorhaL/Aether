@@ -118,11 +118,11 @@ WHERE p.is_active = TRUE
       AND (
         (
           LOWER(BTRIM(pak.auth_type)) = 'api_key'
-          AND LOWER($3) = 'gemini:generate_content'
+          AND LOWER($3) IN ('gemini:generate_content', 'gemini:embedding')
         )
         OR (
           LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-          AND LOWER($3) IN ('claude:messages', 'gemini:generate_content')
+          AND LOWER($3) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
         )
       )
     )
@@ -307,11 +307,11 @@ WHERE p.is_active = TRUE
       AND (
         (
           LOWER(BTRIM(pak.auth_type)) = 'api_key'
-          AND LOWER($4) = 'gemini:generate_content'
+          AND LOWER($4) IN ('gemini:generate_content', 'gemini:embedding')
         )
         OR (
           LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-          AND LOWER($4) IN ('claude:messages', 'gemini:generate_content')
+          AND LOWER($4) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
         )
       )
     )
@@ -495,11 +495,11 @@ WHERE p.is_active = TRUE
       AND (
         (
           LOWER(BTRIM(pak.auth_type)) = 'api_key'
-          AND LOWER($6) = 'gemini:generate_content'
+          AND LOWER($6) IN ('gemini:generate_content', 'gemini:embedding')
         )
         OR (
           LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-          AND LOWER($6) IN ('claude:messages', 'gemini:generate_content')
+          AND LOWER($6) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
         )
       )
     )
@@ -1316,9 +1316,26 @@ mod tests {
         ] {
             assert!(sql.contains("LOWER(BTRIM(p.provider_type)) = 'grok'"));
             assert!(sql.contains("LOWER(BTRIM(pak.auth_type)) = 'oauth'"));
-            assert!(sql
-                .contains("'openai:chat', 'openai:responses', 'claude:messages', 'openai:image'"));
+            assert!(
+                sql.contains("'openai:chat', 'openai:responses', 'claude:messages', 'openai:image'")
+            );
             assert!(sql.contains("'grok',"));
+        }
+    }
+
+    #[test]
+    fn candidate_selection_sql_allows_vertex_embedding_auth() {
+        let requested_model_sql = requested_model_selection_sql();
+        for sql in [
+            LIST_FOR_EXACT_API_FORMAT_SQL,
+            LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL,
+            LIST_POOL_KEYS_FOR_GROUP_SQL,
+            requested_model_sql.as_str(),
+        ] {
+            assert!(sql.contains("LOWER(BTRIM(p.provider_type)) = 'vertex_ai'"));
+            assert!(sql.contains("gemini:embedding"));
+            assert!(sql.contains("gemini:generate_content"));
+            assert!(sql.contains("claude:messages"));
         }
     }
 

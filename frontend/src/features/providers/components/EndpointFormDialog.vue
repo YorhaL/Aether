@@ -1031,6 +1031,7 @@ import { log } from '@/utils/logger'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
+import { getDefaultEndpointPath, normalizeEndpointApiFormat } from './endpoint-default-paths'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   createEndpoint,
@@ -1814,13 +1815,6 @@ function hasDefaultBodyRules(apiFormat: string): boolean {
   return (defaultBodyRulesByFormat.value[cacheKey]?.length || 0) > 0
 }
 
-function normalizeLegacyOpenAIFormatAlias(apiFormat: string): string {
-  switch (apiFormat.trim().toLowerCase()) {
-    default:
-      return apiFormat.trim().toLowerCase()
-  }
-}
-
 async function loadDefaultBodyRulesForFormat(apiFormat: string, force = false): Promise<BodyRule[]> {
   if (!apiFormat) return []
   const providerType = (props.provider?.provider_type || '').toLowerCase()
@@ -1857,26 +1851,12 @@ async function preloadDefaultBodyRules(endpoints: ProviderEndpoint[]): Promise<v
 // 获取指定 API 格式的默认路径
 function getDefaultPath(apiFormat: string, baseUrl?: string): string {
   const providerType = (props.provider?.provider_type || '').toLowerCase()
-  const normalizedApiFormat = normalizeLegacyOpenAIFormatAlias(apiFormat)
-  if (providerType === 'vertex_ai') {
-    if (normalizedApiFormat === 'gemini:generate_content') {
-      return '/v1/publishers/google/models/{model}:{action}'
-    }
-    if (normalizedApiFormat === 'claude:messages') {
-      return '/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{action}'
-    }
-  }
-
-  const format = apiFormats.value.find(f => f.value === normalizedApiFormat)
-  const defaultPath = format?.default_path || ''
-  // Codex 端点使用 /responses 而非 /v1/responses
-  const isCodex = providerType
-    ? providerType === 'codex'
-    : (!!baseUrl && isCodexUrl(baseUrl))
-  if (normalizedApiFormat === 'openai:responses' && isCodex) {
-    return '/responses'
-  }
-  return defaultPath
+  return getDefaultEndpointPath({
+    apiFormat,
+    providerType,
+    baseUrl,
+    apiFormats: apiFormats.value,
+  })
 }
 
 function getDisplayedPath(endpoint: ProviderEndpoint): string {
@@ -1884,12 +1864,6 @@ function getDisplayedPath(endpoint: ProviderEndpoint): string {
     return getDefaultPath(endpoint.api_format, endpoint.base_url)
   }
   return getEndpointEditState(endpoint.id)?.path ?? (endpoint.custom_path || '')
-}
-
-// 判断是否是 Codex OAuth 端点
-function isCodexUrl(baseUrl: string): boolean {
-  const url = baseUrl.replace(/\/+$/, '')
-  return url.includes('/backend-api/codex') || url.endsWith('/codex')
 }
 
 // 读取端点的上游流式策略（endpoint.config.upstream_stream_policy）
@@ -3284,7 +3258,7 @@ function getCurrentUpstreamStreamPolicy(endpoint: ProviderEndpoint): string {
 
 function isUpstreamStreamPolicyLocked(endpoint: ProviderEndpoint): boolean {
   return (props.provider?.provider_type || '').toLowerCase() === 'codex'
-    && normalizeLegacyOpenAIFormatAlias(endpoint.api_format) === 'openai:responses'
+    && normalizeEndpointApiFormat(endpoint.api_format) === 'openai:responses'
 }
 
 // 获取上游流式按钮的样式类

@@ -47,6 +47,7 @@ pub enum ProviderApiFormatInheritance {
     None,
     OAuth,
     OAuthOrBearer,
+    OAuthOrServiceAccount,
     OAuthOrConfiguredBearer,
 }
 
@@ -61,6 +62,9 @@ impl ProviderApiFormatInheritance {
             Self::None => false,
             Self::OAuth => auth_type == "oauth",
             Self::OAuthOrBearer => auth_type == "oauth" || auth_type == "bearer",
+            Self::OAuthOrServiceAccount => {
+                auth_type == "oauth" || auth_type == "service_account" || auth_type == "vertex_ai"
+            }
             Self::OAuthOrConfiguredBearer => {
                 auth_type == "oauth"
                     || auth_type == "bearer"
@@ -221,11 +225,12 @@ const GEMINI_CLI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
 };
 const VERTEX_AI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     fixed_provider: true,
-    api_format_inheritance: ProviderApiFormatInheritance::OAuth,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuthOrServiceAccount,
     enable_format_conversion_by_default: true,
     supports_model_fetch: false,
     supports_local_openai_chat_transport: false,
     supports_local_same_format_transport: false,
+    local_embedding_support: ProviderLocalEmbeddingSupport::Gemini,
     ..STANDARD_RUNTIME_POLICY
 };
 const ANTIGRAVITY_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
@@ -335,6 +340,12 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
         FixedProviderEndpointTemplate {
             item_key: "gemini:generate_content",
             api_format: "gemini:generate_content",
+            custom_path: None,
+            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        },
+        FixedProviderEndpointTemplate {
+            item_key: "gemini:embedding",
+            api_format: "gemini:embedding",
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
@@ -679,6 +690,11 @@ mod tests {
             "bearer",
             Some("{}")
         ));
+        assert!(fixed_provider_key_inherits_api_formats(
+            "vertex_ai",
+            "service_account",
+            None
+        ));
         assert!(!fixed_provider_key_inherits_api_formats(
             "kiro", "bearer", None
         ));
@@ -747,6 +763,7 @@ mod tests {
             ("custom", "openai:embedding"),
             ("gemini", "gemini:embedding"),
             ("google", "gemini:embedding"),
+            ("vertex_ai", "gemini:embedding"),
             ("jina", "jina:embedding"),
             ("doubao", "doubao:embedding"),
             ("volcengine", "doubao:embedding"),
@@ -760,6 +777,7 @@ mod tests {
         for (provider_type, api_format) in [
             ("openai", "gemini:embedding"),
             ("gemini", "openai:embedding"),
+            ("vertex_ai", "openai:embedding"),
             ("jina", "doubao:embedding"),
             ("doubao", "jina:embedding"),
             ("claude_code", "openai:embedding"),
@@ -775,5 +793,29 @@ mod tests {
             " Google ",
             "GEMINI:EMBEDDING"
         ));
+    }
+
+    #[test]
+    fn vertex_fixed_provider_template_includes_gemini_embedding_endpoint() {
+        let template =
+            fixed_provider_template("vertex_ai").expect("vertex_ai template should exist");
+
+        assert_eq!(
+            template
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            vec![
+                "gemini:generate_content",
+                "gemini:embedding",
+                "claude:messages",
+            ]
+        );
+
+        assert!(
+            fixed_provider_endpoint_template_by_api_format("vertex_ai", "gemini:embedding")
+                .is_some()
+        );
     }
 }

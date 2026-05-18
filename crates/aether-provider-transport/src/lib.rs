@@ -15,6 +15,7 @@ pub mod oauth_refresh;
 mod openai_image;
 pub mod policy;
 pub mod provider_types;
+mod request_body;
 mod request_url;
 pub mod rules;
 pub mod same_format_provider;
@@ -31,7 +32,8 @@ pub use conversion::{
     candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
     request_conversion_direct_auth, request_conversion_enabled_for_transport,
     request_conversion_transport_supported, request_conversion_transport_unsupported_reason,
-    request_pair_allowed_for_transport, CandidateTransportPolicyFacts,
+    request_pair_allowed_for_transport, request_pair_direct_auth,
+    request_pair_transport_unsupported_reason, CandidateTransportPolicyFacts,
 };
 pub use diagnostics::{
     append_transport_diagnostics_to_value, build_request_trace_proxy_value,
@@ -80,10 +82,14 @@ pub use policy::{
     local_standard_transport_unsupported_reason_with_network, supports_local_gemini_transport,
     supports_local_gemini_transport_with_network, supports_local_standard_transport,
 };
+pub use request_body::{
+    apply_transport_request_body_semantics, TransportRequestBodySemanticsError,
+};
 pub use request_url::{
     build_cross_format_openai_chat_upstream_url, build_cross_format_openai_responses_upstream_url,
     build_kiro_cross_format_upstream_url, build_local_openai_chat_upstream_url,
     build_local_openai_responses_upstream_url, build_transport_request_url,
+    build_transport_request_url_for_request_body, gemini_embedding_request_body_uses_batch,
     TransportRequestUrlParams,
 };
 pub use rules::{

@@ -12,7 +12,7 @@ use crate::control::GatewayControlDecision;
 use crate::usage::spawn_sync_report;
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{Response, StatusCode};
 use base64::Engine as _;
 use tracing::warn;
 
@@ -148,6 +148,74 @@ fn build_local_core_sync_finalize_fallback_response(
     build_local_sync_response_from_bytes(trace_id, decision, payload, Vec::new())
 }
 
+fn maybe_build_invalid_provider_success_finalize_response(
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    payload: &GatewaySyncReportRequest,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    if !local_core_sync_finalize_has_invalid_provider_success(payload)? {
+        return Ok(None);
+    }
+
+    let client_api_format = resolve_local_sync_client_api_format(payload);
+    let message = "Provider returned HTTP 200 but the Gemini response did not contain visible model output; refusing to finalize it as a successful response.";
+    let body_json = build_core_error_body_for_client_format(
+        &client_api_format,
+        message,
+        Some("invalid_provider_success_response"),
+        LocalCoreSyncErrorKind::ServerError,
+    )
+    .unwrap_or_else(|| {
+        serde_json::json!({
+            "error": {
+                "message": message,
+                "type": "server_error",
+                "code": "invalid_provider_success_response"
+            }
+        })
+    });
+
+    let mut response_headers = payload.headers.clone();
+    response_headers.remove("content-encoding");
+    response_headers.remove("content-length");
+    response_headers.insert("content-type".to_string(), "application/json".to_string());
+    let body_bytes =
+        serde_json::to_vec(&body_json).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    response_headers.insert("content-length".to_string(), body_bytes.len().to_string());
+
+    Ok(Some(build_client_response_from_parts(
+        StatusCode::BAD_GATEWAY.as_u16(),
+        &response_headers,
+        Body::from(body_bytes),
+        trace_id,
+        Some(decision),
+    )?))
+}
+
+fn local_core_sync_finalize_has_invalid_provider_success(
+    payload: &GatewaySyncReportRequest,
+) -> Result<bool, GatewayError> {
+    if payload.status_code >= 400 || !is_core_error_finalize_kind(payload.report_kind.as_str()) {
+        return Ok(false);
+    }
+    let provider_api_format = resolve_local_sync_provider_api_format(payload);
+    if aether_ai_formats::normalize_api_format_alias(&provider_api_format)
+        != "gemini:generate_content"
+    {
+        return Ok(false);
+    }
+    let Some(body_json) = resolve_local_sync_source_body_json(payload)? else {
+        return Ok(false);
+    };
+    if has_nested_error(&body_json) {
+        return Ok(false);
+    }
+    Ok(
+        aether_ai_formats::formats::gemini::generate_content::response::from_raw(&body_json)
+            .is_none(),
+    )
+}
+
 pub(crate) fn build_best_effort_local_core_error_body(
     payload: &GatewaySyncReportRequest,
     body_json: &serde_json::Value,
@@ -281,6 +349,16 @@ fn resolve_local_sync_client_api_format(payload: &GatewaySyncReportRequest) -> S
         .unwrap_or(default_api_format.as_str())
         .trim()
         .to_ascii_lowercase()
+}
+
+fn resolve_local_sync_provider_api_format(payload: &GatewaySyncReportRequest) -> String {
+    payload
+        .report_context
+        .as_ref()
+        .and_then(|value| value.get("provider_api_format"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| resolve_local_sync_client_api_format(payload))
 }
 
 pub(crate) fn resolve_core_error_background_report_kind(report_kind: &str) -> Option<String> {
@@ -523,6 +601,10 @@ pub(crate) async fn submit_local_core_error_or_sync_finalize(
     {
         response
     } else if let Some(response) =
+        maybe_build_invalid_provider_success_finalize_response(trace_id, decision, &payload)?
+    {
+        response
+    } else if let Some(response) =
         maybe_build_local_core_error_response(trace_id, decision, &payload)?
     {
         response
@@ -566,9 +648,10 @@ mod tests {
     use axum::body::to_bytes;
     use serde_json::json;
 
-    use super::maybe_build_local_core_error_response;
+    use super::{maybe_build_local_core_error_response, submit_local_core_error_or_sync_finalize};
     use crate::control::GatewayControlDecision;
     use crate::usage::GatewaySyncReportRequest;
+    use crate::AppState;
 
     fn test_decision() -> GatewayControlDecision {
         GatewayControlDecision::synthetic(
@@ -682,6 +765,61 @@ mod tests {
                     "status": "RESOURCE_EXHAUSTED"
                 }
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn local_core_sync_finalize_rejects_gemini_http_200_without_visible_output() {
+        let mut payload = core_finalize_payload(
+            "openai_chat_sync_finalize",
+            "openai:chat",
+            "gemini:generate_content",
+            200,
+            json!({
+                "candidates": [{
+                    "content": {"role": "model"},
+                    "finishReason": "MAX_TOKENS"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 8,
+                    "candidatesTokenCount": 1,
+                    "thoughtsTokenCount": 25,
+                    "totalTokenCount": 34
+                },
+                "modelVersion": "gemini-3-flash-preview",
+                "responseId": "resp-empty"
+            }),
+        );
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:chat",
+            "provider_api_format": "gemini:generate_content",
+            "needs_conversion": true,
+            "has_envelope": false
+        }));
+
+        let state = AppState::new().expect("state should build");
+        let response = submit_local_core_error_or_sync_finalize(
+            &state,
+            "trace-invalid-gemini-200",
+            &test_decision(),
+            payload,
+        )
+        .await
+        .expect("response should build");
+
+        assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should read"),
+        )
+        .expect("body should decode");
+        let message = body["error"]["message"]
+            .as_str()
+            .expect("error message should exist");
+        assert!(
+            message.contains("visible model output"),
+            "unexpected message: {message}"
         );
     }
 }

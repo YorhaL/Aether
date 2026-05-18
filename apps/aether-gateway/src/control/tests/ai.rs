@@ -220,6 +220,44 @@ fn classifies_gemini_generate_content_api_key_without_cli_marker() {
 }
 
 #[test]
+fn classifies_gemini_embed_content_as_embedding_route() {
+    let headers = headers(&[("x-goog-api-key", "gemini-key")]);
+    let uri: Uri = "/v1beta/models/gemini-embedding-2-preview:embedContent"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_family.as_deref(), Some("gemini"));
+    assert_eq!(decision.route_kind.as_deref(), Some("embedding"));
+    assert_eq!(decision.request_auth_channel.as_deref(), Some("api_key"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("gemini:embedding")
+    );
+    assert!(decision.is_execution_runtime_candidate());
+}
+
+#[test]
+fn classifies_gemini_batch_embed_contents_as_embedding_route() {
+    let headers = headers(&[("x-goog-api-key", "gemini-key")]);
+    let uri: Uri = "/v1beta/models/gemini-embedding-2-preview:batchEmbedContents"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_family.as_deref(), Some("gemini"));
+    assert_eq!(decision.route_kind.as_deref(), Some("embedding"));
+    assert_eq!(decision.request_auth_channel.as_deref(), Some("api_key"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("gemini:embedding")
+    );
+    assert!(decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn classifies_gemini_predict_long_running_as_video_route() {
     let headers = headers(&[]);
     let uri: Uri = "/v1beta/models/veo-3:predictLongRunning"

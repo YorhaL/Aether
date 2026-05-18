@@ -1,5 +1,6 @@
 use aether_ai_formats::formats::matrix::{
-    request_conversion_kind, request_conversion_requires_enable_flag, RequestConversionKind,
+    api_data_format_id, request_conversion_kind, request_conversion_requires_enable_flag,
+    RequestConversionKind,
 };
 use aether_ai_formats::normalize_api_format_alias;
 
@@ -39,7 +40,14 @@ pub fn request_conversion_enabled_for_transport(
     if client_api_format == provider_api_format {
         return true;
     }
-    if request_conversion_kind(client_api_format.as_str(), provider_api_format.as_str()).is_none() {
+    let conversion_kind =
+        request_conversion_kind(client_api_format.as_str(), provider_api_format.as_str());
+    if conversion_kind.is_none()
+        && !same_data_format_transport_pair(
+            client_api_format.as_str(),
+            provider_api_format.as_str(),
+        )
+    {
         return false;
     }
     if !request_conversion_requires_enable_flag(
@@ -62,7 +70,14 @@ pub fn request_pair_allowed_for_transport(
     if client_api_format == provider_api_format {
         return true;
     }
-    if request_conversion_kind(client_api_format.as_str(), provider_api_format.as_str()).is_none() {
+    let conversion_kind =
+        request_conversion_kind(client_api_format.as_str(), provider_api_format.as_str());
+    if conversion_kind.is_none()
+        && !same_data_format_transport_pair(
+            client_api_format.as_str(),
+            provider_api_format.as_str(),
+        )
+    {
         return false;
     }
     if is_kiro_claude_messages_transport(transport, &provider_api_format) {
@@ -77,6 +92,19 @@ pub fn request_pair_allowed_for_transport(
         transport,
         client_api_format.as_str(),
         provider_api_format.as_str(),
+    )
+}
+
+fn same_data_format_transport_pair(client_api_format: &str, provider_api_format: &str) -> bool {
+    if aether_ai_formats::api_format_alias_matches(client_api_format, provider_api_format) {
+        return false;
+    }
+    matches!(
+        (
+            api_data_format_id(client_api_format),
+            api_data_format_id(provider_api_format)
+        ),
+        (Some("embedding"), Some("embedding")) | (Some("rerank"), Some("rerank"))
     )
 }
 
@@ -117,15 +145,72 @@ pub fn request_conversion_transport_unsupported_reason(
     }
 }
 
+pub fn request_pair_transport_unsupported_reason(
+    transport: &GatewayProviderTransportSnapshot,
+    client_api_format: &str,
+    provider_api_format: &str,
+) -> Option<&'static str> {
+    let client_api_format = normalize_api_format_alias(client_api_format);
+    let provider_api_format = normalize_api_format_alias(provider_api_format);
+
+    if let Some(kind) =
+        request_conversion_kind(client_api_format.as_str(), provider_api_format.as_str())
+    {
+        return request_conversion_transport_unsupported_reason(transport, kind);
+    }
+
+    if !same_data_format_transport_pair(client_api_format.as_str(), provider_api_format.as_str()) {
+        return Some("transport_api_format_unsupported");
+    }
+
+    match provider_api_format.as_str() {
+        "gemini:embedding" => {
+            if is_vertex_transport_context(transport) {
+                local_vertex_gemini_transport_unsupported_reason_with_network(transport)
+            } else {
+                local_gemini_transport_unsupported_reason_with_network(
+                    transport,
+                    "gemini:embedding",
+                )
+            }
+        }
+        "openai:embedding" | "jina:embedding" | "doubao:embedding" | "openai:rerank"
+        | "jina:rerank" => local_standard_transport_unsupported_reason_with_network(
+            transport,
+            provider_api_format.as_str(),
+        ),
+        _ => Some("transport_api_format_unsupported"),
+    }
+}
+
 pub fn request_conversion_direct_auth(
     transport: &GatewayProviderTransportSnapshot,
     _kind: RequestConversionKind,
 ) -> Option<(String, String)> {
-    match normalize_api_format_alias(&transport.endpoint.api_format).as_str() {
-        "openai:chat" | "openai:responses" | "openai:responses:compact" => {
-            resolve_local_openai_bearer_auth(transport)
-        }
-        "gemini:generate_content" => {
+    request_direct_auth_for_provider_format(transport, transport.endpoint.api_format.as_str())
+}
+
+pub fn request_pair_direct_auth(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) -> Option<(String, String)> {
+    request_direct_auth_for_provider_format(transport, provider_api_format)
+}
+
+fn request_direct_auth_for_provider_format(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) -> Option<(String, String)> {
+    match normalize_api_format_alias(provider_api_format).as_str() {
+        "openai:chat"
+        | "openai:responses"
+        | "openai:responses:compact"
+        | "openai:embedding"
+        | "jina:embedding"
+        | "doubao:embedding"
+        | "openai:rerank"
+        | "jina:rerank" => resolve_local_openai_bearer_auth(transport),
+        "gemini:generate_content" | "gemini:embedding" => {
             if is_vertex_api_key_transport_context(transport) {
                 resolve_local_vertex_api_key_query_auth(transport)
                     .map(|auth| (VERTEX_API_KEY_QUERY_PARAM.to_string(), auth.value))
@@ -338,7 +423,7 @@ mod tests {
         candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
         request_conversion_direct_auth, request_conversion_enabled_for_transport,
         request_conversion_transport_supported, request_pair_allowed_for_transport,
-        CandidateTransportPolicyFacts,
+        request_pair_direct_auth, CandidateTransportPolicyFacts,
     };
     use aether_ai_formats::formats::matrix::RequestConversionKind;
     use serde_json::json;
@@ -504,6 +589,21 @@ mod tests {
         ));
         assert_eq!(
             request_conversion_direct_auth(&transport, RequestConversionKind::ToGeminiStandard),
+            Some(("key".to_string(), "secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn vertex_gemini_embedding_transport_supports_openai_embedding_conversion() {
+        let transport = transport_snapshot("vertex_ai", "gemini:embedding", "api_key", true, None);
+
+        assert!(request_pair_allowed_for_transport(
+            &transport,
+            "openai:embedding",
+            "gemini:embedding"
+        ));
+        assert_eq!(
+            request_pair_direct_auth(&transport, "gemini:embedding"),
             Some(("key".to_string(), "secret".to_string()))
         );
     }

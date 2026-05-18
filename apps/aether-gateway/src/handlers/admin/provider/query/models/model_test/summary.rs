@@ -9,11 +9,29 @@ pub(super) fn provider_query_test_attempt_payload(
     candidate: &ProviderQueryTestCandidate,
     execution: &ProviderQueryExecutionOutcome,
 ) -> Value {
+    let endpoint_route = provider_query_endpoint_route_payload(candidate, execution);
+    let endpoint_product = endpoint_route
+        .get("product")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let endpoint_variant = endpoint_route
+        .get("variant")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let endpoint_action = endpoint_route.get("action").cloned().unwrap_or(Value::Null);
+    let endpoint_batch_strategy = endpoint_route
+        .get("batch_strategy")
+        .cloned()
+        .unwrap_or(Value::Null);
     json!({
         "candidate_index": candidate_index,
         "retry_index": 0,
         "endpoint_api_format": candidate.endpoint.api_format,
         "endpoint_base_url": candidate.endpoint.base_url,
+        "endpoint_product": endpoint_product,
+        "endpoint_variant": endpoint_variant,
+        "endpoint_action": endpoint_action,
+        "endpoint_batch_strategy": endpoint_batch_strategy,
         "key_name": provider_query_key_display_name(&candidate.key),
         "key_id": candidate.key.id,
         "auth_type": candidate.key.auth_type,
@@ -28,6 +46,129 @@ pub(super) fn provider_query_test_attempt_payload(
         "request_body": execution.request_body,
         "response_headers": provider_query_redact_diagnostic_headers(&execution.response_headers),
         "response_body": execution.response_body,
+    })
+}
+
+fn provider_query_endpoint_route_payload(
+    candidate: &ProviderQueryTestCandidate,
+    execution: &ProviderQueryExecutionOutcome,
+) -> Value {
+    let api_format = aether_ai_formats::normalize_api_format_alias(&candidate.endpoint.api_format);
+    let request_url = execution.request_url.to_ascii_lowercase();
+    let base_url = candidate.endpoint.base_url.to_ascii_lowercase();
+    let is_vertex = request_url.contains("aiplatform.googleapis.com")
+        || base_url.contains("aiplatform.googleapis.com");
+    let is_gemini_api = request_url.contains("generativelanguage.googleapis.com")
+        || base_url.contains("generativelanguage.googleapis.com");
+    let is_openai_compat =
+        request_url.contains("/endpoints/openapi") || request_url.contains("/openai/");
+    let is_batch = execution
+        .request_body
+        .get("requests")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    let vertex_instance_count = execution
+        .request_body
+        .get("instances")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+
+    let (product, variant, action, batch_strategy) = match api_format.as_str() {
+        "gemini:embedding" if is_vertex => (
+            "Vertex AI",
+            "vertex_native",
+            "predict",
+            if vertex_instance_count > 1 {
+                "predict_instances"
+            } else {
+                "single_instance"
+            },
+        ),
+        "gemini:embedding" if is_gemini_api => (
+            "Gemini API",
+            "gemini_native",
+            if is_batch {
+                "batchEmbedContents"
+            } else {
+                "embedContent"
+            },
+            if is_batch {
+                "native_batch"
+            } else {
+                "single_native"
+            },
+        ),
+        "gemini:embedding" => (
+            "Gemini native",
+            "gemini_native",
+            if is_batch {
+                "batchEmbedContents"
+            } else {
+                "embedContent"
+            },
+            if is_batch {
+                "native_batch"
+            } else {
+                "single_native"
+            },
+        ),
+        "gemini:generate_content" if is_vertex => {
+            ("Vertex AI", "vertex_native", "generateContent", "")
+        }
+        "gemini:generate_content" if is_gemini_api => {
+            ("Gemini API", "gemini_native", "generateContent", "")
+        }
+        "gemini:generate_content" => ("Gemini native", "gemini_native", "generateContent", ""),
+        "openai:embedding" if is_vertex && is_openai_compat => (
+            "Vertex AI OpenAI-compatible",
+            "openai_compatible",
+            "embeddings",
+            "openai_batch",
+        ),
+        "openai:embedding" if is_gemini_api && is_openai_compat => (
+            "Gemini API OpenAI-compatible",
+            "openai_compatible",
+            "embeddings",
+            "openai_batch",
+        ),
+        "openai:embedding" => (
+            "OpenAI-compatible",
+            "openai_compatible",
+            "embeddings",
+            "openai_batch",
+        ),
+        "openai:chat" if is_vertex && is_openai_compat => (
+            "Vertex AI OpenAI-compatible",
+            "openai_compatible",
+            "chat/completions",
+            "",
+        ),
+        "openai:chat" if is_gemini_api && is_openai_compat => (
+            "Gemini API OpenAI-compatible",
+            "openai_compatible",
+            "chat/completions",
+            "",
+        ),
+        "openai:chat" => (
+            "OpenAI-compatible",
+            "openai_compatible",
+            "chat/completions",
+            "",
+        ),
+        _ => (
+            "Provider endpoint",
+            "provider_native",
+            "provider_request",
+            "",
+        ),
+    };
+
+    json!({
+        "product": product,
+        "variant": variant,
+        "action": action,
+        "batch_strategy": batch_strategy,
     })
 }
 

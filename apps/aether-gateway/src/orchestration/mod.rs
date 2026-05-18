@@ -92,7 +92,9 @@ pub(crate) fn build_local_error_flow_metadata(
 ) -> Value {
     let safe_to_expose = matches!(
         analysis.classification,
-        LocalFailoverClassification::StopStatusCode | LocalFailoverClassification::StopErrorPattern
+        LocalFailoverClassification::StopStatusCode
+            | LocalFailoverClassification::StopErrorPattern
+            | LocalFailoverClassification::StopExecutionError
     );
     let propagation = match analysis.decision {
         LocalFailoverDecision::RetryNextCandidate => "suppressed",

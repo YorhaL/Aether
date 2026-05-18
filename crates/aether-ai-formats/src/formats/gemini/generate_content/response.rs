@@ -66,6 +66,10 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
             extensions: Default::default(),
         });
     }
+    outputs.retain(gemini_response_output_has_visible_content);
+    if outputs.is_empty() {
+        return None;
+    }
     let content = outputs
         .first()
         .map(|output| output.content.clone())
@@ -106,6 +110,18 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
             .insert("raw_candidates".to_string(), candidates);
     }
     Some(canonical)
+}
+
+fn gemini_response_output_has_visible_content(output: &CanonicalResponseOutput) -> bool {
+    output.content.iter().any(|block| match block {
+        CanonicalContentBlock::Text { text, .. } => !text.trim().is_empty(),
+        CanonicalContentBlock::ToolUse { .. }
+        | CanonicalContentBlock::ToolResult { .. }
+        | CanonicalContentBlock::Image { .. }
+        | CanonicalContentBlock::File { .. }
+        | CanonicalContentBlock::Audio { .. } => true,
+        CanonicalContentBlock::Thinking { .. } | CanonicalContentBlock::Unknown { .. } => false,
+    })
 }
 
 pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value) -> Option<Value> {
@@ -352,4 +368,73 @@ fn canonical_usage_to_gemini_usage_metadata(usage: &CanonicalUsage) -> Value {
         );
     }
     Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CanonicalContentBlock;
+
+    #[test]
+    fn gemini_response_without_visible_parts_is_not_success() {
+        let body = json!({
+            "candidates": [{
+                "content": {"role": "model"},
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 8,
+                "candidatesTokenCount": 1,
+                "thoughtsTokenCount": 25,
+                "totalTokenCount": 34
+            },
+            "modelVersion": "gemini-3-flash-preview",
+            "responseId": "resp-empty"
+        });
+
+        assert!(from_raw(&body).is_none());
+    }
+
+    #[test]
+    fn gemini_response_with_only_thought_parts_is_not_success() {
+        let body = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": "hidden plan", "thought": true}]
+                },
+                "finishReason": "MAX_TOKENS"
+            }],
+            "modelVersion": "gemini-3-flash-preview",
+            "responseId": "resp-thought-only"
+        });
+
+        assert!(from_raw(&body).is_none());
+    }
+
+    #[test]
+    fn gemini_response_with_function_call_is_visible_output() {
+        let body = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "name": "lookup",
+                            "args": {"query": "weather"}
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "modelVersion": "gemini-3-flash-preview",
+            "responseId": "resp-tool"
+        });
+
+        let canonical = from_raw(&body).expect("function call should be visible output");
+        assert!(matches!(
+            canonical.content.first(),
+            Some(CanonicalContentBlock::ToolUse { name, .. }) if name == "lookup"
+        ));
+    }
 }

@@ -736,7 +736,7 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
     AdminApiFormatDefinition {
         value: "gemini:embedding",
         label: "Gemini Embedding",
-        default_path: "/v1/embeddings",
+        default_path: "/v1beta/models/{model}:{action}",
         aliases: &["gemini_embedding"],
     },
     AdminApiFormatDefinition {

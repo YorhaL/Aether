@@ -1,7 +1,8 @@
 use crate::contracts::{
     CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
     CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
-    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
+    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
+    GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
     OPENAI_RERANK_SYNC_PLAN_KIND,
 };
 
@@ -47,6 +48,13 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             api_format: "gemini:generate_content",
             decision_kind: GEMINI_CLI_SYNC_PLAN_KIND,
             report_kind: "gemini_cli_sync_success",
+            family: LocalSameFormatProviderFamily::Gemini,
+            require_streaming: false,
+        }),
+        GEMINI_EMBEDDING_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
+            api_format: "gemini:embedding",
+            decision_kind: GEMINI_EMBEDDING_SYNC_PLAN_KIND,
+            report_kind: GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND,
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: false,
         }),
@@ -127,6 +135,15 @@ mod tests {
         let spec = resolve_sync_spec("openai_embedding_sync").expect("spec");
         assert_eq!(spec.api_format, "openai:embedding");
         assert_eq!(spec.report_kind, "openai_embedding_sync_success");
+        assert!(!spec.require_streaming);
+    }
+
+    #[test]
+    fn resolves_gemini_embedding_sync_same_format_spec() {
+        let spec = resolve_sync_spec("gemini_embedding_sync").expect("spec");
+        assert_eq!(spec.api_format, "gemini:embedding");
+        assert_eq!(spec.report_kind, "gemini_embedding_sync_success");
+        assert_eq!(spec.family, super::LocalSameFormatProviderFamily::Gemini);
         assert!(!spec.require_streaming);
     }
 
