@@ -15,12 +15,29 @@ export type ModelTestImageSource = {
 export type ModelTestKeySource = {
   api_formats?: string[] | null
   is_active?: boolean | null
+  auth_type?: string | null
+  credential_kind?: string | null
+  oauth_managed?: boolean | null
 }
 
 const MODEL_TEST_UNSUPPORTED_API_FORMATS = new Set([
   'openai:video',
   'gemini:video',
   'gemini:files',
+])
+
+const MODEL_TEST_OAUTH_INHERITS_PROVIDER_FORMATS = new Set([
+  'claude_code',
+  'codex',
+  'chatgpt_web',
+  'gemini_cli',
+  'vertex_ai',
+  'antigravity',
+  'kiro',
+])
+
+const MODEL_TEST_BEARER_INHERITS_PROVIDER_FORMATS = new Set([
+  'chatgpt_web',
 ])
 
 const MODEL_TEST_DIAGNOSTIC_LABELS: Record<string, string> = {
@@ -41,11 +58,14 @@ export function isModelTestableApiFormat(apiFormat: string | null | undefined): 
 export function modelTestKeySupportsEndpoint(
   key: ModelTestKeySource,
   endpoint: ModelTestEndpointSource,
+  providerType?: string | null,
 ): boolean {
   if (key.is_active === false) return false
 
   const endpointFormat = normalizeApiFormatAlias(endpoint.api_format)
   if (!isModelTestableApiFormat(endpointFormat)) return false
+
+  if (modelTestKeyInheritsProviderFormats(key, providerType)) return true
 
   const keyFormats = normalizeModelTestStringList(key.api_formats)
   if (keyFormats.length === 0) return true
@@ -56,10 +76,32 @@ export function modelTestKeySupportsEndpoint(
 export function isModelTestableEndpoint(
   endpoint: ModelTestEndpointSource,
   keys: ModelTestKeySource[],
+  providerType?: string | null,
 ): boolean {
   return endpoint.is_active !== false
     && isModelTestableApiFormat(endpoint.api_format)
-    && keys.some(key => modelTestKeySupportsEndpoint(key, endpoint))
+    && keys.some(key => modelTestKeySupportsEndpoint(key, endpoint, providerType))
+}
+
+function modelTestKeyInheritsProviderFormats(
+  key: ModelTestKeySource,
+  providerType: string | null | undefined,
+): boolean {
+  const normalizedProviderType = providerType?.trim().toLowerCase()
+  if (!normalizedProviderType) return false
+
+  const authType = key.auth_type?.trim().toLowerCase()
+  const credentialKind = key.credential_kind?.trim().toLowerCase()
+  const oauthManaged = key.oauth_managed === true
+    || credentialKind === 'oauth_session'
+    || authType === 'oauth'
+
+  if (oauthManaged && MODEL_TEST_OAUTH_INHERITS_PROVIDER_FORMATS.has(normalizedProviderType)) {
+    return true
+  }
+
+  return authType === 'bearer'
+    && MODEL_TEST_BEARER_INHERITS_PROVIDER_FORMATS.has(normalizedProviderType)
 }
 
 export function selectPreferredModelTestEndpoint<T extends ModelTestEndpointSource>(
