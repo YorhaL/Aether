@@ -73,43 +73,6 @@ describe('request failure notice', () => {
     })
   })
 
-  it('includes scheduling failure provider and endpoint hints in metadata', () => {
-    const notice = resolveRequestFailureNotice(buildRequestDetail({
-      failure_summary: {
-        status_code: 503,
-        message: '没有可用提供商支持模型 gemma-4-31b-it 的同步请求',
-      },
-      scheduling_failure: {
-        source: 'local_execution_runtime_miss',
-        reason: 'all_candidates_skipped',
-        reason_label: '所有候选均被跳过',
-        title: '本地调度失败：所有候选均被跳过',
-        message: '没有可用提供商支持模型 gemma-4-31b-it 的同步请求',
-        status_code: 503,
-        no_upstream_attempt: true,
-        requested_model: 'gemma-4-31b-it',
-        provider_hint: {
-          id: 'provider-google-api',
-          name: 'Google API',
-        },
-        endpoint_hint: {
-          id: 'endpoint-gemini',
-          api_format: 'gemini:generate_content',
-        },
-      } as NonNullable<RequestDetail['scheduling_failure']>,
-    }))
-
-    expect(notice?.meta).toEqual([
-      'Google API',
-      'gemini:generate_content',
-      'gemma-4-31b-it',
-      '所有候选均被跳过',
-      'all_candidates_skipped',
-      'HTTP 503',
-      '未进入上游执行',
-    ])
-  })
-
   it('falls back to the failure summary for upstream failures', () => {
     const notice = resolveRequestFailureNotice(buildRequestDetail({
       failure_summary: {

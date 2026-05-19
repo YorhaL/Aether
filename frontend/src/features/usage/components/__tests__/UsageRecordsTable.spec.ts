@@ -255,31 +255,6 @@ describe('UsageRecordsTable', () => {
     expect(root.textContent).not.toContain('等待中')
   })
 
-  it('uses scheduling failure provider hints instead of rendering unknown provider', () => {
-    const root = mountUsageRecordsTable([buildRecord({
-      provider: 'unknown',
-      status: 'failed',
-      status_code: 503,
-      scheduling_failure: {
-        source: 'local_execution_runtime_miss',
-        reason: 'all_candidates_skipped',
-        reason_label: '所有候选均被跳过',
-        title: '本地调度失败：所有候选均被跳过',
-        message: '没有可用提供商支持模型 gemma-4-31b-it 的同步请求',
-        status_code: 503,
-        no_upstream_attempt: true,
-        provider_hint: {
-          id: 'provider-google-api',
-          name: 'Google API',
-        },
-      },
-    } as Partial<UsageRecord>)])
-
-    expect(root.textContent).toContain('Google API')
-    expect(root.textContent).toContain('所有候选均被跳过')
-    expect(root.textContent).not.toContain('unknown')
-  })
-
   it('renders output TPS in the non-admin usage table', () => {
     const root = mountUsageRecordsTable([buildRecord()], { isAdmin: false })
 

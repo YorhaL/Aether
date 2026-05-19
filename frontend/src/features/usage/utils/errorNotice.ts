@@ -25,11 +25,6 @@ function uniqueMeta(values: Array<string | null | undefined>): string[] {
   return Array.from(new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value))))
 }
 
-function isUnknownProviderHint(value: string | null): boolean {
-  const normalized = value?.trim().toLowerCase()
-  return !normalized || ['unknown', 'unknow', 'pending'].includes(normalized)
-}
-
 function schedulingFailureMessage(
   failure: RequestSchedulingFailure,
   fallbackDomain: RequestErrorDomain | null,
@@ -40,21 +35,6 @@ function schedulingFailureMessage(
     ?? fallbackErrorMessage
     ?? nonEmptyString(failure.reason_label)
     ?? nonEmptyString(failure.reason)
-}
-
-function schedulingFailureProviderHint(failure: RequestSchedulingFailure): string | null {
-  const name = nonEmptyString(failure.provider_hint?.name)
-  if (name && !isUnknownProviderHint(name)) return name
-
-  const id = nonEmptyString(failure.provider_hint?.id)
-  if (id && !isUnknownProviderHint(id)) return id
-
-  return null
-}
-
-function schedulingFailureEndpointHint(failure: RequestSchedulingFailure): string | null {
-  return nonEmptyString(failure.endpoint_hint?.api_format)
-    ?? nonEmptyString(failure.endpoint_hint?.id)
 }
 
 export function resolveRequestFailureNotice(detail: RequestDetail | null | undefined): RequestFailureNotice | null {
@@ -75,9 +55,6 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
         message,
         isSchedulingFailure: true,
         meta: uniqueMeta([
-          schedulingFailureProviderHint(schedulingFailure),
-          schedulingFailureEndpointHint(schedulingFailure),
-          nonEmptyString(schedulingFailure.requested_model),
           nonEmptyString(schedulingFailure.reason_summary),
           nonEmptyString(schedulingFailure.reason_label),
           nonEmptyString(schedulingFailure.reason),

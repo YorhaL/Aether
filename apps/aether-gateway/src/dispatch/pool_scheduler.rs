@@ -428,20 +428,6 @@ impl<'a> PoolKeyCursor<'a> {
         if record_runtime_miss_diagnostic {
             self.runtime_miss_trace_id = Some(trace_id.to_string());
             self.record_runtime_miss_diagnostic = true;
-            let provider_id = self.group.candidate.provider_id.clone();
-            let provider_name = self.group.transport.provider.name.clone();
-            let endpoint_id = self.group.candidate.endpoint_id.clone();
-            let endpoint_api_format = self.group.provider_api_format.clone();
-            self.state
-                .app()
-                .mutate_local_execution_runtime_miss_diagnostic(trace_id, move |diagnostic| {
-                    diagnostic.provider_hint_id.get_or_insert(provider_id);
-                    diagnostic.provider_hint_name.get_or_insert(provider_name);
-                    diagnostic.endpoint_hint_id.get_or_insert(endpoint_id);
-                    diagnostic
-                        .endpoint_hint_api_format
-                        .get_or_insert(endpoint_api_format);
-                });
         }
         self
     }
@@ -2572,14 +2558,6 @@ mod tests {
         assert_eq!(diagnostic.reason, "all_candidates_skipped");
         assert_eq!(diagnostic.skipped_candidate_count, Some(1));
         assert_eq!(diagnostic.skip_reasons.get("pool_cooldown"), Some(&1));
-        assert_eq!(
-            diagnostic.provider_hint_id.as_deref(),
-            Some("provider-pool")
-        );
-        assert_eq!(
-            diagnostic.provider_hint_name.as_deref(),
-            Some("provider-pool")
-        );
     }
 
     #[tokio::test]

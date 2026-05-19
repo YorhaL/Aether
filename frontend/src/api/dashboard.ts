@@ -151,19 +151,6 @@ export interface RequestSchedulingFailure {
   reason_summary?: string | null
   status_code?: number | null
   no_upstream_attempt?: boolean | null
-  requested_model?: string | null
-  candidate_count?: number | null
-  persisted_candidate_count?: number | null
-  skipped_candidate_count?: number | null
-  skip_reasons?: Record<string, number> | null
-  provider_hint?: {
-    id?: string | null
-    name?: string | null
-  } | null
-  endpoint_hint?: {
-    id?: string | null
-    api_format?: string | null
-  } | null
 }
 
 export interface RequestDetail {

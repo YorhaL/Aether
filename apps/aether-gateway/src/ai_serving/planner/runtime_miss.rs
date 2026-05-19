@@ -73,10 +73,6 @@ impl AiRuntimeMissDiagnosticPort for GatewayRuntimeMissDiagnosticPort<'_> {
             candidate_count: None,
             skipped_candidate_count: None,
             skip_reasons: std::collections::BTreeMap::new(),
-            provider_hint_id: None,
-            provider_hint_name: None,
-            endpoint_hint_id: None,
-            endpoint_hint_api_format: None,
         }
     }
 

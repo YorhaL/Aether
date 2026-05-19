@@ -350,40 +350,6 @@ describe('HorizontalRequestTimeline', () => {
     expect(nodeDot?.classList.contains('status-success')).toBe(false)
   })
 
-  it('shows scheduling failure context instead of an empty trace state when no candidates exist', async () => {
-    const trace = buildTrace([])
-    trace.final_status = 'failed'
-
-    const root = mountTimeline(trace, {
-      requestStatus: 'failed',
-      overrideStatusCode: 503,
-      schedulingFailure: {
-        source: 'local_execution_runtime_miss',
-        reason: 'all_candidates_skipped',
-        reason_label: '所有候选均被跳过',
-        title: '本地调度失败：所有候选均被跳过',
-        message: '没有可用提供商支持模型 gemma-4-31b-it 的同步请求',
-        status_code: 503,
-        no_upstream_attempt: true,
-        provider_hint: {
-          id: 'provider-google-api',
-          name: 'Google API',
-        },
-        endpoint_hint: {
-          id: 'endpoint-gemini',
-          api_format: 'gemini:generate_content',
-        },
-      },
-    })
-    await nextTick()
-
-    expect(root.textContent).toContain('本地调度失败：所有候选均被跳过')
-    expect(root.textContent).toContain('没有可用提供商支持模型 gemma-4-31b-it 的同步请求')
-    expect(root.textContent).toContain('Google API')
-    expect(root.textContent).toContain('gemini:generate_content')
-    expect(root.textContent).not.toContain('暂无追踪数据')
-  })
-
   it('keeps emitted trace state active while the request lifecycle is still streaming', async () => {
     const onTraceState = vi.fn()
     const trace = buildTrace([

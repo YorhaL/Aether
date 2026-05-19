@@ -547,38 +547,6 @@
       </Card>
     </div>
 
-    <!-- Local Scheduling Failure State -->
-    <Card
-      v-else-if="schedulingFailureNotice"
-      class="border-red-200 dark:border-red-800"
-    >
-      <div class="p-4 space-y-2">
-        <div class="flex flex-wrap items-center gap-2">
-          <Badge variant="destructive">
-            调度失败
-          </Badge>
-          <h4 class="text-sm font-semibold text-red-950 dark:text-red-100">
-            {{ schedulingFailureNotice.title }}
-          </h4>
-        </div>
-        <p class="text-sm leading-6 text-red-900 dark:text-red-100">
-          {{ schedulingFailureNotice.message }}
-        </p>
-        <div
-          v-if="schedulingFailureNotice.meta.length > 0"
-          class="flex flex-wrap gap-1.5"
-        >
-          <span
-            v-for="item in schedulingFailureNotice.meta"
-            :key="item"
-            class="rounded-full border border-red-200 bg-white/70 px-2 py-0.5 text-[11px] font-mono text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
-          >
-            {{ item }}
-          </span>
-        </div>
-      </div>
-    </Card>
-
     <!-- Empty State -->
     <Card
       v-else
@@ -607,7 +575,6 @@ import { parseApiError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
-import type { RequestSchedulingFailure } from '@/api/dashboard'
 import {
   buildPoolGroupVisibleAttempts,
   buildPoolParticipatedCandidates,
@@ -670,8 +637,6 @@ const props = defineProps<{
   usageData?: UsageData | null
   /** 请求元数据（用于号池调度组装） */
   requestMetadata?: Record<string, unknown> | null
-  /** 本地调度失败摘要；用于没有 trace candidate 时替代空态 */
-  schedulingFailure?: RequestSchedulingFailure | null
   /** 已获取的追踪数据；传入时不再内部拉取 */
   traceData?: RequestTrace | null
 }>()
@@ -845,62 +810,6 @@ const computedFinalStatus = computed(() => {
     requestStatus: props.requestStatus ?? usageData.value?.status,
     traceFinalStatus: trace.value?.final_status,
   })
-})
-
-const nonEmptyNoticeString = (value: string | null | undefined): string | null => {
-  const trimmed = value?.trim()
-  return trimmed ? trimmed : null
-}
-
-const uniqueNoticeMeta = (values: Array<string | null | undefined>): string[] => {
-  return Array.from(new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value))))
-}
-
-const isUnknownProviderHint = (value: string | null): boolean => {
-  const normalized = value?.trim().toLowerCase()
-  return !normalized || ['unknown', 'unknow', 'pending'].includes(normalized)
-}
-
-const schedulingFailureProviderHint = (failure: RequestSchedulingFailure): string | null => {
-  const name = nonEmptyNoticeString(failure.provider_hint?.name)
-  if (name && !isUnknownProviderHint(name)) return name
-
-  const id = nonEmptyNoticeString(failure.provider_hint?.id)
-  if (id && !isUnknownProviderHint(id)) return id
-
-  return null
-}
-
-const schedulingFailureEndpointHint = (failure: RequestSchedulingFailure): string | null => {
-  return nonEmptyNoticeString(failure.endpoint_hint?.api_format)
-    ?? nonEmptyNoticeString(failure.endpoint_hint?.id)
-}
-
-const schedulingFailureNotice = computed(() => {
-  const failure = props.schedulingFailure
-  if (!failure) return null
-
-  const title = nonEmptyNoticeString(failure.title) ?? '本地调度失败'
-  const message = nonEmptyNoticeString(failure.message)
-    ?? nonEmptyNoticeString(failure.reason_summary)
-    ?? nonEmptyNoticeString(failure.reason_label)
-    ?? nonEmptyNoticeString(failure.reason)
-    ?? '本地调度阶段没有选出可用上游提供商'
-
-  return {
-    title,
-    message,
-    meta: uniqueNoticeMeta([
-      schedulingFailureProviderHint(failure),
-      schedulingFailureEndpointHint(failure),
-      nonEmptyNoticeString(failure.requested_model),
-      nonEmptyNoticeString(failure.reason_summary),
-      nonEmptyNoticeString(failure.reason_label),
-      nonEmptyNoticeString(failure.reason),
-      typeof failure.status_code === 'number' ? `HTTP ${failure.status_code}` : null,
-      failure.no_upstream_attempt ? '未进入上游执行' : null,
-    ]),
-  }
 })
 
 const compareBySchedulingOrder = (a: CandidateRecord, b: CandidateRecord): number => {

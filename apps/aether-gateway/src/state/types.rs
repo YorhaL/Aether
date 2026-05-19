@@ -30,10 +30,6 @@ pub(crate) struct LocalExecutionRuntimeMissDiagnostic {
     pub(crate) candidate_count: Option<usize>,
     pub(crate) skipped_candidate_count: Option<usize>,
     pub(crate) skip_reasons: std::collections::BTreeMap<String, usize>,
-    pub(crate) provider_hint_id: Option<String>,
-    pub(crate) provider_hint_name: Option<String>,
-    pub(crate) endpoint_hint_id: Option<String>,
-    pub(crate) endpoint_hint_api_format: Option<String>,
 }
 
 impl LocalExecutionRuntimeMissDiagnostic {

@@ -492,60 +492,6 @@ fn admin_usage_extract_local_runtime_miss_reason_summary(message: &str) -> Optio
     (!summary.is_empty()).then(|| summary.to_string())
 }
 
-fn admin_usage_runtime_miss_metadata(
-    item: &StoredRequestUsageAudit,
-) -> Option<&serde_json::Map<String, Value>> {
-    item.request_metadata
-        .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|metadata| metadata.get("runtime_miss"))
-        .and_then(Value::as_object)
-}
-
-fn admin_usage_json_value_has_content(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::String(value) => !value.trim().is_empty(),
-        Value::Array(value) => !value.is_empty(),
-        Value::Object(value) => !value.is_empty(),
-        Value::Bool(_) | Value::Number(_) => true,
-    }
-}
-
-fn maybe_insert_runtime_miss_field(
-    object: &mut serde_json::Map<String, Value>,
-    runtime_miss: &serde_json::Map<String, Value>,
-    key: &str,
-) {
-    let Some(value) = runtime_miss
-        .get(key)
-        .filter(|value| admin_usage_json_value_has_content(value))
-    else {
-        return;
-    };
-    object.insert(key.to_string(), value.clone());
-}
-
-fn admin_usage_insert_runtime_miss_fields(
-    object: &mut serde_json::Map<String, Value>,
-    item: &StoredRequestUsageAudit,
-) {
-    let Some(runtime_miss) = admin_usage_runtime_miss_metadata(item) else {
-        return;
-    };
-    for key in [
-        "candidate_count",
-        "persisted_candidate_count",
-        "skipped_candidate_count",
-        "skip_reasons",
-        "requested_model",
-        "provider_hint",
-        "endpoint_hint",
-    ] {
-        maybe_insert_runtime_miss_field(object, runtime_miss, key);
-    }
-}
-
 fn admin_usage_scheduling_failure_json(
     item: &StoredRequestUsageAudit,
     client_error: &Value,
@@ -568,38 +514,20 @@ fn admin_usage_scheduling_failure_json(
     let reason_summary =
         raw_message.and_then(admin_usage_extract_local_runtime_miss_reason_summary);
 
-    let mut object = serde_json::Map::new();
-    object.insert(
-        "source".to_string(),
-        Value::String("local_execution_runtime_miss".to_string()),
-    );
-    object.insert("reason".to_string(), Value::String(reason.to_string()));
-    object.insert(
-        "reason_label".to_string(),
-        Value::String(admin_usage_local_runtime_miss_reason_label(reason).to_string()),
-    );
-    object.insert(
-        "title".to_string(),
-        Value::String(format!(
-            "本地调度失败：{}",
-            admin_usage_local_runtime_miss_reason_label(reason)
-        )),
-    );
-    object.insert("message".to_string(), json!(message));
-    object.insert("reason_summary".to_string(), json!(reason_summary));
-    object.insert("status_code".to_string(), json!(item.status_code));
-    object.insert(
-        "no_upstream_attempt".to_string(),
-        json!(
-            item.candidate_id.is_none()
-                && item.provider_api_key_id.is_none()
-                && item.provider_request_headers.is_none()
-                && item.provider_request_body.is_none()
-                && item.provider_request_body_ref.is_none()
-        ),
-    );
-    admin_usage_insert_runtime_miss_fields(&mut object, item);
-    Value::Object(object)
+    json!({
+        "source": "local_execution_runtime_miss",
+        "reason": reason,
+        "reason_label": admin_usage_local_runtime_miss_reason_label(reason),
+        "title": format!("本地调度失败：{}", admin_usage_local_runtime_miss_reason_label(reason)),
+        "message": message,
+        "reason_summary": reason_summary,
+        "status_code": item.status_code,
+        "no_upstream_attempt": item.candidate_id.is_none()
+            && item.provider_api_key_id.is_none()
+            && item.provider_request_headers.is_none()
+            && item.provider_request_body.is_none()
+            && item.provider_request_body_ref.is_none(),
+    })
 }
 
 fn admin_usage_extract_local_execution_request_mode(message: &str) -> Option<&str> {
@@ -1234,7 +1162,6 @@ fn admin_usage_active_request_json(
         "request_path": admin_usage_metadata_string(item, "request_path"),
         "request_path_and_query": admin_usage_metadata_string(item, "request_path_and_query"),
         "has_fallback": admin_usage_has_fallback(item),
-        "scheduling_failure": admin_usage_scheduling_failure_json(item, &Value::Null),
     });
     if let Some(api_format) = item.api_format.as_ref() {
         value["api_format"] = json!(api_format);
@@ -1324,7 +1251,6 @@ pub fn admin_usage_record_json(
         "api_key_name": api_key_name,
         "provider_key_name": provider_key_name,
         "model_version": Value::Null,
-        "scheduling_failure": admin_usage_scheduling_failure_json(item, &Value::Null),
     });
     let object = payload
         .as_object_mut()
@@ -3291,122 +3217,6 @@ mod tests {
         assert_eq!(
             payload["scheduling_failure"]["message"],
             "没有可用提供商支持模型 gpt-5.4 的流式请求"
-        );
-        assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], true);
-    }
-
-    #[test]
-    fn detail_payload_exposes_runtime_miss_context_inside_scheduling_failure() {
-        let message = "找到 1 个支持模型 gemma-4-31b-it 的候选提供商，但本次同步请求全部不可用：provider_quota_blocked 1 次（原因代码: all_candidates_skipped）";
-        let item = StoredRequestUsageAudit {
-            provider_name: "unknown".to_string(),
-            provider_id: None,
-            provider_endpoint_id: None,
-            provider_api_key_id: None,
-            provider_request_headers: None,
-            provider_request_body: None,
-            provider_request_body_ref: None,
-            candidate_id: None,
-            execution_path: Some("local_execution_runtime_miss".to_string()),
-            local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
-            request_metadata: Some(json!({
-                "runtime_miss": {
-                    "candidate_count": 1,
-                    "persisted_candidate_count": 0,
-                    "skipped_candidate_count": 1,
-                    "skip_reasons": {
-                        "provider_quota_blocked": 1
-                    },
-                    "requested_model": "gemma-4-31b-it",
-                    "provider_hint": {
-                        "id": "provider-google-api",
-                        "name": "Google API"
-                    },
-                    "endpoint_hint": {
-                        "id": "endpoint-gemini",
-                        "api_format": "gemini:generate_content"
-                    }
-                }
-            })),
-            ..sample_usage("failed", Some(503), Some(message))
-        };
-
-        let payload = build_admin_usage_detail_payload(
-            &item,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            false,
-            false,
-            None,
-            false,
-            Some(json!({"model": "gemma-4-31b-it"})),
-            &BTreeMap::new(),
-        );
-
-        assert_eq!(
-            payload["scheduling_failure"]["provider_hint"]["name"],
-            "Google API"
-        );
-        assert_eq!(
-            payload["scheduling_failure"]["endpoint_hint"]["api_format"],
-            "gemini:generate_content"
-        );
-        assert_eq!(
-            payload["scheduling_failure"]["requested_model"],
-            "gemma-4-31b-it"
-        );
-        assert_eq!(payload["scheduling_failure"]["candidate_count"], 1);
-        assert_eq!(
-            payload["scheduling_failure"]["persisted_candidate_count"],
-            0
-        );
-        assert_eq!(payload["scheduling_failure"]["skipped_candidate_count"], 1);
-        assert_eq!(
-            payload["scheduling_failure"]["skip_reasons"]["provider_quota_blocked"],
-            1
-        );
-    }
-
-    #[test]
-    fn record_json_exposes_scheduling_failure_for_local_runtime_miss_records() {
-        let message = "没有可用提供商支持模型 gemma-4-31b-it 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）";
-        let item = StoredRequestUsageAudit {
-            provider_name: "unknown".to_string(),
-            provider_id: None,
-            provider_endpoint_id: None,
-            provider_api_key_id: None,
-            provider_request_headers: None,
-            provider_request_body: None,
-            provider_request_body_ref: None,
-            candidate_id: None,
-            execution_path: Some("local_execution_runtime_miss".to_string()),
-            local_execution_runtime_miss_reason: Some("candidate_list_empty".to_string()),
-            request_metadata: Some(json!({
-                "runtime_miss": {
-                    "candidate_count": 0,
-                    "persisted_candidate_count": 0,
-                    "requested_model": "gemma-4-31b-it"
-                }
-            })),
-            ..sample_usage("failed", Some(503), Some(message))
-        };
-
-        let payload = admin_usage_record_json(
-            &item,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            false,
-            false,
-            None,
-        );
-
-        assert_eq!(
-            payload["scheduling_failure"]["title"],
-            "本地调度失败：没有可调度候选"
-        );
-        assert_eq!(
-            payload["scheduling_failure"]["requested_model"],
-            "gemma-4-31b-it"
         );
         assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], true);
     }

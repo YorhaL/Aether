@@ -584,18 +584,15 @@
           >
             <div class="flex min-w-0 items-center gap-1">
               <div class="flex min-w-0 flex-col text-xs gap-0.5">
+                <span class="truncate">{{ record.provider }}</span>
                 <span
-                  class="truncate"
-                  :title="getRecordProviderTitle(record)"
-                >{{ getRecordProviderDisplay(record) }}</span>
-                <span
-                  v-if="getRecordProviderSecondaryText(record)"
+                  v-if="record.provider_key_name"
                   class="text-muted-foreground truncate"
-                  :title="getRecordProviderSecondaryTitle(record)"
+                  :title="record.provider_key_name"
                 >
-                  {{ getRecordProviderSecondaryText(record) }}
+                  {{ record.provider_key_name }}
                   <span
-                    v-if="record.provider_key_name && record.rate_multiplier && record.rate_multiplier !== 1.0"
+                    v-if="record.rate_multiplier && record.rate_multiplier !== 1.0"
                     class="text-foreground/60"
                   >({{ record.rate_multiplier }}x)</span>
                 </span>
@@ -1175,57 +1172,6 @@ const emitSearchDebounced = useDebounceFn((value: string) => {
 
 function getDisplayStatus(record: UsageRecord) {
   return resolveDisplayRequestStatus(record)
-}
-
-function nonEmptyDisplayString(value: string | null | undefined): string | null {
-  const trimmed = value?.trim()
-  return trimmed ? trimmed : null
-}
-
-function isUnknownProvider(value: string | null | undefined): boolean {
-  const normalized = value?.trim().toLowerCase()
-  return !normalized || ['unknown', 'unknow', 'pending'].includes(normalized)
-}
-
-function getRecordSchedulingProviderHint(record: UsageRecord): string | null {
-  const name = nonEmptyDisplayString(record.scheduling_failure?.provider_hint?.name)
-  if (name && !isUnknownProvider(name)) return name
-
-  const id = nonEmptyDisplayString(record.scheduling_failure?.provider_hint?.id)
-  if (id && !isUnknownProvider(id)) return id
-
-  return null
-}
-
-function getRecordProviderDisplay(record: UsageRecord): string {
-  const provider = nonEmptyDisplayString(record.provider)
-  if (provider && !isUnknownProvider(provider)) return provider
-
-  const providerHint = getRecordSchedulingProviderHint(record)
-  if (providerHint) return providerHint
-
-  if (record.scheduling_failure) return '未选定提供商'
-  return provider ?? 'unknown'
-}
-
-function getRecordProviderTitle(record: UsageRecord): string {
-  const schedulingMessage = nonEmptyDisplayString(record.scheduling_failure?.message)
-  const providerDisplay = getRecordProviderDisplay(record)
-  return schedulingMessage ? `${providerDisplay}\n${schedulingMessage}` : providerDisplay
-}
-
-function getRecordProviderSecondaryText(record: UsageRecord): string | null {
-  return nonEmptyDisplayString(record.provider_key_name)
-    ?? nonEmptyDisplayString(record.scheduling_failure?.reason_label)
-    ?? nonEmptyDisplayString(record.scheduling_failure?.reason_summary)
-    ?? nonEmptyDisplayString(record.scheduling_failure?.reason)
-}
-
-function getRecordProviderSecondaryTitle(record: UsageRecord): string | undefined {
-  return nonEmptyDisplayString(record.provider_key_name)
-    ?? nonEmptyDisplayString(record.scheduling_failure?.message)
-    ?? getRecordProviderSecondaryText(record)
-    ?? undefined
 }
 
 function getStreamModeLabel(record: UsageRecord): string {

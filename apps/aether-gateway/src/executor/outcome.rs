@@ -274,7 +274,6 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
         diagnostic,
         None,
         None,
-        0,
     );
     data.request_metadata = Some(Value::Object(request_metadata));
 
@@ -413,7 +412,6 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
         diagnostic,
         decision.and_then(|value| value.route_family.as_deref()),
         decision.and_then(|value| value.route_kind.as_deref()),
-        context.persisted_candidate_count(),
     );
     data.request_metadata =
         (!request_metadata.is_empty()).then_some(Value::Object(request_metadata));
@@ -985,7 +983,6 @@ fn apply_runtime_miss_usage_routing(
     diagnostic: Option<&LocalExecutionRuntimeMissDiagnostic>,
     route_family_fallback: Option<&str>,
     route_kind_fallback: Option<&str>,
-    persisted_candidate_count: usize,
 ) {
     data.candidate_id = data
         .candidate_id
@@ -1024,68 +1021,7 @@ fn apply_runtime_miss_usage_routing(
         .planner_kind
         .clone()
         .or_else(|| trimmed_non_empty(diagnostic.and_then(|value| value.plan_kind.as_deref())));
-    if let Some(diagnostic) = diagnostic {
-        insert_runtime_miss_diagnostic_metadata(
-            request_metadata,
-            diagnostic,
-            persisted_candidate_count,
-        );
-    }
-}
-
-fn insert_runtime_miss_diagnostic_metadata(
-    request_metadata: &mut Map<String, Value>,
-    diagnostic: &LocalExecutionRuntimeMissDiagnostic,
-    persisted_candidate_count: usize,
-) {
-    let mut runtime_miss = Map::new();
-    if let Some(count) = diagnostic.candidate_count {
-        runtime_miss.insert("candidate_count".to_string(), json!(count));
-    }
-    runtime_miss.insert(
-        "persisted_candidate_count".to_string(),
-        json!(persisted_candidate_count),
-    );
-    if let Some(count) = diagnostic.skipped_candidate_count {
-        runtime_miss.insert("skipped_candidate_count".to_string(), json!(count));
-    }
-    if !diagnostic.skip_reasons.is_empty() {
-        runtime_miss.insert("skip_reasons".to_string(), json!(diagnostic.skip_reasons));
-    }
-    if let Some(requested_model) = trimmed_non_empty(diagnostic.requested_model.as_deref()) {
-        runtime_miss.insert(
-            "requested_model".to_string(),
-            Value::String(requested_model),
-        );
-    }
-
-    let mut provider_hint = Map::new();
-    if let Some(provider_id) = trimmed_provider_hint(diagnostic.provider_hint_id.as_deref()) {
-        provider_hint.insert("id".to_string(), Value::String(provider_id));
-    }
-    if let Some(provider_name) = trimmed_provider_hint(diagnostic.provider_hint_name.as_deref()) {
-        provider_hint.insert("name".to_string(), Value::String(provider_name));
-    }
-    if !provider_hint.is_empty() {
-        runtime_miss.insert("provider_hint".to_string(), Value::Object(provider_hint));
-    }
-
-    let mut endpoint_hint = Map::new();
-    if let Some(endpoint_id) = trimmed_non_empty(diagnostic.endpoint_hint_id.as_deref()) {
-        endpoint_hint.insert("id".to_string(), Value::String(endpoint_id));
-    }
-    if let Some(endpoint_api_format) =
-        trimmed_non_empty(diagnostic.endpoint_hint_api_format.as_deref())
-    {
-        endpoint_hint.insert("api_format".to_string(), Value::String(endpoint_api_format));
-    }
-    if !endpoint_hint.is_empty() {
-        runtime_miss.insert("endpoint_hint".to_string(), Value::Object(endpoint_hint));
-    }
-
-    if !runtime_miss.is_empty() {
-        request_metadata.insert("runtime_miss".to_string(), Value::Object(runtime_miss));
-    }
+    let _ = request_metadata;
 }
 
 fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
@@ -1093,15 +1029,6 @@ fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn trimmed_provider_hint(value: Option<&str>) -> Option<String> {
-    trimmed_non_empty(value).filter(|value| {
-        !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "unknown" | "unknow" | "pending"
-        )
-    })
 }
 
 #[cfg(test)]
@@ -1118,7 +1045,6 @@ mod tests {
     };
     use aether_usage_runtime::UsageEventData;
     use serde_json::{json, Map, Value};
-    use std::collections::BTreeMap;
 
     #[test]
     fn local_execution_client_error_message_is_client_friendly() {
@@ -1143,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_miss_routing_records_compact_diagnostic_metadata() {
+    fn runtime_miss_routing_moves_to_typed_usage_fields_and_keeps_metadata_lightweight() {
         let mut data = UsageEventData::default();
         let mut request_metadata =
             Map::from_iter([("trace_id".to_string(), Value::String("trace-1".to_string()))]);
@@ -1160,19 +1086,10 @@ mod tests {
                 route_family: Some("claude".to_string()),
                 route_kind: Some("cli".to_string()),
                 plan_kind: Some("claude_cli_sync".to_string()),
-                requested_model: Some("gpt-5".to_string()),
-                candidate_count: Some(1),
-                skipped_candidate_count: Some(4),
-                skip_reasons: BTreeMap::from([("pool_cooldown".to_string(), 4)]),
-                provider_hint_id: Some("provider-google-api".to_string()),
-                provider_hint_name: Some("Google API".to_string()),
-                endpoint_hint_id: Some("endpoint-gemini".to_string()),
-                endpoint_hint_api_format: Some("gemini:generate_content".to_string()),
                 ..LocalExecutionRuntimeMissDiagnostic::default()
             }),
             None,
             None,
-            0,
         );
 
         assert_eq!(data.candidate_id.as_deref(), Some("cand-1"));
@@ -1192,24 +1109,7 @@ mod tests {
         assert_eq!(
             Value::Object(request_metadata),
             json!({
-                "trace_id": "trace-1",
-                "runtime_miss": {
-                    "candidate_count": 1,
-                    "persisted_candidate_count": 0,
-                    "skipped_candidate_count": 4,
-                    "skip_reasons": {
-                        "pool_cooldown": 4
-                    },
-                    "provider_hint": {
-                        "id": "provider-google-api",
-                        "name": "Google API"
-                    },
-                    "endpoint_hint": {
-                        "id": "endpoint-gemini",
-                        "api_format": "gemini:generate_content"
-                    },
-                    "requested_model": "gpt-5"
-                }
+                "trace_id": "trace-1"
             })
         );
     }

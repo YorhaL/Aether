@@ -544,7 +544,6 @@
                   :request-status="detail.status"
                   :request-api-format="detail.api_format || null"
                   :request-metadata="traceRequestMetadata"
-                  :scheduling-failure="detail.scheduling_failure"
                   @trace-state="handleTraceState"
                 />
               </div>
