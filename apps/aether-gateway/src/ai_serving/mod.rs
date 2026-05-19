@@ -150,6 +150,13 @@ pub(crate) fn is_json_request(headers: &http::HeaderMap) -> bool {
     crate::headers::is_json_request(headers)
 }
 
+pub(crate) fn decoded_request_body_bytes<'a>(
+    headers: &http::HeaderMap,
+    body_bytes: &'a [u8],
+) -> Result<std::borrow::Cow<'a, [u8]>, crate::headers::RequestBodyNormalizationError> {
+    crate::headers::decoded_request_body_bytes(headers, body_bytes)
+}
+
 pub(crate) fn tls_fingerprint_from_headers(headers: &http::HeaderMap) -> Option<serde_json::Value> {
     crate::headers::tls_fingerprint_from_headers(headers)
 }

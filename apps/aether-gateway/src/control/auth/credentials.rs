@@ -7,7 +7,7 @@ use url::form_urlencoded;
 
 use crate::{
     ai_serving::extract_gemini_model_from_path,
-    headers::{header_value_str, is_json_request},
+    headers::{decoded_request_body_bytes, header_value_str, is_json_request},
 };
 
 use super::super::GatewayControlDecision;
@@ -31,7 +31,8 @@ pub(crate) fn extract_requested_model(
     if !is_json_request(headers) || body.is_empty() {
         return None;
     }
-    serde_json::from_slice::<serde_json::Value>(body)
+    let body = decoded_request_body_bytes(headers, body.as_ref()).ok()?;
+    serde_json::from_slice::<serde_json::Value>(body.as_ref())
         .ok()
         .and_then(|payload| {
             payload
@@ -356,13 +357,48 @@ pub(super) fn current_unix_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_auth_context_cache_key, extract_request_credentials, GatewayCredentialCarrier,
-        GatewayPrimaryCredential, GatewayTrustedAdminHeaders, GatewayTrustedAuthHeaders,
+        build_auth_context_cache_key, extract_request_credentials, extract_requested_model,
+        GatewayCredentialCarrier, GatewayPrimaryCredential, GatewayTrustedAdminHeaders,
+        GatewayTrustedAuthHeaders,
     };
+    use crate::control::GatewayControlDecision;
+    use axum::body::Bytes;
     use axum::http::{self, Uri};
 
     fn uri(path: &str) -> Uri {
         path.parse().expect("uri should parse")
+    }
+
+    #[test]
+    fn extract_requested_model_reads_zstd_encoded_json_body() {
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/responses",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("responses".to_string()),
+            Some("openai:responses".to_string()),
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("zstd"),
+        );
+        let encoded =
+            zstd::stream::encode_all(br#"{"model":"gpt-5.4","input":"hello"}"#.as_slice(), 0)
+                .expect("zstd body should encode");
+
+        let requested_model = extract_requested_model(
+            &decision,
+            &uri("/v1/responses"),
+            &headers,
+            &Bytes::from(encoded),
+        );
+
+        assert_eq!(requested_model.as_deref(), Some("gpt-5.4"));
     }
 
     #[test]

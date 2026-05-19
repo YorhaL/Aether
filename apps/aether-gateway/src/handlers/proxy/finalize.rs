@@ -17,6 +17,7 @@ use tracing::{info, trace, warn};
 
 pub(super) fn request_wants_stream(
     request_context: &GatewayPublicRequestContext,
+    headers: &http::HeaderMap,
     body: &axum::body::Bytes,
 ) -> bool {
     if request_context
@@ -34,7 +35,11 @@ pub(super) fn request_wants_stream(
     {
         return false;
     }
-    serde_json::from_slice::<serde_json::Value>(body)
+    let body = match crate::headers::decoded_request_body_bytes(headers, body.as_ref()) {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    serde_json::from_slice::<serde_json::Value>(body.as_ref())
         .ok()
         .and_then(|value| value.get("stream").and_then(|stream| stream.as_bool()))
         .unwrap_or(false)
@@ -258,11 +263,11 @@ pub(super) fn finalize_gateway_response_with_context(
 
 #[cfg(test)]
 mod tests {
-    use super::finalize_gateway_response;
-    use crate::control::GatewayControlDecision;
+    use super::{finalize_gateway_response, request_wants_stream};
+    use crate::control::{GatewayControlDecision, GatewayPublicRequestContext};
     use crate::AppState;
-    use axum::body::Body;
-    use axum::http::{Method, Response, StatusCode};
+    use axum::body::{Body, Bytes};
+    use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
     use tracing_subscriber::filter::LevelFilter;
@@ -304,6 +309,32 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             SharedBufferWriter(Arc::clone(&self.0))
         }
+    }
+
+    #[test]
+    fn request_wants_stream_reads_zstd_encoded_json_body() {
+        let request_context = GatewayPublicRequestContext {
+            trace_id: "trace-zstd-stream".to_string(),
+            request_method: Method::POST,
+            request_path: "/v1/responses".to_string(),
+            request_query_string: None,
+            request_content_type: Some("application/json".to_string()),
+            host_header: None,
+            control_decision: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("zstd"),
+        );
+        let encoded = zstd::stream::encode_all(br#"{"stream":true}"#.as_slice(), 0)
+            .expect("zstd body should encode");
+
+        assert!(request_wants_stream(
+            &request_context,
+            &headers,
+            &Bytes::from(encoded),
+        ));
     }
 
     #[test]

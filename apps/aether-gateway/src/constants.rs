@@ -32,6 +32,7 @@ pub(crate) const API_KEY_CONCURRENCY_WAIT_TIMEOUT_MS: u64 = 150;
 pub(crate) const API_KEY_CONCURRENCY_WAIT_POLL_INTERVAL_MS: u64 = 10;
 pub(crate) const EXECUTION_PATH_LOCAL_AUTH_DENIED: &str = "local_auth_denied";
 pub(crate) const EXECUTION_PATH_LOCAL_RATE_LIMITED: &str = "local_rate_limited";
+pub(crate) const EXECUTION_PATH_LOCAL_INVALID_REQUEST: &str = "local_invalid_request";
 pub(crate) const EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND: &str = "local_route_not_found";
 pub(crate) const EXECUTION_PATH_LOCAL_OVERLOADED: &str = "local_overloaded";
 pub(crate) const EXECUTION_PATH_DISTRIBUTED_OVERLOADED: &str = "distributed_overloaded";

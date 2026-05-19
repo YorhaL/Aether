@@ -94,6 +94,7 @@ pub(crate) async fn request_model_local_rejection(
         decision,
         auth_context,
         requested_model.as_deref(),
+        headers,
         body,
     )
     .await
@@ -104,6 +105,7 @@ async fn balance_capacity_rejection(
     decision: &GatewayControlDecision,
     auth_context: &GatewayControlAuthContext,
     requested_model: Option<&str>,
+    headers: &http::HeaderMap,
     body: &Bytes,
 ) -> Result<Option<GatewayLocalAuthRejection>, GatewayError> {
     if auth_context.api_key_is_standalone {
@@ -146,7 +148,8 @@ async fn balance_capacity_rejection(
         return Ok(None);
     };
     let Some(estimated_cost_usd) =
-        estimate_request_cost_upper_bound_usd(state, decision, requested_model, body).await?
+        estimate_request_cost_upper_bound_usd(state, decision, requested_model, headers, body)
+            .await?
     else {
         return Ok(None);
     };
@@ -173,6 +176,7 @@ async fn estimate_request_cost_upper_bound_usd(
     state: &AppState,
     decision: &GatewayControlDecision,
     requested_model: &str,
+    headers: &http::HeaderMap,
     body: &Bytes,
 ) -> Result<Option<f64>, GatewayError> {
     let Some(api_format) = decision
@@ -183,7 +187,11 @@ async fn estimate_request_cost_upper_bound_usd(
     else {
         return Ok(None);
     };
-    let body_json = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let body = crate::headers::decoded_request_body_bytes(headers, body.as_ref()).ok();
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let body_json = serde_json::from_slice::<serde_json::Value>(body.as_ref()).ok();
     let Some(input_tokens) = body_json
         .as_ref()
         .map(estimate_json_tokens)

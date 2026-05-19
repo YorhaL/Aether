@@ -101,6 +101,7 @@ webpki-roots = "0.26"
 wreq = { version = "6.0.0-rc.28", default-features = false, features = ["json", "stream", "socks", "webpki-roots", "ws"] }
 wreq-util = "3.0.0-rc.10"
 url = "2"
+zstd = "0.13"
 
 [profile.dev]
 # Keep file/line information for backtraces while avoiding full debug info

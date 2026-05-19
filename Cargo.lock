@@ -253,6 +253,7 @@ dependencies = [
  "webpki-roots 0.26.11",
  "wreq",
  "wreq-util",
+ "zstd",
 ]
 
 [[package]]

@@ -1,8 +1,25 @@
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{borrow::Cow, collections::BTreeMap, fmt, io::Read, net::SocketAddr, sync::LazyLock};
 
 use crate::constants::*;
+use axum::body::Bytes;
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use serde_json::{Map, Value};
 use uuid::Uuid;
+
+const DEFAULT_MAX_REQUEST_BODY_MB: u64 = 64;
+const MAX_REQUEST_BODY_MB_ENV: &str = "AETHER_MAX_REQUEST_BODY_MB";
+
+/// Upper bound applied to a request body after Content-Encoding decoding, and to
+/// uncompressed bodies as-is. Guards against decompression bombs and oversized
+/// request allocations. Overridable via `AETHER_MAX_REQUEST_BODY_MB`.
+static MAX_REQUEST_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var(MAX_REQUEST_BODY_MB_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_REQUEST_BODY_MB)
+        .saturating_mul(1024 * 1024)
+});
 
 pub(crate) fn extract_or_generate_trace_id(headers: &http::HeaderMap) -> String {
     header_value_str(headers, TRACE_ID_HEADER).unwrap_or_else(|| Uuid::new_v4().to_string())
@@ -157,6 +174,216 @@ pub(crate) fn is_json_request(headers: &http::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RequestBodyNormalizationError {
+    UnsupportedContentEncoding(String),
+    DecodeFailed { encoding: String, reason: String },
+    DecompressedBodyTooLarge { encoding: String, limit_bytes: u64 },
+    RequestBodyTooLarge { limit_bytes: u64 },
+}
+
+impl RequestBodyNormalizationError {
+    pub(crate) fn client_message(&self) -> String {
+        match self {
+            Self::UnsupportedContentEncoding(encoding) => {
+                format!("Unsupported request Content-Encoding: {encoding}")
+            }
+            Self::DecodeFailed { encoding, .. } => {
+                format!("Failed to decode request body with Content-Encoding: {encoding}")
+            }
+            Self::DecompressedBodyTooLarge {
+                encoding,
+                limit_bytes,
+            } => format!(
+                "Decoded request body with Content-Encoding {encoding} exceeds {limit_bytes} bytes"
+            ),
+            Self::RequestBodyTooLarge { limit_bytes } => {
+                format!("Request body exceeds {limit_bytes} bytes")
+            }
+        }
+    }
+
+    pub(crate) fn http_status(&self) -> http::StatusCode {
+        match self {
+            Self::DecompressedBodyTooLarge { .. } | Self::RequestBodyTooLarge { .. } => {
+                http::StatusCode::PAYLOAD_TOO_LARGE
+            }
+            Self::UnsupportedContentEncoding(_) | Self::DecodeFailed { .. } => {
+                http::StatusCode::BAD_REQUEST
+            }
+        }
+    }
+}
+
+impl fmt::Display for RequestBodyNormalizationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedContentEncoding(encoding) => {
+                write!(f, "unsupported request Content-Encoding: {encoding}")
+            }
+            Self::DecodeFailed { encoding, reason } => {
+                write!(
+                    f,
+                    "failed to decode request body with Content-Encoding {encoding}: {reason}"
+                )
+            }
+            Self::DecompressedBodyTooLarge {
+                encoding,
+                limit_bytes,
+            } => write!(
+                f,
+                "decoded request body with Content-Encoding {encoding} exceeds {limit_bytes} bytes"
+            ),
+            Self::RequestBodyTooLarge { limit_bytes } => {
+                write!(f, "request body exceeds {limit_bytes} bytes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestBodyNormalizationError {}
+
+pub(crate) fn normalize_request_body_headers_and_bytes(
+    headers: &mut http::HeaderMap,
+    body_bytes: Bytes,
+) -> Result<Bytes, RequestBodyNormalizationError> {
+    let body_was_encoded = !request_content_encodings(headers).is_empty();
+    let decoded = decoded_request_body_bytes(headers, body_bytes.as_ref())?;
+    if !body_was_encoded {
+        return Ok(body_bytes);
+    }
+
+    headers.remove(http::header::CONTENT_ENCODING);
+    headers.remove(http::header::CONTENT_LENGTH);
+    Ok(Bytes::from(decoded.into_owned()))
+}
+
+/// Rejects a request whose declared `Content-Length` already exceeds the body
+/// limit, before the body is buffered into memory. Chunked or length-less
+/// requests pass this check and stay bounded by the post-decode guard instead.
+pub(crate) fn check_request_content_length(
+    headers: &http::HeaderMap,
+) -> Result<(), RequestBodyNormalizationError> {
+    let limit = *MAX_REQUEST_BODY_BYTES;
+    let declared = header_value_str(headers, http::header::CONTENT_LENGTH.as_str())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    if declared.is_some_and(|value| value > limit) {
+        return Err(RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: limit });
+    }
+    Ok(())
+}
+
+pub(crate) fn decoded_request_body_bytes<'a>(
+    headers: &http::HeaderMap,
+    body_bytes: &'a [u8],
+) -> Result<Cow<'a, [u8]>, RequestBodyNormalizationError> {
+    let encodings = request_content_encodings(headers);
+    if encodings.is_empty() {
+        let limit = *MAX_REQUEST_BODY_BYTES;
+        if body_bytes.len() as u64 > limit {
+            return Err(RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: limit });
+        }
+        return Ok(Cow::Borrowed(body_bytes));
+    }
+
+    let mut decoded = body_bytes.to_vec();
+    for encoding in encodings.iter().rev() {
+        decoded = decode_single_request_body(encoding, decoded.as_slice())?;
+    }
+    Ok(Cow::Owned(decoded))
+}
+
+fn request_content_encodings(headers: &http::HeaderMap) -> Vec<String> {
+    header_value_str(headers, http::header::CONTENT_ENCODING.as_str())
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_lowercase)
+                .filter(|value| value != "identity")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn decode_single_request_body(
+    encoding: &str,
+    body_bytes: &[u8],
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    match encoding {
+        "gzip" | "x-gzip" => decode_gzip_body(encoding, body_bytes),
+        "deflate" => decode_deflate_body(encoding, body_bytes),
+        "zstd" => decode_zstd_body(encoding, body_bytes),
+        _ => Err(RequestBodyNormalizationError::UnsupportedContentEncoding(
+            encoding.to_string(),
+        )),
+    }
+}
+
+fn decode_gzip_body(
+    encoding: &str,
+    body_bytes: &[u8],
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    let mut decoder = GzDecoder::new(body_bytes);
+    read_request_decoder_to_end(encoding, &mut decoder)
+}
+
+fn decode_deflate_body(
+    encoding: &str,
+    body_bytes: &[u8],
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    let mut zlib_decoder = ZlibDecoder::new(body_bytes);
+    match read_request_decoder_to_end(encoding, &mut zlib_decoder) {
+        Ok(decoded) => Ok(decoded),
+        Err(err @ RequestBodyNormalizationError::DecompressedBodyTooLarge { .. }) => Err(err),
+        Err(zlib_error) => {
+            let mut raw_decoder = DeflateDecoder::new(body_bytes);
+            read_request_decoder_to_end(encoding, &mut raw_decoder).map_err(|raw_error| {
+                RequestBodyNormalizationError::DecodeFailed {
+                    encoding: encoding.to_string(),
+                    reason: format!("{zlib_error}; raw deflate fallback failed: {raw_error}"),
+                }
+            })
+        }
+    }
+}
+
+fn decode_zstd_body(
+    encoding: &str,
+    body_bytes: &[u8],
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    let mut decoder = zstd::stream::read::Decoder::new(body_bytes).map_err(|err| {
+        RequestBodyNormalizationError::DecodeFailed {
+            encoding: encoding.to_string(),
+            reason: err.to_string(),
+        }
+    })?;
+    read_request_decoder_to_end(encoding, &mut decoder)
+}
+
+fn read_request_decoder_to_end(
+    encoding: &str,
+    decoder: &mut impl Read,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    let limit = *MAX_REQUEST_BODY_BYTES;
+    let mut limited = decoder.take(limit.saturating_add(1));
+    let mut out = Vec::new();
+    limited
+        .read_to_end(&mut out)
+        .map_err(|err| RequestBodyNormalizationError::DecodeFailed {
+            encoding: encoding.to_string(),
+            reason: err.to_string(),
+        })?;
+    if out.len() as u64 > limit {
+        return Err(RequestBodyNormalizationError::DecompressedBodyTooLarge {
+            encoding: encoding.to_string(),
+            limit_bytes: limit,
+        });
+    }
+    Ok(out)
+}
+
 pub(crate) fn header_equals(
     headers: &reqwest::header::HeaderMap,
     key: &'static str,
@@ -172,12 +399,20 @@ pub(crate) fn header_equals(
 #[cfg(test)]
 mod tests {
     use super::{
+        decoded_request_body_bytes, normalize_request_body_headers_and_bytes,
         request_origin_from_headers, request_origin_from_headers_and_remote_addr,
-        tls_fingerprint_from_headers, RequestOrigin,
+        tls_fingerprint_from_headers, RequestBodyNormalizationError, RequestOrigin,
+    };
+    use flate2::{
+        write::{DeflateEncoder, GzEncoder, ZlibEncoder},
+        Compression,
     };
     use http::{HeaderMap, HeaderValue};
     use serde_json::json;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        io::Write,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+    };
 
     #[test]
     fn request_origin_prefers_first_forwarded_for_ip() {
@@ -199,6 +434,239 @@ mod tests {
                 user_agent: Some("Claude-Code/1.0".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_decodes_zstd() {
+        let payload = br#"{"model":"gpt-5.4"}"#;
+        let encoded =
+            zstd::stream::encode_all(payload.as_slice(), 0).expect("zstd body should encode");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("zstd"),
+        );
+
+        let decoded =
+            decoded_request_body_bytes(&headers, encoded.as_slice()).expect("body should decode");
+
+        assert_eq!(decoded.as_ref(), payload);
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_decodes_x_gzip() {
+        let payload = br#"{"model":"gpt-5.4"}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload).expect("gzip body should write");
+        let encoded = encoder.finish().expect("gzip body should finish");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("x-gzip"),
+        );
+
+        let decoded =
+            decoded_request_body_bytes(&headers, encoded.as_slice()).expect("body should decode");
+
+        assert_eq!(decoded.as_ref(), payload);
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_decodes_zlib_wrapped_deflate() {
+        let payload = br#"{"model":"gpt-5.4"}"#;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(payload)
+            .expect("deflate body should write");
+        let encoded = encoder.finish().expect("deflate body should finish");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("deflate"),
+        );
+
+        let decoded =
+            decoded_request_body_bytes(&headers, encoded.as_slice()).expect("body should decode");
+
+        assert_eq!(decoded.as_ref(), payload);
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_decodes_raw_deflate_fallback() {
+        let payload = br#"{"model":"gpt-5.4"}"#;
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(payload)
+            .expect("deflate body should write");
+        let encoded = encoder.finish().expect("deflate body should finish");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("deflate"),
+        );
+
+        let decoded =
+            decoded_request_body_bytes(&headers, encoded.as_slice()).expect("body should decode");
+
+        assert_eq!(decoded.as_ref(), payload);
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_decodes_multiple_chained_encodings() {
+        let payload = br#"{"model":"gpt-5.4"}"#;
+        let mut gzip_encoder = GzEncoder::new(Vec::new(), Compression::default());
+        gzip_encoder
+            .write_all(payload)
+            .expect("gzip body should write");
+        let gzipped = gzip_encoder.finish().expect("gzip body should finish");
+        let encoded =
+            zstd::stream::encode_all(gzipped.as_slice(), 0).expect("zstd body should encode");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip, zstd"),
+        );
+
+        let decoded =
+            decoded_request_body_bytes(&headers, encoded.as_slice()).expect("body should decode");
+
+        assert_eq!(decoded.as_ref(), payload);
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_rejects_corrupt_encoded_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("zstd"),
+        );
+
+        let err = decoded_request_body_bytes(&headers, br#"{"model":"gpt-5.4"}"#.as_slice())
+            .expect_err("corrupt body should fail");
+
+        assert!(matches!(
+            err,
+            RequestBodyNormalizationError::DecodeFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn normalize_request_body_headers_and_bytes_clears_encoding_headers() {
+        let payload = br#"{"model":"gpt-5.4"}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload).expect("gzip body should write");
+        let encoded = encoder.finish().expect("gzip body should finish");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("x-gzip"),
+        );
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_static("999"),
+        );
+
+        let decoded = normalize_request_body_headers_and_bytes(
+            &mut headers,
+            axum::body::Bytes::from(encoded),
+        )
+        .expect("body should normalize");
+
+        assert_eq!(decoded.as_ref(), payload);
+        assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
+        assert!(!headers.contains_key(http::header::CONTENT_LENGTH));
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_rejects_unsupported_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("br"),
+        );
+
+        let err = decoded_request_body_bytes(&headers, br#"{"model":"gpt-5.4"}"#.as_slice())
+            .expect_err("unsupported encoding should fail");
+
+        assert_eq!(
+            err,
+            RequestBodyNormalizationError::UnsupportedContentEncoding("br".to_string())
+        );
+    }
+
+    #[test]
+    fn decoded_request_body_bytes_rejects_oversized_uncompressed_body() {
+        let limit = *super::MAX_REQUEST_BODY_BYTES;
+        let oversized = vec![b'a'; limit as usize + 1];
+        let headers = HeaderMap::new();
+
+        let err = decoded_request_body_bytes(&headers, oversized.as_slice())
+            .expect_err("oversized uncompressed body should fail");
+
+        assert_eq!(
+            err,
+            RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: limit }
+        );
+    }
+
+    #[test]
+    fn check_request_content_length_rejects_oversized_declared_length() {
+        let limit = *super::MAX_REQUEST_BODY_BYTES;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_str(&(limit + 1).to_string()).expect("length header should build"),
+        );
+
+        let err = super::check_request_content_length(&headers)
+            .expect_err("oversized declared length should fail");
+
+        assert_eq!(
+            err,
+            RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: limit }
+        );
+    }
+
+    #[test]
+    fn request_body_normalization_error_maps_http_status() {
+        assert_eq!(
+            RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: 1 }.http_status(),
+            http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            RequestBodyNormalizationError::DecompressedBodyTooLarge {
+                encoding: "zstd".to_string(),
+                limit_bytes: 1,
+            }
+            .http_status(),
+            http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            RequestBodyNormalizationError::UnsupportedContentEncoding("br".to_string())
+                .http_status(),
+            http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            RequestBodyNormalizationError::DecodeFailed {
+                encoding: "gzip".to_string(),
+                reason: "bad".to_string(),
+            }
+            .http_status(),
+            http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn check_request_content_length_allows_missing_or_within_limit() {
+        let empty = HeaderMap::new();
+        assert!(super::check_request_content_length(&empty).is_ok());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_static("1024"),
+        );
+        assert!(super::check_request_content_length(&headers).is_ok());
     }
 
     #[test]

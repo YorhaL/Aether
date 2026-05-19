@@ -21,12 +21,13 @@ use crate::constants::{
     EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
     EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED,
     EXECUTION_PATH_LOCAL_AUTH_DENIED, EXECUTION_PATH_LOCAL_EXECUTION_LOOP_DETECTED,
-    EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, EXECUTION_PATH_LOCAL_OVERLOADED,
-    EXECUTION_PATH_LOCAL_PROXY_PASSTHROUGH_REMOVED, EXECUTION_PATH_LOCAL_RATE_LIMITED,
-    EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND, EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH,
-    EXECUTION_RUNTIME_LOOP_GUARD_HEADER, FORWARDED_FOR_HEADER, FORWARDED_HOST_HEADER,
-    FORWARDED_PROTO_HEADER, GATEWAY_HEADER, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
-    TRACE_ID_HEADER, TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER,
+    EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, EXECUTION_PATH_LOCAL_INVALID_REQUEST,
+    EXECUTION_PATH_LOCAL_OVERLOADED, EXECUTION_PATH_LOCAL_PROXY_PASSTHROUGH_REMOVED,
+    EXECUTION_PATH_LOCAL_RATE_LIMITED, EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND,
+    EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH, EXECUTION_RUNTIME_LOOP_GUARD_HEADER,
+    FORWARDED_FOR_HEADER, FORWARDED_HOST_HEADER, FORWARDED_PROTO_HEADER, GATEWAY_HEADER,
+    LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER, TRACE_ID_HEADER,
+    TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER,
     TRUSTED_AUTH_BALANCE_HEADER, TRUSTED_AUTH_USER_ID_HEADER, TUNNEL_AFFINITY_FORWARDED_BY_HEADER,
     TUNNEL_AFFINITY_OWNER_INSTANCE_HEADER,
 };
@@ -51,7 +52,7 @@ use crate::handlers::shared::{
 };
 use crate::headers::{
     extract_or_generate_trace_id, request_origin_from_headers_and_remote_addr,
-    should_skip_request_header,
+    should_skip_request_header, RequestBodyNormalizationError,
 };
 use crate::router::RequestAdmissionError;
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
@@ -91,6 +92,69 @@ const AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL: &str =
 const EXECUTION_PATH_TUNNEL_AFFINITY_FORWARD: &str = "tunnel_affinity_forward";
 const MANAGEMENT_TOKEN_PREFIX: &str = "ae-";
 const LEGACY_MANAGEMENT_TOKEN_PREFIX: &str = "ae_";
+
+fn build_request_body_normalization_error_response(
+    trace_id: &str,
+    request_context: &GatewayPublicRequestContext,
+    error: &RequestBodyNormalizationError,
+) -> Result<Response<Body>, GatewayError> {
+    warn!(
+        event_name = "frontdoor_request_body_normalization_failed",
+        log_type = "ops",
+        trace_id,
+        method = %request_context.request_method,
+        path = %request_context.request_path_and_query(),
+        error = %error,
+        "gateway rejected request with invalid encoded body"
+    );
+    build_local_http_error_response(
+        trace_id,
+        request_context.control_decision.as_ref(),
+        error.http_status(),
+        error.client_message().as_str(),
+    )
+}
+
+async fn buffer_and_normalize_request_body(
+    request_body: &mut Option<Body>,
+    headers: &mut http::HeaderMap,
+    body_owner_expectation: &'static str,
+) -> Result<Result<Bytes, RequestBodyNormalizationError>, GatewayError> {
+    if let Err(err) = crate::headers::check_request_content_length(headers) {
+        return Ok(Err(err));
+    }
+    let body = to_bytes(
+        request_body.take().expect(body_owner_expectation),
+        usize::MAX,
+    )
+    .await
+    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    Ok(crate::headers::normalize_request_body_headers_and_bytes(
+        headers, body,
+    ))
+}
+
+fn finalize_request_body_normalization_rejection(
+    state: &AppState,
+    request_context: &GatewayPublicRequestContext,
+    remote_addr: &std::net::SocketAddr,
+    started_at: &std::time::Instant,
+    trace_id: &str,
+    request_permit: Option<aether_runtime::AdmissionPermit>,
+    error: &RequestBodyNormalizationError,
+) -> Result<Response<Body>, GatewayError> {
+    let response =
+        build_request_body_normalization_error_response(trace_id, request_context, error)?;
+    Ok(finalize_gateway_response_with_context(
+        state,
+        response,
+        remote_addr,
+        request_context,
+        EXECUTION_PATH_LOCAL_INVALID_REQUEST,
+        started_at,
+        request_permit,
+    ))
+}
 
 fn local_execution_outcome_label(outcome: &LocalExecutionRequestOutcome) -> &'static str {
     match outcome {
@@ -330,8 +394,11 @@ async fn maybe_forward_public_request_to_tunnel_owner(
     ) else {
         return Ok(None);
     };
-    let body_json =
-        buffered_body.and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok());
+    let body_json = buffered_body.and_then(|body| {
+        let body =
+            crate::headers::decoded_request_body_bytes(&parts.headers, body.as_ref()).ok()?;
+        serde_json::from_slice::<serde_json::Value>(body.as_ref()).ok()
+    });
     let client_session_affinity =
         crate::client_session_affinity::client_session_affinity_from_parts(
             parts,
@@ -461,6 +528,7 @@ async fn maybe_forward_public_request_to_tunnel_owner(
 
     let mut response = build_sync_aware_affinity_forward_response(
         request_context,
+        &parts.headers,
         buffered_body,
         decision,
         upstream_response,
@@ -720,6 +788,7 @@ fn build_stream_sse_proxy_response(
 
 async fn build_sync_aware_affinity_forward_response(
     request_context: &GatewayPublicRequestContext,
+    request_headers: &http::HeaderMap,
     buffered_body: Option<&Bytes>,
     decision: &GatewayControlDecision,
     upstream_response: reqwest::Response,
@@ -727,7 +796,7 @@ async fn build_sync_aware_affinity_forward_response(
     let Some(buffered_body) = buffered_body else {
         return build_client_response(upstream_response, &request_context.trace_id, Some(decision));
     };
-    let stream_request = request_wants_stream(request_context, buffered_body);
+    let stream_request = request_wants_stream(request_context, request_headers, buffered_body);
     let upstream_is_sse = upstream_response_is_sse(upstream_response.headers());
     if (!stream_request && !upstream_is_sse) || (stream_request && upstream_is_sse) {
         return build_client_response(upstream_response, &request_context.trace_id, Some(decision));
@@ -943,16 +1012,26 @@ pub(crate) async fn proxy_request(
     }
     let mut request_body = Some(body);
     let local_proxy_body = if local_proxy_route_requires_buffered_body(&request_context) {
-        Some(
-            to_bytes(
-                request_body
-                    .take()
-                    .expect("local proxy body buffering should own request body"),
-                usize::MAX,
-            )
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?,
+        let body = buffer_and_normalize_request_body(
+            &mut request_body,
+            &mut parts.headers,
+            "local proxy body buffering should own request body",
         )
+        .await?;
+        match body {
+            Ok(body) => Some(body),
+            Err(err) => {
+                return finalize_request_body_normalization_rejection(
+                    &state,
+                    &request_context,
+                    &remote_addr,
+                    &started_at,
+                    &trace_id,
+                    request_permit.take(),
+                    &err,
+                );
+            }
+        }
     } else {
         None
     };
@@ -1113,16 +1192,26 @@ pub(crate) async fn proxy_request(
         && request_enables_control_execute(&parts.headers);
 
     let buffered_body = if should_buffer_body {
-        Some(
-            to_bytes(
-                request_body
-                    .take()
-                    .expect("buffered auth/execution runtime path should own request body"),
-                usize::MAX,
-            )
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?,
+        let body = buffer_and_normalize_request_body(
+            &mut request_body,
+            &mut parts.headers,
+            "buffered auth/execution runtime path should own request body",
         )
+        .await?;
+        match body {
+            Ok(body) => Some(body),
+            Err(err) => {
+                return finalize_request_body_normalization_rejection(
+                    &state,
+                    &request_context,
+                    &remote_addr,
+                    &started_at,
+                    &trace_id,
+                    request_permit.take(),
+                    &err,
+                );
+            }
+        }
     } else {
         None
     };
@@ -1264,7 +1353,7 @@ pub(crate) async fn proxy_request(
         let buffered_body = buffered_body
             .as_ref()
             .expect("execution runtime/control auth gate should have buffered request body");
-        let stream_request = request_wants_stream(&request_context, buffered_body);
+        let stream_request = request_wants_stream(&request_context, &parts.headers, buffered_body);
         let mut local_execution_exhaustion = None;
         if stream_request {
             let stream_outcome = maybe_execute_stream_request(

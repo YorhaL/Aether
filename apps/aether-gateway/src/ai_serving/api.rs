@@ -70,10 +70,13 @@ pub(crate) fn parse_direct_request_body(
     parts: &http::request::Parts,
     body_bytes: &axum::body::Bytes,
 ) -> Option<(serde_json::Value, Option<String>)> {
-    aether_ai_formats::api::parse_direct_request_body(
-        is_json_request(&parts.headers),
-        body_bytes.as_ref(),
-    )
+    let is_json_request = is_json_request(&parts.headers);
+    let body_bytes = if is_json_request {
+        crate::ai_serving::decoded_request_body_bytes(&parts.headers, body_bytes.as_ref()).ok()?
+    } else {
+        std::borrow::Cow::Borrowed(body_bytes.as_ref())
+    };
+    aether_ai_formats::api::parse_direct_request_body(is_json_request, body_bytes.as_ref())
 }
 
 pub(crate) fn resolve_execution_runtime_stream_plan_kind(
@@ -213,5 +216,34 @@ fn value_has_non_empty_text(value: Option<&serde_json::Value>) -> bool {
                     .is_some_and(|kind| matches!(kind, "image_url" | "input_image"))
         }),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_direct_request_body;
+    use axum::body::Bytes;
+    use axum::http::{header, Request};
+
+    #[test]
+    fn parse_direct_request_body_reads_zstd_encoded_json_body() {
+        let (parts, _) = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_ENCODING, "zstd")
+            .body(())
+            .expect("request should build")
+            .into_parts();
+        let encoded =
+            zstd::stream::encode_all(br#"{"model":"gpt-5.4","stream":true}"#.as_slice(), 0)
+                .expect("zstd body should encode");
+
+        let (body_json, body_base64) =
+            parse_direct_request_body(&parts, &Bytes::from(encoded)).expect("body should parse");
+
+        assert_eq!(body_json["model"].as_str(), Some("gpt-5.4"));
+        assert_eq!(body_json["stream"].as_bool(), Some(true));
+        assert!(body_base64.is_none());
     }
 }
