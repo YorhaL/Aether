@@ -31,7 +31,13 @@ pub(crate) fn parse_direct_request_body(
     parts: &http::request::Parts,
     body_bytes: &Bytes,
 ) -> Option<(serde_json::Value, Option<String>)> {
-    parse_direct_request_body_impl(is_json_request(&parts.headers), body_bytes.as_ref())
+    let is_json_request = is_json_request(&parts.headers);
+    let body_bytes = if is_json_request {
+        crate::ai_serving::decoded_request_body_bytes(&parts.headers, body_bytes.as_ref()).ok()?
+    } else {
+        std::borrow::Cow::Borrowed(body_bytes.as_ref())
+    };
+    parse_direct_request_body_impl(is_json_request, body_bytes.as_ref())
 }
 
 pub(crate) fn force_upstream_streaming_for_provider(
