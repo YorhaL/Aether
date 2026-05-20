@@ -1944,13 +1944,23 @@ async fn provider_query_execute_openai_image_test_candidate(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("grok");
+    let is_codex = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex");
     let mut provider_request_body = if is_chatgpt_web {
         match crate::ai_serving::build_chatgpt_web_image_request_body(&parts, &request_body, None) {
             Ok(body) => body,
             Err(err) => err.to_error_json(),
         }
-    } else {
+    } else if is_codex || is_grok {
         crate::ai_serving::build_openai_image_provider_request_body(&normalized_request)
+    } else {
+        crate::ai_serving::build_openai_image_api_provider_request_body(
+            &normalized_request,
+            Some(candidate.effective_model.as_str()),
+        )
     };
     if !is_chatgpt_web {
         crate::ai_serving::apply_codex_openai_responses_special_body_edits(
