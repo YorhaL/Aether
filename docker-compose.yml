@@ -14,7 +14,18 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
-    command: postgres -c idle_in_transaction_session_timeout=30000 -c tcp_keepalives_idle=30 -c tcp_keepalives_interval=10 -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all
+    command: >
+      postgres
+      -c idle_in_transaction_session_timeout=30000
+      -c tcp_keepalives_idle=30
+      -c tcp_keepalives_interval=10
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c pg_stat_statements.max=10000
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}
+      -c work_mem=${POSTGRES_WORK_MEM:-4MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 5s
