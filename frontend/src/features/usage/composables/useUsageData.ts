@@ -418,6 +418,25 @@ export function useUsageData(options: UseUsageDataOptions) {
     }
   }
 
+  function mergePositiveDurationMs(
+    existingValue: number | null | undefined,
+    nextValue: number | null | undefined
+  ): number | null | undefined {
+    const existingIsPositive = typeof existingValue === 'number' && Number.isFinite(existingValue) && existingValue > 0
+    const nextIsPositive = typeof nextValue === 'number' && Number.isFinite(nextValue) && nextValue > 0
+
+    if (existingIsPositive && nextIsPositive) {
+      return Math.max(existingValue, nextValue)
+    }
+    if (existingIsPositive) {
+      return existingValue
+    }
+    if (nextIsPositive) {
+      return nextValue
+    }
+    return existingValue ?? nextValue
+  }
+
   function mergeRecordStatus(
     current: UsageRecord[],
     next: UsageRecord[]
@@ -513,8 +532,8 @@ export function useUsageData(options: UseUsageDataOptions) {
           cache_read_input_tokens: existing.cache_read_input_tokens ?? record.cache_read_input_tokens,
           cost: existing.cost || record.cost,
           actual_cost: existing.actual_cost ?? record.actual_cost,
-          response_time_ms: existing.response_time_ms ?? record.response_time_ms,
-          first_byte_time_ms: existing.first_byte_time_ms ?? record.first_byte_time_ms,
+          response_time_ms: mergePositiveDurationMs(existing.response_time_ms, record.response_time_ms),
+          first_byte_time_ms: mergePositiveDurationMs(existing.first_byte_time_ms, record.first_byte_time_ms),
           is_stream: upstreamIsStream,
           upstream_is_stream: upstreamIsStream,
           client_requested_stream: clientRequestedStream,

@@ -182,17 +182,41 @@ ON CONFLICT (request_id) DO UPDATE SET
   output_price_per_1m = excluded.output_price_per_1m,
   total_cost_usd = excluded.total_cost_usd,
   actual_total_cost_usd = excluded.actual_total_cost_usd,
-  status_code = excluded.status_code,
-  error_message = excluded.error_message,
-  error_category = excluded.error_category,
-  response_time_ms = excluded.response_time_ms,
-  first_byte_time_ms = excluded.first_byte_time_ms,
-  status = excluded.status,
+    status_code = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".status_code
+        WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".status_code
+        ELSE excluded.status_code
+    END,
+    error_message = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".error_message
+        WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".error_message
+        ELSE excluded.error_message
+    END,
+    error_category = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".error_category
+        WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".error_category
+        ELSE excluded.error_category
+    END,
+    response_time_ms = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".response_time_ms
+        WHEN excluded.response_time_ms IS NULL OR excluded.response_time_ms = 0 THEN COALESCE("usage".response_time_ms, excluded.response_time_ms)
+        ELSE excluded.response_time_ms
+    END,
+    first_byte_time_ms = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".first_byte_time_ms
+        WHEN excluded.first_byte_time_ms IS NULL OR excluded.first_byte_time_ms = 0 THEN COALESCE("usage".first_byte_time_ms, excluded.first_byte_time_ms)
+        ELSE excluded.first_byte_time_ms
+    END,
+    status = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".status
+        WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".status
+        ELSE excluded.status
+    END,
   billing_status = excluded.billing_status,
   request_metadata = excluded.request_metadata,
-  candidate_id = excluded.candidate_id,
-  candidate_index = excluded.candidate_index,
-  key_name = excluded.key_name,
+    candidate_id = COALESCE(excluded.candidate_id, "usage".candidate_id),
+    candidate_index = COALESCE(excluded.candidate_index, "usage".candidate_index),
+    key_name = COALESCE(excluded.key_name, "usage".key_name),
   planner_kind = excluded.planner_kind,
   route_family = excluded.route_family,
   route_kind = excluded.route_kind,

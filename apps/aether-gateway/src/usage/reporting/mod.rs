@@ -18,7 +18,7 @@ use context::{report_context_is_locally_actionable, resolve_locally_actionable_r
 use aether_usage_runtime::{
     is_local_ai_stream_report_kind, is_local_ai_sync_report_kind, report_request_id,
     should_handle_local_stream_report, should_handle_local_sync_report,
-    sync_report_represents_failure,
+    stream_report_represents_failure, sync_report_represents_failure,
 };
 pub(crate) use aether_usage_runtime::{GatewayStreamReportRequest, GatewaySyncReportRequest};
 
@@ -256,14 +256,33 @@ async fn handle_local_stream_report(state: &AppState, payload: &GatewayStreamRep
         .telemetry
         .as_ref()
         .and_then(|telemetry| telemetry.elapsed_ms);
+    let failed = stream_report_represents_failure(payload);
     record_report_request_candidate_status(
         state,
         payload.report_context.as_ref(),
         SchedulerRequestCandidateStatusUpdate {
-            status: RequestCandidateStatus::Success,
+            status: if failed {
+                RequestCandidateStatus::Failed
+            } else {
+                RequestCandidateStatus::Success
+            },
             status_code: Some(payload.status_code),
-            error_type: None,
-            error_message: None,
+            error_type: failed.then(|| {
+                if payload.status_code >= 400 {
+                    "stream_http_error".to_string()
+                } else {
+                    "stream_terminal_error".to_string()
+                }
+            }),
+            error_message: failed.then(|| {
+                payload
+                    .terminal_summary
+                    .as_ref()
+                    .and_then(|summary| summary.parser_error.clone())
+                    .unwrap_or_else(|| {
+                        "execution runtime stream ended with a terminal error".to_string()
+                    })
+            }),
             latency_ms,
             started_at_unix_ms: None,
             finished_at_unix_ms: Some(terminal_unix_ms),

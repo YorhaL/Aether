@@ -108,6 +108,107 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
     })
 }
 
+pub fn openai_stream_payload_is_terminal_error(payload: &Value) -> bool {
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if payload.get("error").is_some() {
+        return true;
+    }
+    if matches!(
+        event_type,
+        "error" | "response.failed" | "response.incomplete"
+    ) {
+        return true;
+    }
+
+    payload
+        .get("response")
+        .and_then(Value::as_object)
+        .and_then(|response| response.get("status"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "failed" | "incomplete"))
+}
+
+pub fn openai_stream_terminal_error_body(payload: &Value) -> Option<Value> {
+    if !openai_stream_payload_is_terminal_error(payload) {
+        return None;
+    }
+
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let response = payload.get("response").and_then(Value::as_object);
+    let status = response
+        .and_then(|response| response.get("status"))
+        .and_then(Value::as_str);
+    let raw_error = response
+        .and_then(|response| response.get("error"))
+        .or_else(|| payload.get("error"));
+
+    let mut error = raw_error
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| raw_error.and_then(Value::as_str).map(ToOwned::to_owned))
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            response
+                .and_then(|response| response.get("incomplete_details"))
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                .map(|reason| format!("Response incomplete: {reason}"))
+        })
+        .or_else(|| status.map(|status| format!("Response ended with status {status}")))
+        .unwrap_or_else(|| "Upstream stream ended with an error".to_string());
+
+    error
+        .entry("message".to_string())
+        .or_insert_with(|| Value::String(message));
+    error.entry("type".to_string()).or_insert_with(|| {
+        if event_type == "response.incomplete" || status == Some("incomplete") {
+            Value::String("incomplete".to_string())
+        } else {
+            Value::String("server_error".to_string())
+        }
+    });
+
+    if !error.contains_key("code") {
+        if let Some(reason) = response
+            .and_then(|response| response.get("incomplete_details"))
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str)
+        {
+            error.insert("code".to_string(), Value::String(reason.to_string()));
+        }
+    }
+
+    Some(json!({ "error": Value::Object(error) }))
+}
+
+pub fn openai_stream_terminal_error_message(payload: &Value) -> Option<String> {
+    openai_stream_terminal_error_body(payload)
+        .and_then(|body| body.get("error").cloned())
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
 pub fn canonical_usage_from_claude_usage(value: Option<&Value>) -> Option<CanonicalUsage> {
     let usage = value?.as_object()?;
     let input_tokens = usage

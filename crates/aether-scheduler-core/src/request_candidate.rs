@@ -463,7 +463,7 @@ pub fn build_local_request_candidate_status_record(
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let metadata = parse_request_candidate_report_context(report_context)?;
-    let candidate_index = metadata.candidate_index?;
+    let candidate_index = metadata.candidate_index.unwrap_or(0);
     let extra_data = build_report_candidate_extra_data(ReportCandidateExtraDataInput {
         client_api_format: metadata.client_api_format.clone(),
         provider_api_format: metadata.provider_api_format.clone(),

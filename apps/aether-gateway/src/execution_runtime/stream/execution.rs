@@ -53,6 +53,7 @@ use crate::ai_serving::api::{
     maybe_build_provider_private_stream_normalizer, maybe_build_stream_response_rewriter,
     normalize_provider_private_report_context, StreamingStandardTerminalObserver,
 };
+use crate::ai_serving::is_openai_responses_family_format;
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
 };
@@ -700,6 +701,84 @@ fn should_replace_stream_usage(
     };
 
     observed.is_more_complete_than(current)
+}
+
+fn stream_terminal_summary_missing_observed_finish(
+    summary: Option<&ExecutionStreamTerminalSummary>,
+) -> bool {
+    summary.is_some_and(|summary| {
+        !summary.observed_finish
+            && !summary
+                .standardized_usage
+                .as_ref()
+                .is_some_and(StandardizedUsage::has_token_signal)
+    })
+}
+
+fn stream_report_context_format_field<'a>(
+    report_context: Option<&'a Value>,
+    field: &str,
+) -> Option<&'a str> {
+    report_context
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn stream_requires_observed_terminal_event(
+    provider_api_format: &str,
+    report_context: Option<&Value>,
+) -> bool {
+    is_openai_responses_family_format(provider_api_format)
+        || [
+            "provider_stream_event_api_format",
+            "provider_stream_api_format",
+            "provider_api_format",
+        ]
+        .into_iter()
+        .filter_map(|field| stream_report_context_format_field(report_context, field))
+        .any(is_openai_responses_family_format)
+}
+
+fn stream_terminal_summary_missing_observed_finish_with_requirement(
+    summary: Option<&ExecutionStreamTerminalSummary>,
+    requires_observed_terminal_event: bool,
+) -> bool {
+    if !requires_observed_terminal_event {
+        return stream_terminal_summary_missing_observed_finish(summary);
+    }
+
+    summary.is_some_and(|summary| !summary.observed_finish)
+}
+
+fn ensure_stream_terminal_summary_for_missing_observed_finish(
+    summary: &mut Option<ExecutionStreamTerminalSummary>,
+    requires_observed_terminal_event: bool,
+) {
+    if !requires_observed_terminal_event {
+        return;
+    }
+
+    let summary = summary.get_or_insert_with(ExecutionStreamTerminalSummary::default);
+    if !summary.observed_finish && summary.parser_error.is_none() {
+        summary.parser_error =
+            Some("execution runtime stream ended before provider terminal event".to_string());
+    }
+}
+
+fn stream_terminal_summary_represents_failure_with_requirement(
+    summary: Option<&ExecutionStreamTerminalSummary>,
+    requires_observed_terminal_event: bool,
+) -> bool {
+    summary.is_some_and(|summary| {
+        summary.parser_error.is_some()
+            || stream_terminal_summary_missing_observed_finish_with_requirement(
+                Some(summary),
+                requires_observed_terminal_event,
+            )
+    })
 }
 
 async fn execute_in_process_stream(
@@ -1476,7 +1555,12 @@ fn stream_chunk_contains_sse_done(chunk: &[u8]) -> bool {
             let line = line.trim();
             if matches!(
                 line,
-                "data: [DONE]" | "event: message_stop" | "event: response.completed"
+                "data: [DONE]"
+                    | "event: message_stop"
+                    | "event: response.completed"
+                    | "event: response.failed"
+                    | "event: response.incomplete"
+                    | "event: error"
             ) {
                 return true;
             }
@@ -1489,7 +1573,14 @@ fn stream_chunk_contains_sse_done(chunk: &[u8]) -> bool {
                         .get("type")
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(|event_type| {
-                            matches!(event_type, "message_stop" | "response.completed")
+                            matches!(
+                                event_type,
+                                "message_stop"
+                                    | "response.completed"
+                                    | "response.failed"
+                                    | "response.incomplete"
+                                    | "error"
+                            )
                         })
                 })
         })
@@ -1507,24 +1598,6 @@ where
         return Ok(Some(frame));
     }
     read_next_frame(lines).await
-}
-
-async fn next_stream_frame_until_downstream_closed<R>(
-    buffered_frames: &mut VecDeque<StreamFrame>,
-    lines: &mut FramedRead<R, LinesCodec>,
-    tx: &mpsc::Sender<Result<Bytes, IoError>>,
-) -> Result<Option<StreamFrame>, GatewayError>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    if let Some(frame) = buffered_frames.pop_front() {
-        return Ok(Some(frame));
-    }
-
-    tokio::select! {
-        frame = read_next_frame(lines) => frame,
-        () = tx.closed() => Ok(None),
-    }
 }
 
 fn should_refresh_stream_usage_telemetry(
@@ -2778,15 +2851,12 @@ async fn execute_stream_from_frame_stream(
                     image_stream_total_timeout.as_mut()
                 {
                     tokio::select! {
-                        result = next_stream_frame_until_downstream_closed(
-                            &mut buffered_frames,
-                            &mut lines,
-                            &tx,
-                        ) => result,
-                        () = tx.closed() => {
+                        biased;
+                        _ = tx.closed(), if client_visible_stream_completed => {
                             downstream_dropped = true;
                             break;
                         }
+                        result = next_stream_frame(&mut buffered_frames, &mut lines) => result,
                         _ = timeout_sleep.as_mut() => {
                             let timeout_ms = openai_image_stream_total_timeout_ms
                                 .unwrap_or(OPENAI_IMAGE_STREAM_DEFAULT_TOTAL_TIMEOUT_MS);
@@ -2837,8 +2907,14 @@ async fn execute_stream_from_frame_stream(
                         }
                     }
                 } else {
-                    next_stream_frame_until_downstream_closed(&mut buffered_frames, &mut lines, &tx)
-                        .await
+                    tokio::select! {
+                        biased;
+                        _ = tx.closed(), if client_visible_stream_completed => {
+                            downstream_dropped = true;
+                            break;
+                        }
+                        result = next_stream_frame(&mut buffered_frames, &mut lines) => result,
+                    }
                 };
                 let next_frame = match next_frame_result {
                     Ok(frame) => frame,
@@ -3034,6 +3110,9 @@ async fn execute_stream_from_frame_stream(
                             u64::try_from(rewritten_chunk.len()).unwrap_or(u64::MAX);
                         let chunk_completed_stream =
                             stream_chunk_contains_sse_done(&rewritten_chunk);
+                        if downstream_dropped {
+                            continue;
+                        }
                         if tx.send(Ok(Bytes::from(rewritten_chunk))).await.is_err() {
                             warn!(
                                 event_name = "stream_execution_downstream_disconnected",
@@ -3041,10 +3120,9 @@ async fn execute_stream_from_frame_stream(
                                 trace_id = %trace_id_owned,
                                 request_id = %request_id_for_report_log,
                                 candidate_id = ?candidate_id_for_report.as_deref(),
-                                "gateway stream downstream dropped; stopping execution runtime stream forwarding"
+                                "gateway stream downstream dropped; continuing to drain execution runtime stream"
                             );
                             downstream_dropped = true;
-                            break;
                         } else {
                             client_visible_stream_completed |= chunk_completed_stream;
                             client_stream_bytes.fetch_add(rewritten_chunk_len, Ordering::Relaxed);
@@ -3110,35 +3188,35 @@ async fn execute_stream_from_frame_stream(
         }
 
         if downstream_dropped {
-            drop(lines);
             debug!(
-                event_name = "execution_runtime_stream_flush_skipped",
+                event_name = "execution_runtime_stream_client_flush_skipped",
                 log_type = "debug",
                 debug_context = "redacted",
                 stream_status = "downstream_disconnected",
                 trace_id = %trace_id_owned,
-                "gateway skipped local stream flush after downstream disconnect"
+                "gateway skipped client stream flush after downstream disconnect"
             );
-        } else {
-            if let Some(normalizer) = private_stream_normalizer.as_mut() {
-                match normalizer.finish() {
-                    Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
-                        let provider_private_error_body_json =
-                            extract_provider_private_stream_error_body(
-                                stream_usage_report_context.as_ref(),
-                                &normalized_chunk,
-                            );
-                        if let (Some(observer), Some(report_context)) = (
-                            stream_usage_observer.as_mut(),
+        }
+        if let Some(normalizer) = private_stream_normalizer.as_mut() {
+            match normalizer.finish() {
+                Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
+                    let provider_private_error_body_json =
+                        extract_provider_private_stream_error_body(
                             stream_usage_report_context.as_ref(),
-                        ) {
-                            observe_stream_usage_bytes(
-                                observer,
-                                report_context,
-                                &mut stream_usage_observer_buffered,
-                                &normalized_chunk,
-                            );
-                        }
+                            &normalized_chunk,
+                        );
+                    if let (Some(observer), Some(report_context)) = (
+                        stream_usage_observer.as_mut(),
+                        stream_usage_report_context.as_ref(),
+                    ) {
+                        observe_stream_usage_bytes(
+                            observer,
+                            report_context,
+                            &mut stream_usage_observer_buffered,
+                            &normalized_chunk,
+                        );
+                    }
+                    if !downstream_dropped {
                         let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut()
                         {
                             match rewriter.push_chunk(&normalized_chunk) {
@@ -3212,83 +3290,82 @@ async fn execute_stream_from_frame_stream(
                             });
                         }
                     }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(
+                        event_name = "stream_execution_normalization_flush_failed",
+                        log_type = "ops",
+                        trace_id = %trace_id_owned,
+                        request_id = %request_id_for_report_log,
+                        candidate_id = ?candidate_id_for_report.as_deref(),
+                        error = ?err,
+                        "gateway failed to flush private stream normalization"
+                    );
+                    terminal_failure.get_or_insert_with(|| {
+                        build_stream_failure_report(
+                            "execution_runtime_stream_rewrite_flush_error",
+                            format!("failed to flush private stream normalization: {err:?}"),
+                            502,
+                        )
+                    });
+                }
+            }
+        }
+        if !downstream_dropped {
+            if let Some(rewriter) = local_stream_rewriter.as_mut() {
+                match rewriter.finish() {
+                    Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
+                        append_stream_capture_bytes(
+                            &mut buffered_body,
+                            &flushed_chunk,
+                            max_stream_body_buffer_bytes,
+                            &mut client_body_truncated,
+                        );
+                        let flushed_chunk_len =
+                            u64::try_from(flushed_chunk.len()).unwrap_or(u64::MAX);
+                        let chunk_completed_stream = stream_chunk_contains_sse_done(&flushed_chunk);
+                        if tx.send(Ok(Bytes::from(flushed_chunk))).await.is_err() {
+                            warn!(
+                                event_name = "stream_execution_downstream_rewrite_flush_disconnected",
+                                log_type = "ops",
+                                trace_id = %trace_id_owned,
+                                request_id = %request_id_for_report_log,
+                            candidate_id = ?candidate_id_for_report.as_deref(),
+                            "gateway stream downstream dropped while flushing local stream rewrite"
+                            );
+                            downstream_dropped = true;
+                        } else {
+                            client_visible_stream_completed |= chunk_completed_stream;
+                            client_stream_bytes.fetch_add(flushed_chunk_len, Ordering::Relaxed);
+                            last_client_chunk_elapsed_ms.store(
+                                stream_started_at_for_report
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                Ordering::Relaxed,
+                            );
+                        }
+                    }
                     Ok(_) => {}
                     Err(err) => {
                         warn!(
-                            event_name = "stream_execution_normalization_flush_failed",
+                            event_name = "stream_execution_rewrite_flush_failed",
                             log_type = "ops",
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
                             error = ?err,
-                            "gateway failed to flush private stream normalization"
+                            "gateway failed to flush local stream rewrite"
                         );
                         terminal_failure.get_or_insert_with(|| {
                             build_stream_failure_report(
                                 "execution_runtime_stream_rewrite_flush_error",
-                                format!("failed to flush private stream normalization: {err:?}"),
+                                format!("failed to flush local stream rewrite: {err:?}"),
                                 502,
                             )
                         });
-                    }
-                }
-            }
-            if !downstream_dropped {
-                if let Some(rewriter) = local_stream_rewriter.as_mut() {
-                    match rewriter.finish() {
-                        Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
-                            append_stream_capture_bytes(
-                                &mut buffered_body,
-                                &flushed_chunk,
-                                max_stream_body_buffer_bytes,
-                                &mut client_body_truncated,
-                            );
-                            let flushed_chunk_len =
-                                u64::try_from(flushed_chunk.len()).unwrap_or(u64::MAX);
-                            let chunk_completed_stream =
-                                stream_chunk_contains_sse_done(&flushed_chunk);
-                            if tx.send(Ok(Bytes::from(flushed_chunk))).await.is_err() {
-                                warn!(
-                                    event_name = "stream_execution_downstream_rewrite_flush_disconnected",
-                                    log_type = "ops",
-                                    trace_id = %trace_id_owned,
-                                    request_id = %request_id_for_report_log,
-                                candidate_id = ?candidate_id_for_report.as_deref(),
-                                "gateway stream downstream dropped while flushing local stream rewrite"
-                                );
-                                downstream_dropped = true;
-                            } else {
-                                client_visible_stream_completed |= chunk_completed_stream;
-                                client_stream_bytes.fetch_add(flushed_chunk_len, Ordering::Relaxed);
-                                last_client_chunk_elapsed_ms.store(
-                                    stream_started_at_for_report
-                                        .elapsed()
-                                        .as_millis()
-                                        .min(u128::from(u64::MAX))
-                                        as u64,
-                                    Ordering::Relaxed,
-                                );
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            warn!(
-                                event_name = "stream_execution_rewrite_flush_failed",
-                                log_type = "ops",
-                                trace_id = %trace_id_owned,
-                                request_id = %request_id_for_report_log,
-                                candidate_id = ?candidate_id_for_report.as_deref(),
-                                error = ?err,
-                                "gateway failed to flush local stream rewrite"
-                            );
-                            terminal_failure.get_or_insert_with(|| {
-                                build_stream_failure_report(
-                                    "execution_runtime_stream_rewrite_flush_error",
-                                    format!("failed to flush local stream rewrite: {err:?}"),
-                                    502,
-                                )
-                            });
-                        }
                     }
                 }
             }
@@ -3466,6 +3543,19 @@ async fn execute_stream_from_frame_stream(
             report_context_owned.as_ref(),
             &mut stream_terminal_summary,
         );
+        let requires_observed_terminal_event = stream_requires_observed_terminal_event(
+            plan_for_report.provider_api_format.as_str(),
+            stream_usage_report_context.as_ref(),
+        );
+        ensure_stream_terminal_summary_for_missing_observed_finish(
+            &mut stream_terminal_summary,
+            requires_observed_terminal_event,
+        );
+        let missing_observed_finish =
+            stream_terminal_summary_missing_observed_finish_with_requirement(
+                stream_terminal_summary.as_ref(),
+                requires_observed_terminal_event,
+            );
 
         let should_submit_report = report_kind_owned.is_some();
         let terminal_telemetry = Some(build_terminal_stream_telemetry(
@@ -3474,6 +3564,18 @@ async fn execute_stream_from_frame_stream(
             usage_stream_telemetry.as_ref(),
             provider_stream_bytes.load(Ordering::Relaxed),
         ));
+        let stream_failed = stream_terminal_summary_represents_failure_with_requirement(
+            stream_terminal_summary.as_ref(),
+            requires_observed_terminal_event,
+        );
+        let stream_terminal_error_message = stream_terminal_summary
+            .as_ref()
+            .and_then(|summary| summary.parser_error.clone())
+            .or_else(|| {
+                missing_observed_finish.then(|| {
+                    "execution runtime stream ended before provider terminal event".to_string()
+                })
+            });
         let usage_payload = build_stream_usage_payload(
             trace_id_owned.clone(),
             report_kind_owned.unwrap_or_default(),
@@ -3487,35 +3589,48 @@ async fn execute_stream_from_frame_stream(
             stream_terminal_summary,
             terminal_telemetry,
         );
-        apply_local_execution_effect(
-            &state_for_report,
-            LocalExecutionEffectContext {
-                plan: &plan_for_report,
-                report_context: usage_payload.report_context.as_ref(),
-            },
-            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
-        )
-        .await;
-        apply_local_execution_effect(
-            &state_for_report,
-            LocalExecutionEffectContext {
-                plan: &plan_for_report,
-                report_context: usage_payload.report_context.as_ref(),
-            },
-            LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
-        )
-        .await;
-        apply_local_execution_effect(
-            &state_for_report,
-            LocalExecutionEffectContext {
-                plan: &plan_for_report,
-                report_context: usage_payload.report_context.as_ref(),
-            },
-            LocalExecutionEffect::PoolSuccessStream {
-                payload: &usage_payload,
-            },
-        )
-        .await;
+        if stream_failed {
+            warn!(
+                event_name = "execution_runtime_stream_missing_terminal_event",
+                log_type = "ops",
+                trace_id = %trace_id_owned,
+                request_id = %request_id_for_report_log,
+                candidate_id = ?candidate_id_for_report.as_deref(),
+                status_code,
+                error_message = stream_terminal_error_message.as_deref().unwrap_or_default(),
+                "gateway stream ended with a failed terminal state"
+            );
+        } else {
+            apply_local_execution_effect(
+                &state_for_report,
+                LocalExecutionEffectContext {
+                    plan: &plan_for_report,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state_for_report,
+                LocalExecutionEffectContext {
+                    plan: &plan_for_report,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state_for_report,
+                LocalExecutionEffectContext {
+                    plan: &plan_for_report,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::PoolSuccessStream {
+                    payload: &usage_payload,
+                },
+            )
+            .await;
+        }
         record_stream_terminal_usage(
             &state_for_report,
             &plan_for_report,
@@ -3528,10 +3643,24 @@ async fn execute_stream_from_frame_stream(
             &plan_for_report,
             usage_payload.report_context.as_ref(),
             SchedulerRequestCandidateStatusUpdate {
-                status: RequestCandidateStatus::Success,
+                status: if stream_failed {
+                    RequestCandidateStatus::Failed
+                } else {
+                    RequestCandidateStatus::Success
+                },
                 status_code: Some(status_code),
-                error_type: None,
-                error_message: None,
+                error_type: if stream_failed {
+                    if missing_observed_finish {
+                        Some("stream_missing_terminal_event".to_string())
+                    } else {
+                        Some("stream_terminal_error".to_string())
+                    }
+                } else {
+                    None
+                },
+                error_message: stream_failed
+                    .then_some(stream_terminal_error_message)
+                    .flatten(),
                 latency_ms: usage_payload
                     .telemetry
                     .as_ref()
@@ -3630,10 +3759,14 @@ mod tests {
     use tokio::sync::{mpsc, watch, Notify};
 
     use super::{
-        build_sse_body_stream, execute_execution_runtime_stream, execute_stream_from_frame_stream,
+        build_sse_body_stream, ensure_stream_terminal_summary_for_missing_observed_finish,
+        execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
         should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
         should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
+        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
+        stream_terminal_summary_missing_observed_finish_with_requirement,
+        stream_terminal_summary_represents_failure_with_requirement,
     };
     use crate::control::GatewayControlDecision;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
@@ -3658,6 +3791,9 @@ mod tests {
         ));
         assert!(stream_chunk_contains_sse_done(
             b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        ));
+        assert!(stream_chunk_contains_sse_done(
+            b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n"
         ));
         assert!(!stream_chunk_contains_sse_done(
             b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
@@ -3717,6 +3853,98 @@ mod tests {
         assert_eq!(merged.response_id.as_deref(), Some("resp_123"));
         assert!(merged.observed_finish);
         assert_eq!(merged.unknown_event_count, 3);
+    }
+
+    #[test]
+    fn detects_missing_observed_finish_only_without_usage_signal() {
+        assert!(stream_terminal_summary_missing_observed_finish(Some(
+            &ExecutionStreamTerminalSummary {
+                response_id: Some("resp_missing_finish".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                observed_finish: false,
+                ..ExecutionStreamTerminalSummary::default()
+            }
+        )));
+
+        let mut usage = StandardizedUsage::new();
+        usage.output_tokens = 12;
+        assert!(!stream_terminal_summary_missing_observed_finish(Some(
+            &ExecutionStreamTerminalSummary {
+                standardized_usage: Some(usage),
+                observed_finish: false,
+                ..ExecutionStreamTerminalSummary::default()
+            }
+        )));
+        assert!(!stream_terminal_summary_missing_observed_finish(Some(
+            &ExecutionStreamTerminalSummary {
+                observed_finish: true,
+                ..ExecutionStreamTerminalSummary::default()
+            }
+        )));
+        assert!(!stream_terminal_summary_missing_observed_finish(None));
+    }
+
+    #[test]
+    fn requires_terminal_event_for_openai_responses_streams() {
+        assert!(stream_requires_observed_terminal_event(
+            "openai:responses",
+            None
+        ));
+        assert!(stream_requires_observed_terminal_event(
+            "openai:responses:compact",
+            None
+        ));
+        assert!(!stream_requires_observed_terminal_event(
+            "openai:chat",
+            None
+        ));
+        assert!(stream_requires_observed_terminal_event(
+            "openai:chat",
+            Some(&json!({
+                "provider_stream_event_api_format": "openai:responses"
+            }))
+        ));
+    }
+
+    #[test]
+    fn synthesizes_missing_terminal_summary_for_openai_responses_empty_stream() {
+        let mut summary = None;
+        ensure_stream_terminal_summary_for_missing_observed_finish(&mut summary, true);
+
+        let summary = summary.expect("summary should be synthesized");
+        assert!(!summary.observed_finish);
+        assert_eq!(
+            summary.parser_error.as_deref(),
+            Some("execution runtime stream ended before provider terminal event")
+        );
+        assert!(
+            stream_terminal_summary_missing_observed_finish_with_requirement(Some(&summary), true)
+        );
+        assert!(stream_terminal_summary_represents_failure_with_requirement(
+            Some(&summary),
+            true
+        ));
+    }
+
+    #[test]
+    fn terminal_required_stream_fails_even_with_usage_without_finish() {
+        let mut usage = StandardizedUsage::new();
+        usage.output_tokens = 12;
+        let mut summary = Some(ExecutionStreamTerminalSummary {
+            standardized_usage: Some(usage),
+            observed_finish: false,
+            ..ExecutionStreamTerminalSummary::default()
+        });
+
+        ensure_stream_terminal_summary_for_missing_observed_finish(&mut summary, true);
+        let summary = summary.as_ref().expect("summary should remain present");
+        assert!(
+            stream_terminal_summary_missing_observed_finish_with_requirement(Some(summary), true)
+        );
+        assert!(stream_terminal_summary_represents_failure_with_requirement(
+            Some(summary),
+            true
+        ));
     }
 
     #[test]
@@ -4830,7 +5058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_stream_from_frame_stream_stops_upstream_when_client_drops_body() {
+    async fn execute_stream_from_frame_stream_drains_upstream_when_client_drops_body() {
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
         let state = AppState::new()
@@ -4873,24 +5101,22 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
-        let frame_stream_dropped = Arc::new(Notify::new());
-        let frame_stream_dropped_for_stream = Arc::clone(&frame_stream_dropped);
+        let release_terminal = Arc::new(Notify::new());
+        let terminal_frame_drained = Arc::new(Notify::new());
+        let release_terminal_for_stream = Arc::clone(&release_terminal);
+        let terminal_frame_drained_for_stream = Arc::clone(&terminal_frame_drained);
         let frame_stream = stream! {
-            struct NotifyOnDrop(Arc<Notify>);
-            impl Drop for NotifyOnDrop {
-                fn drop(&mut self) {
-                    self.0.notify_waiters();
-                }
-            }
-
-            let _drop_guard = NotifyOnDrop(frame_stream_dropped_for_stream);
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
             ));
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"first\\\"}\\n\\n\"}}\n",
             ));
-            std::future::pending::<()>().await;
+            release_terminal_for_stream.notified().await;
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"terminal\\\",\\\"object\\\":\\\"chat.completion.chunk\\\",\\\"model\\\":\\\"gpt-5.4\\\",\\\"choices\\\":[{\\\"index\\\":0,\\\"delta\\\":{},\\\"finish_reason\\\":\\\"stop\\\"}],\\\"usage\\\":{\\\"prompt_tokens\\\":7,\\\"completion_tokens\\\":11,\\\"total_tokens\\\":18}}\\n\\ndata: [DONE]\\n\\n\"}}\n",
+            ));
+            terminal_frame_drained_for_stream.notify_one();
         }
         .boxed();
 
@@ -4936,10 +5162,11 @@ mod tests {
         assert_eq!(first.as_ref(), b"data: {\"id\":\"first\"}\n\n");
         tokio::time::sleep(Duration::from_millis(30)).await;
         drop(body_stream);
+        release_terminal.notify_one();
 
-        tokio::time::timeout(Duration::from_secs(1), frame_stream_dropped.notified())
+        tokio::time::timeout(Duration::from_secs(1), terminal_frame_drained.notified())
             .await
-            .expect("upstream frame stream should be dropped after client disconnect");
+            .expect("upstream frame stream should be drained after client disconnect");
         let candidates = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let candidates = request_candidate_repository
@@ -4982,6 +5209,9 @@ mod tests {
         .expect("usage should be marked cancelled");
         assert_eq!(stored_usage.billing_status, "pending");
         assert_eq!(stored_usage.status_code, Some(499));
+        assert_eq!(stored_usage.input_tokens, 7);
+        assert_eq!(stored_usage.output_tokens, 11);
+        assert_eq!(stored_usage.total_tokens, 18);
         let first_byte_time_ms = stored_usage
             .first_byte_time_ms
             .expect("cancelled stream should retain first byte time");

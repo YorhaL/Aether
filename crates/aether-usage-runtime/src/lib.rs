@@ -27,9 +27,9 @@ pub use report::{
     infer_internal_finalize_signature, is_local_ai_stream_report_kind,
     is_local_ai_sync_report_kind, normalize_gemini_file_name, report_request_id,
     resolve_internal_finalize_route, should_handle_local_stream_report,
-    should_handle_local_sync_report, sync_report_represents_failure, GatewayStreamReportRequest,
-    GatewaySyncReportRequest, GeminiFileMappingEntry, InternalFinalizeRoute,
-    GEMINI_FILE_MAPPING_TTL_SECONDS,
+    should_handle_local_sync_report, stream_report_represents_failure,
+    sync_report_represents_failure, GatewayStreamReportRequest, GatewaySyncReportRequest,
+    GeminiFileMappingEntry, InternalFinalizeRoute, GEMINI_FILE_MAPPING_TTL_SECONDS,
 };
 pub use report_context::{
     build_locally_actionable_report_context_from_request_candidate,

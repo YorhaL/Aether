@@ -292,6 +292,24 @@ pub fn sync_report_represents_failure(
             .is_some_and(|value| !value.is_null())
 }
 
+fn stream_terminal_summary_represents_failure(summary: &ExecutionStreamTerminalSummary) -> bool {
+    summary.parser_error.is_some()
+        || (!summary.observed_finish
+            && !summary
+                .standardized_usage
+                .as_ref()
+                .is_some_and(aether_contracts::StandardizedUsage::has_token_signal))
+}
+
+pub fn stream_report_represents_failure(payload: &GatewayStreamReportRequest) -> bool {
+    payload.status_code >= 400
+        || payload.report_kind.contains("error")
+        || payload
+            .terminal_summary
+            .as_ref()
+            .is_some_and(stream_terminal_summary_represents_failure)
+}
+
 pub fn should_handle_local_sync_report(
     report_context: Option<&serde_json::Value>,
     report_kind: &str,
@@ -373,6 +391,7 @@ fn content_type_starts_with(headers: &BTreeMap<String, String>, expected_prefix:
 mod tests {
     use std::collections::BTreeMap;
 
+    use aether_contracts::ExecutionStreamTerminalSummary;
     use base64::Engine as _;
     use serde_json::json;
 
@@ -381,7 +400,8 @@ mod tests {
         infer_internal_finalize_signature, is_local_ai_stream_report_kind,
         is_local_ai_sync_report_kind, normalize_gemini_file_name, report_request_id,
         resolve_internal_finalize_route, should_handle_local_stream_report,
-        should_handle_local_sync_report, sync_report_represents_failure, GatewaySyncReportRequest,
+        should_handle_local_sync_report, stream_report_represents_failure,
+        sync_report_represents_failure, GatewayStreamReportRequest, GatewaySyncReportRequest,
         GeminiFileMappingEntry, InternalFinalizeRoute,
     };
 
@@ -412,6 +432,22 @@ mod tests {
             body_json: None,
             client_body_json: None,
             body_base64: None,
+            telemetry: None,
+        }
+    }
+
+    fn sample_stream_report(report_kind: &str, status_code: u16) -> GatewayStreamReportRequest {
+        GatewayStreamReportRequest {
+            trace_id: "trace-stream-123".to_string(),
+            report_kind: report_kind.to_string(),
+            report_context: None,
+            status_code,
+            headers: BTreeMap::new(),
+            provider_body_base64: None,
+            provider_body_state: None,
+            client_body_base64: None,
+            client_body_state: None,
+            terminal_summary: None,
             telemetry: None,
         }
     }
@@ -479,6 +515,18 @@ mod tests {
 
         let success_payload = sample_sync_report("openai_chat_sync_success", 200);
         assert!(!sync_report_represents_failure(&success_payload, None));
+    }
+
+    #[test]
+    fn detects_stream_report_failure_from_terminal_summary_error() {
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.terminal_summary = Some(ExecutionStreamTerminalSummary {
+            observed_finish: true,
+            parser_error: Some("policy failure".to_string()),
+            ..ExecutionStreamTerminalSummary::default()
+        });
+
+        assert!(stream_report_represents_failure(&payload));
     }
 
     #[test]

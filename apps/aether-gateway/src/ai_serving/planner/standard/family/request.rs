@@ -65,6 +65,134 @@ fn is_grok_text_provider_api_format(provider_api_format: &str) -> bool {
     )
 }
 
+fn provider_preserves_claude_thinking_signatures(provider_type: &str, base_url: &str) -> bool {
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    let base_url = base_url.trim().to_ascii_lowercase();
+    let is_bedrock_runtime_url = base_url.contains("bedrock-runtime")
+        && (base_url.contains("amazonaws.com")
+            || base_url.contains("amazonaws.com.cn")
+            || base_url.contains("api.aws"));
+    matches!(
+        provider_type.as_str(),
+        "anthropic" | "claude_code" | "bedrock" | "aws_bedrock" | "amazon_bedrock"
+    ) || base_url.contains("api.anthropic.com")
+        || is_bedrock_runtime_url
+}
+
+fn sanitize_claude_thinking_block(block: Value) -> (Option<Value>, bool) {
+    let Some(object) = block.as_object() else {
+        return (Some(block), false);
+    };
+    let block_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+
+    match block_type {
+        "thinking" => {
+            let thinking_text = object
+                .get("thinking")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if thinking_text.is_empty() {
+                (None, true)
+            } else {
+                (
+                    Some(serde_json::json!({
+                        "type": "text",
+                        "text": thinking_text,
+                    })),
+                    true,
+                )
+            }
+        }
+        "redacted_thinking" => (None, true),
+        _ => (Some(block), false),
+    }
+}
+
+fn sanitize_claude_message_content_for_non_native_thinking(content: &mut Value) -> bool {
+    const OMITTED_THINKING_TEXT: &str = "Previous thinking omitted.";
+
+    if content.is_object() {
+        let original = std::mem::take(content);
+        let (sanitized, changed) = sanitize_claude_thinking_block(original);
+        if changed {
+            *content = sanitized.unwrap_or_else(|| {
+                serde_json::json!({
+                    "type": "text",
+                    "text": OMITTED_THINKING_TEXT,
+                })
+            });
+        }
+        return changed;
+    }
+
+    let Some(blocks) = content.as_array_mut() else {
+        return false;
+    };
+    let original_blocks = std::mem::take(blocks);
+    let mut changed = false;
+    let mut sanitized_blocks = Vec::with_capacity(original_blocks.len());
+    for block in original_blocks {
+        let (sanitized, block_changed) = sanitize_claude_thinking_block(block);
+        changed |= block_changed;
+        if let Some(sanitized) = sanitized {
+            sanitized_blocks.push(sanitized);
+        }
+    }
+    if changed && sanitized_blocks.is_empty() {
+        sanitized_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": OMITTED_THINKING_TEXT,
+        }));
+    }
+    *blocks = sanitized_blocks;
+    changed
+}
+
+fn sanitize_claude_request_thinking_signatures_for_non_native(body_json: &mut Value) -> bool {
+    body_json
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .map(|messages| {
+            messages.iter_mut().fold(false, |changed, message| {
+                let is_assistant = message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| role.trim().eq_ignore_ascii_case("assistant"));
+                if !is_assistant {
+                    return changed;
+                }
+                let content_changed = message
+                    .get_mut("content")
+                    .is_some_and(sanitize_claude_message_content_for_non_native_thinking);
+                changed || content_changed
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn apply_non_native_claude_thinking_signature_compat(
+    provider_request_body: &mut Value,
+    provider_api_format: &str,
+    transport: &GatewayProviderTransportSnapshot,
+) {
+    if crate::ai_serving::normalize_api_format_alias(provider_api_format) != "claude:messages" {
+        return;
+    }
+    if provider_preserves_claude_thinking_signatures(
+        transport.provider.provider_type.as_str(),
+        transport.endpoint.base_url.as_str(),
+    ) {
+        return;
+    }
+
+    let _ = sanitize_claude_request_thinking_signatures_for_non_native(provider_request_body);
+}
+
 pub(crate) async fn resolve_local_standard_candidate_payload_parts(
     state: &AppState,
     parts: &http::request::Parts,
@@ -390,6 +518,11 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         .await;
         return None;
     }
+    apply_non_native_claude_thinking_signature_compat(
+        &mut provider_request_body,
+        provider_api_format,
+        transport,
+    );
     if let Some(mapping) =
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
             state,
@@ -433,6 +566,11 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             .await;
             return None;
         }
+        apply_non_native_claude_thinking_signature_compat(
+            &mut provider_request_body,
+            provider_api_format,
+            transport,
+        );
     }
 
     if let Some(kiro_auth) = kiro_auth.as_ref() {
@@ -942,4 +1080,96 @@ async fn build_kiro_cross_format_payload_parts(
         transport: Arc::clone(transport),
         transport_profile: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        provider_preserves_claude_thinking_signatures,
+        sanitize_claude_request_thinking_signatures_for_non_native,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn sanitizes_historical_claude_thinking_for_non_native_relays() {
+        let mut body = json!({
+            "model": "claude-opus-4-1",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "I should keep this short.",
+                        "signature": "sig_123"
+                    },
+                    {
+                        "type": "redacted_thinking",
+                        "data": "opaque"
+                    },
+                    {
+                        "type": "text",
+                        "text": "Done."
+                    }
+                ]
+            }]
+        });
+
+        assert!(sanitize_claude_request_thinking_signatures_for_non_native(
+            &mut body
+        ));
+        assert_eq!(body["messages"][0]["content"][0]["type"], json!("text"));
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            json!("I should keep this short.")
+        );
+        assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][0]["content"][1]["text"], json!("Done."));
+    }
+
+    #[test]
+    fn inserts_placeholder_when_only_redacted_thinking_would_remain() {
+        let mut body = json!({
+            "model": "claude-opus-4-1",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "redacted_thinking",
+                    "data": "opaque"
+                }]
+            }]
+        });
+
+        assert!(sanitize_claude_request_thinking_signatures_for_non_native(
+            &mut body
+        ));
+        assert_eq!(body["messages"][0]["content"][0]["type"], json!("text"));
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            json!("Previous thinking omitted.")
+        );
+    }
+
+    #[test]
+    fn official_claude_providers_preserve_thinking_signatures() {
+        assert!(provider_preserves_claude_thinking_signatures(
+            "anthropic",
+            "https://relay.example.com"
+        ));
+        assert!(provider_preserves_claude_thinking_signatures(
+            "custom",
+            "https://api.anthropic.com"
+        ));
+        assert!(provider_preserves_claude_thinking_signatures(
+            "aws",
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+        ));
+        assert!(provider_preserves_claude_thinking_signatures(
+            "amazon_bedrock",
+            "https://relay.example.com"
+        ));
+        assert!(!provider_preserves_claude_thinking_signatures(
+            "openai",
+            "https://relay.example.com"
+        ));
+    }
 }
