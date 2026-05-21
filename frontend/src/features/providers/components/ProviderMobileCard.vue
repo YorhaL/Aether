@@ -93,7 +93,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7"
-          title="配置用量查询"
+          title="扩展操作配置"
           @click="$emit('openOpsConfig', provider)"
         >
           <KeyRound class="h-3.5 w-3.5" />
@@ -125,9 +125,17 @@
       >
         {{ formatBillingType(provider.billing_type || 'pay_as_you_go') }}
       </Badge>
+      <!-- 余额加载中 -->
+      <span
+        v-if="provider.ops_configured && isBalanceLoading(provider.id)"
+        class="text-muted-foreground flex items-center gap-1"
+      >
+        <Loader2 class="h-3 w-3 animate-spin" />
+        加载中...
+      </span>
       <!-- 余额（从上游 API 查询） -->
       <span
-        v-if="provider.ops_configured && getProviderBalance(provider.id)"
+        v-else-if="provider.ops_configured && getProviderBalance(provider.id)"
         class="text-muted-foreground"
       >
         余额 <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(getProviderBalance(provider.id)) }}</span>
@@ -148,29 +156,6 @@
           class="ml-1 text-destructive/70"
           :title="getProviderCheckin(provider.id)?.message"
         >签到失败</span>
-      </span>
-      <!-- 保存到 Key 的手动余额查询摘要 -->
-      <span
-        v-else-if="getSavedKeyBalance(provider)"
-        class="text-muted-foreground inline-flex items-center gap-1"
-        :title="getSavedKeyBalanceTitle(provider)"
-      >
-        <WalletCards class="h-3 w-3 text-primary" />
-        余额
-        <span class="font-semibold text-foreground/90">
-          {{ formatKeyBalanceAmount(getSavedKeyBalance(provider)?.total_available, getSavedKeyBalance(provider)?.currency || 'USD') }}
-        </span>
-        <span class="text-muted-foreground/70">
-          {{ keyBalanceTemplateLabel(getSavedKeyBalance(provider)?.architecture_id) }} · {{ formatKeyBalanceUpdatedAt(getSavedKeyBalance(provider)?.updated_at) }}
-        </span>
-      </span>
-      <!-- 余额加载中 -->
-      <span
-        v-else-if="provider.ops_configured && isBalanceLoading(provider.id)"
-        class="text-muted-foreground flex items-center gap-1"
-      >
-        <Loader2 class="h-3 w-3 animate-spin" />
-        加载中...
       </span>
       <!-- 余额查询失败时显示错误 -->
       <span
@@ -248,20 +233,13 @@ import {
   Check,
   X,
   Loader2,
-  WalletCards,
 } from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
-import { type ProviderKeyBalanceSummary, type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
+import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
 import { formatBillingType } from '@/utils/format'
 import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
 import { isKeyManagedProviderType } from '../utils/providerTypeUtils'
-import {
-  formatKeyBalanceAmount,
-  formatKeyBalanceUpdatedAt,
-  hasKeyBalanceSummary,
-  keyBalanceTemplateLabel,
-} from '@/features/providers/utils/keyBalanceSummary'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
@@ -328,20 +306,5 @@ function handleDescriptionKeydown(event: KeyboardEvent) {
 
 function getCredentialLabel(provider: ProviderWithEndpointsSummary): '账号' | '密钥' {
   return isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号'
-}
-
-function getSavedKeyBalance(provider: ProviderWithEndpointsSummary): ProviderKeyBalanceSummary | null {
-  return hasKeyBalanceSummary(provider.key_balance_summary) ? provider.key_balance_summary : null
-}
-
-function getSavedKeyBalanceTitle(provider: ProviderWithEndpointsSummary): string {
-  const summary = getSavedKeyBalance(provider)
-  if (!summary) return ''
-  const parts = [
-    summary.key_name ? `Key: ${summary.key_name}` : null,
-    keyBalanceTemplateLabel(summary.architecture_id),
-    formatKeyBalanceUpdatedAt(summary.updated_at),
-  ].filter(Boolean)
-  return parts.join(' · ')
 }
 </script>

@@ -32,68 +32,6 @@ pub(super) fn admin_provider_ops_is_valid_action_type(action_type: &str) -> bool
     )
 }
 
-pub(crate) fn admin_provider_ops_saved_connector_credentials(
-    state: &AdminAppState<'_>,
-    provider: &StoredProviderCatalogProvider,
-) -> serde_json::Map<String, serde_json::Value> {
-    admin_provider_ops_decrypted_credentials(
-        state,
-        admin_provider_ops_config_object(provider)
-            .and_then(admin_provider_ops_connector_object)
-            .and_then(|connector| connector.get("credentials")),
-    )
-}
-
-pub(crate) async fn admin_provider_ops_query_balance_response_for_credentials(
-    state: &AdminAppState<'_>,
-    provider_id: &str,
-    provider: &StoredProviderCatalogProvider,
-    architecture_id: &str,
-    base_url: &str,
-    provider_ops_config: &serde_json::Map<String, serde_json::Value>,
-    connector_config: &serde_json::Map<String, serde_json::Value>,
-    credentials: &serde_json::Map<String, serde_json::Value>,
-    request_config: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> serde_json::Value {
-    let architecture_id = normalize_architecture_id(architecture_id);
-    let Some(architecture) = get_architecture(architecture_id) else {
-        return responses::admin_provider_ops_action_not_supported(
-            "query_balance",
-            ADMIN_PROVIDER_OPS_ACTION_RUST_ONLY_MESSAGE,
-        );
-    };
-    let headers = match build_headers(architecture.architecture_id, connector_config, credentials) {
-        Ok(headers) => headers,
-        Err(message) => {
-            return responses::admin_provider_ops_action_not_configured("query_balance", message);
-        }
-    };
-    let Some(action_config) = resolve_action_config(
-        architecture_id,
-        provider_ops_config,
-        "query_balance",
-        request_config,
-    ) else {
-        return responses::admin_provider_ops_action_not_supported(
-            "query_balance",
-            ADMIN_PROVIDER_OPS_ACTION_RUST_ONLY_MESSAGE,
-        );
-    };
-
-    query_balance::admin_provider_ops_run_query_balance_action(
-        state,
-        provider_id,
-        provider,
-        &architecture,
-        base_url,
-        &action_config,
-        &headers,
-        credentials,
-        None,
-    )
-    .await
-}
-
 pub(crate) async fn admin_provider_ops_local_action_response(
     state: &AdminAppState<'_>,
     provider_id: &str,

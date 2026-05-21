@@ -4,8 +4,7 @@ pub mod config;
 pub mod verify;
 
 pub use self::actions::{
-    attach_balance_checkin_outcome, parse_query_balance_payload,
-    parse_sub2api_api_key_usage_payload, parse_sub2api_balance_payload,
+    attach_balance_checkin_outcome, parse_query_balance_payload, parse_sub2api_balance_payload,
     parse_yescode_combined_balance_payload, ProviderOpsCheckinOutcome,
 };
 pub use self::architectures::{

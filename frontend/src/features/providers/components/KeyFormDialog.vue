@@ -70,36 +70,14 @@
             />
           </template>
           <template v-else>
-            <div class="flex gap-2">
-              <div class="min-w-0 flex-1">
-                <Input
-                  :id="apiKeyInputId"
-                  v-model="form.api_key"
-                  :name="apiKeyFieldName"
-                  masked
-                  :required="false"
-                  :placeholder="editingKey ? editingKey.api_key_masked : authSecretPlaceholder"
-                />
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                class="h-11 shrink-0 gap-1.5 px-3"
-                :disabled="!canQueryBalance"
-                title="查询当前密钥的上游余额"
-                @click="handleQueryBalance"
-              >
-                <Loader2
-                  v-if="balanceLoading"
-                  class="h-3.5 w-3.5 animate-spin"
-                />
-                <WalletCards
-                  v-else
-                  class="h-3.5 w-3.5"
-                />
-                <span>查询余额</span>
-              </Button>
-            </div>
+            <Input
+              :id="apiKeyInputId"
+              v-model="form.api_key"
+              :name="apiKeyFieldName"
+              masked
+              :required="false"
+              :placeholder="editingKey ? editingKey.api_key_masked : authSecretPlaceholder"
+            />
           </template>
           <p
             v-if="editingKey && isRawSecretAuthType(form.auth_type)"
@@ -376,487 +354,6 @@
       </Button>
     </template>
   </Dialog>
-
-  <Dialog
-    :model-value="balanceQueryDialogOpen"
-    title="查询余额"
-    description="选择上游余额接口模板"
-    :icon="WalletCards"
-    size="lg"
-    :z-index="90"
-    @update:model-value="balanceQueryDialogOpen = $event"
-  >
-    <div class="space-y-4">
-      <div class="grid grid-cols-3 gap-1 rounded-md border border-border bg-muted/30 p-1">
-        <button
-          v-for="option in balanceQueryTemplateOptions"
-          :key="option.value"
-          type="button"
-          class="min-w-0 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors"
-          :class="balanceQueryTemplate === option.value
-            ? 'bg-background text-foreground shadow-sm'
-            : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'"
-          @click="balanceQueryTemplate = option.value"
-        >
-          {{ option.label }}
-        </button>
-      </div>
-
-      <div class="rounded-md border border-border bg-background px-3 py-3">
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-foreground">
-              {{ selectedBalanceQueryTemplate.title }}
-            </div>
-            <div class="mt-1 text-xs leading-5 text-muted-foreground">
-              {{ selectedBalanceQueryTemplate.description }}
-            </div>
-          </div>
-          <span class="shrink-0 rounded-sm bg-primary/10 px-2 py-1 text-xs text-primary">
-            {{ selectedBalanceQueryTemplate.badge }}
-          </span>
-        </div>
-
-        <div
-          v-if="balanceQueryTemplate === 'new_api'"
-          class="mt-3 space-y-3"
-        >
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <Label
-                for="balance-newapi-base-url"
-                class="text-xs"
-              >站点地址</Label>
-              <Input
-                id="balance-newapi-base-url"
-                v-model="newApiBalanceQuery.base_url"
-                placeholder="留空使用当前 Provider 的 base_url"
-                class="h-8 text-sm"
-              />
-            </div>
-            <div>
-              <Label
-                for="balance-newapi-user-id"
-                class="text-xs"
-              >用户 ID</Label>
-              <Input
-                id="balance-newapi-user-id"
-                v-model="newApiBalanceQuery.user_id"
-                placeholder="可选，对应 New-Api-User"
-                class="h-8 text-sm"
-              />
-            </div>
-          </div>
-          <div>
-            <Label
-              for="balance-newapi-token"
-              class="text-xs"
-            >余额查询访问令牌</Label>
-            <Input
-              id="balance-newapi-token"
-              v-model="newApiBalanceQuery.access_token"
-              masked
-              :placeholder="hasSavedBalanceSecret ? '留空使用已保存的余额查询凭据' : '来自 NewAPI 个人安全设置的访问令牌'"
-              class="h-8 text-sm"
-            />
-            <p class="mt-1 text-xs leading-5 text-muted-foreground">
-              单独用于余额查询；开启下方保存后会加密保存，不会替换当前模型 Key。
-            </p>
-          </div>
-          <div class="grid grid-cols-2 gap-2 text-xs">
-            <div class="rounded-sm border border-border/70 px-2.5 py-2">
-              <div class="text-muted-foreground">
-                接口
-              </div>
-              <div class="mt-1 font-mono text-foreground">
-                GET /api/user/self
-              </div>
-            </div>
-            <div class="rounded-sm border border-border/70 px-2.5 py-2">
-              <div class="text-muted-foreground">
-                额度换算
-              </div>
-              <div class="mt-1 font-mono text-foreground">
-                quota / 500000
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div
-          v-else-if="balanceQueryTemplate === 'sub2api'"
-          class="mt-3 space-y-3"
-        >
-          <div>
-            <Label
-              for="balance-sub2api-base-url"
-              class="text-xs"
-            >站点地址</Label>
-            <Input
-              id="balance-sub2api-base-url"
-              v-model="sub2ApiBalanceQuery.base_url"
-              placeholder="留空使用当前 Provider 的 base_url"
-              class="h-8 text-sm"
-            />
-          </div>
-          <div>
-            <Label
-              for="balance-sub2api-token"
-              class="text-xs"
-            >查询凭据</Label>
-            <Input
-              id="balance-sub2api-token"
-              v-model="sub2ApiBalanceQuery.token"
-              masked
-              placeholder="留空使用外层 API 密钥"
-              class="h-8 text-sm"
-            />
-            <p class="mt-1 text-xs leading-5 text-muted-foreground">
-              使用 Sub2API 的 API Key 请求 /v1/usage；通常留空即可使用当前 Key 查询。
-            </p>
-          </div>
-          <div class="text-xs">
-            <div class="rounded-sm border border-border/70 px-2.5 py-2">
-              <div class="text-muted-foreground">
-                接口
-              </div>
-              <div class="mt-1 font-mono text-foreground">
-                GET /v1/usage
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div
-          v-else
-          class="mt-3 space-y-3"
-        >
-          <div>
-            <Label
-              for="balance-custom-base-url"
-              class="text-xs"
-            >站点地址</Label>
-            <Input
-              id="balance-custom-base-url"
-              v-model="customBalanceQuery.base_url"
-              placeholder="留空使用当前 Provider 的 base_url"
-              class="h-8 text-sm"
-            />
-          </div>
-          <div>
-            <Label
-              for="balance-custom-api-key"
-              class="text-xs"
-            >认证凭据</Label>
-            <Input
-              id="balance-custom-api-key"
-              v-model="customBalanceQuery.api_key"
-              masked
-              placeholder="留空使用外层 API 密钥或已保存密钥"
-              class="h-8 text-sm"
-            />
-          </div>
-          <div class="grid grid-cols-[1fr_auto] gap-2">
-            <div>
-              <Label
-                for="balance-custom-endpoint"
-                class="text-xs"
-              >查询路径</Label>
-              <Input
-                id="balance-custom-endpoint"
-                v-model="customBalanceQuery.endpoint"
-                placeholder="/api/user/self"
-                class="h-8 font-mono text-sm"
-              />
-            </div>
-            <div>
-              <Label class="text-xs">方法</Label>
-              <div class="grid h-8 grid-cols-2 gap-1 rounded-md border border-border bg-muted/30 p-0.5">
-                <button
-                  v-for="method in balanceQueryMethods"
-                  :key="method"
-                  type="button"
-                  class="rounded-sm px-2 text-xs font-medium transition-colors"
-                  :class="customBalanceQuery.method === method
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'"
-                  @click="customBalanceQuery.method = method"
-                >
-                  {{ method }}
-                </button>
-              </div>
-            </div>
-          </div>
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <Label
-                for="balance-custom-currency"
-                class="text-xs"
-              >货币单位</Label>
-              <Input
-                id="balance-custom-currency"
-                v-model="customBalanceQuery.currency"
-                placeholder="USD"
-                class="h-8 text-sm"
-              />
-            </div>
-            <div>
-              <Label
-                for="balance-custom-divisor"
-                class="text-xs"
-              >额度除数</Label>
-              <Input
-                id="balance-custom-divisor"
-                v-model.number="customBalanceQuery.quota_divisor"
-                type="number"
-                min="1"
-                class="h-8 text-sm"
-              />
-            </div>
-          </div>
-          <div class="grid grid-cols-3 gap-2">
-            <div>
-              <Label
-                for="balance-custom-balance-path"
-                class="text-xs"
-              >余额字段</Label>
-              <Input
-                id="balance-custom-balance-path"
-                v-model="customBalanceQuery.balance_path"
-                placeholder="data.quota"
-                class="h-8 font-mono text-sm"
-              />
-            </div>
-            <div>
-              <Label
-                for="balance-custom-used-path"
-                class="text-xs"
-              >已用字段</Label>
-              <Input
-                id="balance-custom-used-path"
-                v-model="customBalanceQuery.used_path"
-                placeholder="data.used_quota"
-                class="h-8 font-mono text-sm"
-              />
-            </div>
-            <div>
-              <Label
-                for="balance-custom-granted-path"
-                class="text-xs"
-              >总额字段</Label>
-              <Input
-                id="balance-custom-granted-path"
-                v-model="customBalanceQuery.granted_path"
-                placeholder="可留空自动计算"
-                class="h-8 font-mono text-sm"
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
-        <div>
-          <div class="text-sm font-medium text-foreground">
-            查询成功后保存到当前 Key
-          </div>
-          <div class="mt-0.5 text-xs text-muted-foreground">
-            {{ balanceSaveDescription }}
-          </div>
-        </div>
-        <Switch
-          :model-value="saveBalanceResult"
-          :disabled="!canSaveBalanceResultToKey"
-          @update:model-value="setSaveBalanceResult"
-        />
-      </div>
-      <div
-        v-if="canConfigureBalanceSecretSave"
-        class="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2"
-        :class="!saveBalanceResult ? 'opacity-60' : ''"
-      >
-        <div>
-          <div class="text-sm font-medium text-foreground">
-            保存余额查询凭据
-          </div>
-          <div class="mt-0.5 text-xs text-muted-foreground">
-            {{ balanceSecretSaveDescription }}
-            <span v-if="hasSavedBalanceSecretForSelectedQuery">已保存过，可留空继续沿用。</span>
-          </div>
-        </div>
-        <Switch
-          :model-value="saveBalanceSecret"
-          :disabled="!saveBalanceResult"
-          @update:model-value="saveBalanceSecret = $event"
-        />
-      </div>
-      <div class="grid grid-cols-[1fr_auto] items-end gap-3 rounded-md border border-border bg-background px-3 py-2">
-        <div>
-          <Label
-            for="balance-auto-refresh-interval"
-            class="text-xs"
-          >自动查询间隔</Label>
-          <p class="mt-1 text-xs leading-5 text-muted-foreground">
-            保存到当前 Key 后生效，后台页面打开时会自动静默刷新；填 0 表示关闭。
-          </p>
-        </div>
-        <div class="w-32">
-          <Input
-            id="balance-auto-refresh-interval"
-            :model-value="balanceAutoRefreshIntervalMinutes"
-            type="number"
-            min="0"
-            max="10080"
-            class="h-8 text-sm"
-            :disabled="!saveBalanceResult"
-            @update:model-value="setBalanceAutoRefreshInterval"
-          />
-          <div class="mt-1 text-[10px] text-muted-foreground">
-            分钟
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <template #footer>
-      <div class="flex w-full items-center justify-end gap-2">
-        <Button
-          variant="outline"
-          @click="balanceQueryDialogOpen = false"
-        >
-          取消
-        </Button>
-        <Button
-          :disabled="!canConfirmBalanceQuery"
-          @click="confirmBalanceQuery"
-        >
-          {{ balanceLoading ? '查询中...' : '开始查询' }}
-        </Button>
-      </div>
-    </template>
-  </Dialog>
-
-  <Dialog
-    :model-value="balanceDialogOpen"
-    title="余额查询结果"
-    description="当前密钥的上游账户余额"
-    :icon="WalletCards"
-    size="sm"
-    :z-index="90"
-    @update:model-value="balanceDialogOpen = $event"
-  >
-    <div class="space-y-3">
-      <div
-        v-if="balanceLoading"
-        class="flex items-center justify-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-6 text-sm text-muted-foreground"
-      >
-        <Loader2 class="h-4 w-4 animate-spin" />
-        查询中...
-      </div>
-
-      <div
-        v-else-if="balanceError"
-        class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive"
-      >
-        {{ balanceError }}
-      </div>
-
-      <template v-else-if="balanceResult">
-        <div
-          v-if="balanceResult.saved_to_key"
-          class="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-700 dark:text-emerald-300"
-        >
-          查询结果已保存到当前 Key，列表会显示最新余额摘要。
-        </div>
-
-        <div
-          v-else-if="balanceResultPendingSave"
-          class="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-700 dark:text-emerald-300"
-        >
-          查询成功。保存 Key 后会自动写入余额摘要、查询模板和自动查询间隔。
-        </div>
-
-        <div
-          v-else-if="balanceResult.save_message"
-          class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-sm text-foreground"
-        >
-          {{ balanceResult.save_message }}
-        </div>
-
-        <div
-          v-if="balanceResult.status !== 'success'"
-          class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-sm text-foreground"
-        >
-          {{ balanceResult.message || balanceStatusText(balanceResult.status) }}
-        </div>
-
-        <template v-else-if="balanceData">
-          <div class="rounded-md border border-border bg-muted/30 px-3 py-3">
-            <div class="text-xs text-muted-foreground">
-              可用余额
-            </div>
-            <div class="mt-1 text-2xl font-semibold text-foreground">
-              {{ formatBalanceAmount(balanceData.total_available, balanceData.currency) }}
-            </div>
-          </div>
-
-          <div class="grid grid-cols-2 gap-2">
-            <div class="rounded-md border border-border/70 px-3 py-2">
-              <div class="text-xs text-muted-foreground">
-                已用额度
-              </div>
-              <div class="mt-1 text-sm font-medium text-foreground">
-                {{ formatBalanceAmount(balanceData.total_used, balanceData.currency) }}
-              </div>
-            </div>
-            <div class="rounded-md border border-border/70 px-3 py-2">
-              <div class="text-xs text-muted-foreground">
-                授予额度
-              </div>
-              <div class="mt-1 text-sm font-medium text-foreground">
-                {{ formatBalanceAmount(balanceData.total_granted, balanceData.currency) }}
-              </div>
-            </div>
-          </div>
-
-          <div
-            v-if="balanceExtraRows.length > 0"
-            class="rounded-md border border-border/70 px-3 py-2"
-          >
-            <div class="text-xs text-muted-foreground">
-              明细
-            </div>
-            <div class="mt-2 space-y-1.5 text-sm">
-              <div
-                v-for="row in balanceExtraRows"
-                :key="row.label"
-                class="flex items-center justify-between gap-3"
-              >
-                <span class="text-muted-foreground">{{ row.label }}</span>
-                <span class="font-medium text-foreground">{{ row.value }}</span>
-              </div>
-            </div>
-          </div>
-
-          <div
-            v-if="balanceResult.response_time_ms !== null"
-            class="text-xs text-muted-foreground"
-          >
-            响应耗时 {{ balanceResult.response_time_ms }}ms
-          </div>
-        </template>
-      </template>
-    </div>
-
-    <template #footer>
-      <Button
-        variant="outline"
-        @click="balanceDialogOpen = false"
-      >
-        关闭
-      </Button>
-    </template>
-  </Dialog>
 </template>
 
 <script setup lang="ts">
@@ -873,7 +370,7 @@ import {
   SelectContent,
   SelectItem,
 } from '@/components/ui'
-import { Key, SquarePen, CircleHelp, WalletCards, Loader2 } from 'lucide-vue-next'
+import { Key, SquarePen, CircleHelp } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { parseApiError } from '@/utils/errorParser'
@@ -882,13 +379,9 @@ import JsonImportInput from '@/components/common/JsonImportInput.vue'
 import {
   addProviderKey,
   updateProviderKey,
-  queryProviderKeyBalance,
   sortApiFormats,
   type EndpointAPIKey,
   type EndpointAPIKeyUpdate,
-  type ProviderKeyBalanceInfo,
-  type ProviderKeyBalanceQuery,
-  type ProviderKeyBalanceResult,
   type ProviderEndpoint,
   type ProviderType
 } from '@/api/endpoints'
@@ -900,17 +393,6 @@ type ProviderKeyFormAuthType = RawSecretAuthType | 'service_account'
 interface AuthTypeOption {
   value: ProviderKeyFormAuthType
   label: string
-}
-
-type BalanceQueryTemplate = 'new_api' | 'sub2api' | 'generic_api'
-type BalanceQueryMethod = 'GET' | 'POST'
-
-interface BalanceQueryTemplateOption {
-  value: BalanceQueryTemplate
-  label: string
-  title: string
-  description: string
-  badge: string
 }
 
 const props = defineProps<{
@@ -1230,250 +712,6 @@ const form = ref({
   model_exclude_patterns_text: ''   // 排除规则文本（逗号分隔）
 })
 
-const balanceDialogOpen = ref(false)
-const balanceQueryDialogOpen = ref(false)
-const saveBalanceResult = ref(false)
-const saveBalanceSecret = ref(false)
-const balanceAutoRefreshIntervalMinutes = ref<number>(0)
-const balanceQueryTemplate = ref<BalanceQueryTemplate>('new_api')
-const balanceQueryMethods: BalanceQueryMethod[] = ['GET', 'POST']
-const balanceQueryTemplateOptions: BalanceQueryTemplateOption[] = [
-  {
-    value: 'new_api',
-    label: 'NewAPI',
-    title: 'NewAPI 余额接口',
-    description: '使用个人安全设置中的访问令牌请求 /api/user/self，并按 quota / 500000 换算余额。',
-    badge: '/api/user/self'
-  },
-  {
-    value: 'sub2api',
-    label: 'Sub2API',
-    title: 'Sub2API 余量接口',
-    description: '使用当前 Key 或单独填写的 API Key 请求 /v1/usage 查询余量。',
-    badge: '/v1/usage'
-  },
-  {
-    value: 'generic_api',
-    label: '自定义',
-    title: '自定义余额接口',
-    description: '自行指定请求路径、额度换算和响应字段，适合 DeepSeek 或其他提供商的官方余额接口。',
-    badge: 'Custom'
-  }
-]
-const newApiBalanceQuery = ref({
-  base_url: '',
-  access_token: '',
-  user_id: ''
-})
-const sub2ApiBalanceQuery = ref({
-  base_url: '',
-  token: ''
-})
-const customBalanceQuery = ref({
-  base_url: '',
-  api_key: '',
-  endpoint: '/api/user/self',
-  method: 'GET' as BalanceQueryMethod,
-  currency: 'USD',
-  quota_divisor: 500000 as number | string,
-  balance_path: 'data.quota',
-  used_path: 'data.used_quota',
-  granted_path: ''
-})
-const balanceLoading = ref(false)
-const balanceResult = ref<ProviderKeyBalanceResult | null>(null)
-const balanceError = ref('')
-const pendingBalanceSaveQuery = ref<ProviderKeyBalanceQuery | null>(null)
-const canSaveBalanceResultToKey = computed(() => (
-  !!props.providerId && isRawSecretAuthType(form.value.auth_type)
-))
-const hasSavedBalanceSecret = computed(() => (
-  props.editingKey?.upstream_metadata?.balance_query?.query_config?.has_saved_secret === true
-))
-const savedBalanceQueryTemplate = computed(() => getSavedBalanceQueryTemplate())
-const savedBalanceQueryConfig = computed(() => (
-  props.editingKey?.upstream_metadata?.balance_query?.query_config || null
-))
-const hasSavedBalanceSecretForSelectedQuery = computed(() => {
-  if (!hasSavedBalanceSecret.value || savedBalanceQueryTemplate.value !== balanceQueryTemplate.value) {
-    return false
-  }
-  if (balanceQueryTemplate.value !== 'sub2api') {
-    return true
-  }
-  const savedKind = String(savedBalanceQueryConfig.value?.sub2api_credential_kind || '').trim()
-  return savedKind === 'api_key'
-})
-const balanceCredentialRequiresDedicatedSecret = computed(() => {
-  if (balanceQueryTemplate.value === 'new_api') return true
-  return false
-})
-const canConfigureBalanceSecretSave = computed(() => (
-  balanceCredentialRequiresDedicatedSecret.value || hasSavedBalanceSecretForSelectedQuery.value
-))
-const balanceSaveDescription = computed(() => (
-  props.editingKey?.id
-    ? '保存余额摘要、更新时间和查询配置'
-    : '新增 Key 会在保存后自动写入余额摘要、查询模板和自动查询间隔'
-))
-const balanceSecretSaveDescription = computed(() => (
-  saveBalanceResult.value
-    ? '加密保存本次填写的余额查询令牌，用于刷新和自动查询；不替换当前 Key。'
-    : '需要先开启“查询成功后保存到当前 Key”。'
-))
-const effectiveBalanceSecret = computed(() => {
-  if (balanceQueryTemplate.value === 'new_api') {
-    return newApiBalanceQuery.value.access_token.trim()
-  }
-  if (balanceQueryTemplate.value === 'sub2api') {
-    return sub2ApiBalanceQuery.value.token.trim() || form.value.api_key.trim()
-  }
-  return customBalanceQuery.value.api_key.trim() || form.value.api_key.trim()
-})
-const hasBalanceQuerySecret = computed(() => {
-  if (effectiveBalanceSecret.value || hasSavedBalanceSecretForSelectedQuery.value) {
-    return true
-  }
-  return !!props.editingKey?.id && !balanceCredentialRequiresDedicatedSecret.value
-})
-const selectedBalanceQueryTemplate = computed(() => (
-  balanceQueryTemplateOptions.find(option => option.value === balanceQueryTemplate.value)
-  || balanceQueryTemplateOptions[0]
-))
-const canConfirmBalanceQuery = computed(() => {
-  if (balanceLoading.value || !hasBalanceQuerySecret.value) return false
-  if (balanceQueryTemplate.value === 'generic_api') {
-    return !!customBalanceQuery.value.endpoint.trim()
-  }
-  return true
-})
-
-const canQueryBalance = computed(() => (
-  !!props.providerId &&
-  isRawSecretAuthType(form.value.auth_type) &&
-  !saving.value &&
-  !balanceLoading.value
-))
-
-const balanceData = computed<ProviderKeyBalanceInfo | null>(() => (
-  balanceResult.value?.data ?? null
-))
-const balanceResultPendingSave = computed(() => (
-  !props.editingKey?.id
-  && !!pendingBalanceSaveQuery.value
-  && balanceResult.value?.status === 'success'
-))
-
-const balanceExtraRows = computed(() => {
-  const data = balanceData.value
-  const extra = data?.extra
-  if (!extra) return []
-  const rows: Array<{ label: string; value: string }> = []
-  const currency = data.currency || 'USD'
-  const planName = typeof extra.plan_name === 'string'
-    ? extra.plan_name
-    : typeof extra.planName === 'string'
-      ? extra.planName
-      : null
-  const balance = toFiniteNumber(extra.balance)
-  const points = toFiniteNumber(extra.points)
-  const activeSubscriptions = toFiniteNumber(extra.active_subscriptions)
-  const totalUsedUsd = toFiniteNumber(extra.total_used_usd)
-  if (planName) {
-    rows.push({ label: '套餐', value: planName })
-  }
-  if (balance !== null) {
-    rows.push({ label: '余额', value: formatBalanceAmount(balance, currency) })
-  }
-  if (points !== null) {
-    rows.push({ label: '积分', value: formatBalanceAmount(points, currency) })
-  }
-  if (activeSubscriptions !== null) {
-    rows.push({ label: '有效订阅', value: `${activeSubscriptions}` })
-  }
-  if (totalUsedUsd !== null) {
-    rows.push({ label: '订阅已用', value: formatBalanceAmount(totalUsedUsd, 'USD') })
-  }
-  return rows
-})
-
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
-}
-
-function normalizeAutoRefreshInterval(value: unknown): number {
-  const parsed = toFiniteNumber(value)
-  if (parsed === null || parsed <= 0) return 0
-  return Math.min(Math.floor(parsed), 10080)
-}
-
-function setBalanceAutoRefreshInterval(value: unknown) {
-  balanceAutoRefreshIntervalMinutes.value = normalizeAutoRefreshInterval(value)
-}
-
-function formatBalanceAmount(value: unknown, currency = 'USD'): string {
-  const numberValue = toFiniteNumber(value)
-  if (numberValue === null) return '未知'
-  const normalizedCurrency = (currency || 'USD').toUpperCase()
-  const prefix = normalizedCurrency === 'USD'
-    ? '$'
-    : normalizedCurrency === 'CNY'
-      ? '¥'
-      : `${normalizedCurrency} `
-  const decimals = Math.abs(numberValue) >= 100 ? 2 : 4
-  return `${prefix}${numberValue.toFixed(decimals)}`
-}
-
-function balanceStatusText(status: ProviderKeyBalanceResult['status']): string {
-  const labels: Record<ProviderKeyBalanceResult['status'], string> = {
-    success: '查询成功',
-    pending: '查询处理中',
-    auth_failed: '认证失败',
-    auth_expired: '认证已过期',
-    rate_limited: '请求频率受限',
-    network_error: '网络错误',
-    parse_error: '响应解析失败',
-    not_configured: '未配置余额查询',
-    not_supported: '当前上游不支持余额查询',
-    already_done: '已完成',
-    unknown_error: '查询失败'
-  }
-  return labels[status] || '查询失败'
-}
-
-function normalizeBalanceQueryTemplate(value: unknown): BalanceQueryTemplate | null {
-  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_')
-  if (normalized === 'newapi' || normalized === 'new_api') return 'new_api'
-  if (normalized === 'sub2api') return 'sub2api'
-  if (normalized === 'generic' || normalized === 'custom' || normalized === 'generic_api') return 'generic_api'
-  return null
-}
-
-function getSavedBalanceQueryTemplate(): BalanceQueryTemplate | null {
-  return normalizeBalanceQueryTemplate(props.editingKey?.upstream_metadata?.balance_query?.architecture_id)
-}
-
-function getSavedBalanceAutoRefreshInterval(): number {
-  return normalizeAutoRefreshInterval(
-    props.editingKey?.upstream_metadata?.balance_query?.query_config?.auto_refresh_interval_minutes
-  )
-}
-
-function setSaveBalanceResult(value: boolean) {
-  saveBalanceResult.value = value && canSaveBalanceResultToKey.value
-  if (!saveBalanceResult.value) {
-    saveBalanceSecret.value = false
-    pendingBalanceSaveQuery.value = null
-  } else if (props.editingKey || balanceCredentialRequiresDedicatedSecret.value) {
-    saveBalanceSecret.value = true
-  }
-}
-
 watch(
   [() => form.value.auth_type, () => props.providerType, () => props.availableApiFormats],
   () => {
@@ -1481,9 +719,6 @@ watch(
     if (!allowedAuthTypes.has(form.value.auth_type)) {
       form.value.auth_type = getDefaultAuthType()
       return
-    }
-    if (!isRawSecretAuthType(form.value.auth_type)) {
-      setSaveBalanceResult(false)
     }
 
     const filtered = sanitizeApiFormats(form.value.api_formats)
@@ -1548,10 +783,6 @@ function toggleApiFormat(format: string) {
 // 重置表单
 function resetForm() {
   formNonce.value = createFieldNonce()
-  pendingBalanceSaveQuery.value = null
-  saveBalanceResult.value = false
-  saveBalanceSecret.value = false
-  balanceAutoRefreshIntervalMinutes.value = 0
   const defaultApiFormats = getDefaultApiFormats()
   form.value = {
     name: '',
@@ -1579,10 +810,6 @@ function resetForm() {
 // 添加成功后清除部分字段以便继续添加
 function clearForNextAdd() {
   formNonce.value = createFieldNonce()
-  pendingBalanceSaveQuery.value = null
-  saveBalanceResult.value = false
-  saveBalanceSecret.value = false
-  balanceAutoRefreshIntervalMinutes.value = 0
   form.value.name = ''
   form.value.api_key = ''
   form.value.auth_config_text = ''
@@ -1596,7 +823,6 @@ function clearForNextAdd() {
 function loadKeyData() {
   if (!props.editingKey) return
   formNonce.value = createFieldNonce()
-  pendingBalanceSaveQuery.value = null
   form.value = {
     name: props.editingKey.name,
     api_key: '',
@@ -1671,167 +897,6 @@ function parseAuthConfig(): Record<string, unknown> | null {
 
 function handleServiceAccountImportError(payload: { message: string, title?: string }) {
   showError(payload.message, payload.title || '错误')
-}
-
-async function handleQueryBalance() {
-  if (!props.providerId) {
-    showError('无法查询：缺少提供商信息', '错误')
-    return
-  }
-  if (!isRawSecretAuthType(form.value.auth_type)) {
-    showError('余额查询仅支持 API Key 或 Bearer Token', '错误')
-    return
-  }
-  balanceQueryTemplate.value = getSavedBalanceQueryTemplate() || inferBalanceQueryTemplate()
-  setSaveBalanceResult(!!props.editingKey)
-  balanceAutoRefreshIntervalMinutes.value = getSavedBalanceAutoRefreshInterval()
-  balanceQueryDialogOpen.value = true
-}
-
-async function confirmBalanceQuery() {
-  if (!props.providerId) {
-    showError('无法查询：缺少提供商信息', '错误')
-    return
-  }
-  if (!isRawSecretAuthType(form.value.auth_type)) {
-    showError('余额查询仅支持 API Key 或 Bearer Token', '错误')
-    return
-  }
-
-  const apiKey = effectiveBalanceSecret.value
-  if (!apiKey && !props.editingKey?.id) {
-    showError('请填写本次查询凭据，或先在外层填写/保存 API 密钥', '验证失败')
-    return
-  }
-  if (balanceCredentialRequiresDedicatedSecret.value && !apiKey && !hasSavedBalanceSecretForSelectedQuery.value) {
-    showError('请填写本次查询凭据，或先保存过同类型的余额查询凭据', '验证失败')
-    return
-  }
-  if (balanceQueryTemplate.value === 'generic_api' && !customBalanceQuery.value.endpoint.trim()) {
-    showError('请填写自定义查询路径', '验证失败')
-    return
-  }
-
-  balanceQueryDialogOpen.value = false
-  balanceDialogOpen.value = true
-  balanceLoading.value = true
-  balanceResult.value = null
-  balanceError.value = ''
-
-  try {
-    const saveToExistingKey = saveBalanceResult.value && !!props.editingKey?.id
-    const autoRefreshInterval = saveBalanceResult.value
-      ? normalizeAutoRefreshInterval(balanceAutoRefreshIntervalMinutes.value)
-      : 0
-    const query = buildBalanceQueryPayload(apiKey, {
-      keyId: props.editingKey?.id,
-      saveResult: saveToExistingKey,
-      saveBalanceSecret: saveToExistingKey && saveBalanceSecret.value,
-      autoRefreshIntervalMinutes: autoRefreshInterval,
-    })
-    balanceResult.value = await queryProviderKeyBalance(props.providerId, query)
-    if (balanceResult.value.saved_to_key) {
-      emit('saved')
-    }
-    if (!props.editingKey?.id) {
-      pendingBalanceSaveQuery.value = saveBalanceResult.value && balanceResult.value.status === 'success'
-        ? buildBalanceQueryPayload(apiKey, {
-          saveResult: true,
-          saveBalanceSecret: saveBalanceSecret.value,
-          autoRefreshIntervalMinutes: autoRefreshInterval,
-        })
-        : null
-    }
-  } catch (err: unknown) {
-    balanceError.value = parseApiError(err, '查询余额失败')
-  } finally {
-    balanceLoading.value = false
-  }
-}
-
-function buildBalanceQueryPayload(
-  apiKey: string,
-  options: {
-    keyId?: string
-    saveResult: boolean
-    saveBalanceSecret: boolean
-    autoRefreshIntervalMinutes: number
-  },
-): ProviderKeyBalanceQuery {
-  const query: ProviderKeyBalanceQuery = {
-    key_id: options.keyId,
-    api_key: apiKey || undefined,
-    auth_type: balanceQueryAuthType(),
-    api_formats: [...form.value.api_formats],
-    architecture_id: balanceQueryTemplate.value,
-    save_result: options.saveResult,
-    save_balance_secret: options.saveBalanceSecret,
-    auto_refresh_interval_minutes: options.autoRefreshIntervalMinutes,
-  }
-  if (balanceQueryTemplate.value === 'new_api') {
-    query.custom_base_url = trimmedOrUndefined(newApiBalanceQuery.value.base_url)
-    query.new_api_user_id = trimmedOrUndefined(newApiBalanceQuery.value.user_id)
-  } else if (balanceQueryTemplate.value === 'sub2api') {
-    query.custom_base_url = trimmedOrUndefined(sub2ApiBalanceQuery.value.base_url)
-    query.sub2api_credential_kind = 'api_key'
-  } else if (balanceQueryTemplate.value === 'generic_api') {
-    const quotaDivisor = toFiniteNumber(customBalanceQuery.value.quota_divisor)
-    query.custom_base_url = trimmedOrUndefined(customBalanceQuery.value.base_url)
-    query.custom_endpoint = customBalanceQuery.value.endpoint.trim()
-    query.custom_method = customBalanceQuery.value.method
-    query.custom_currency = trimmedOrUndefined(customBalanceQuery.value.currency)
-    query.custom_quota_divisor = quotaDivisor && quotaDivisor > 0 ? quotaDivisor : undefined
-    query.custom_balance_path = trimmedOrUndefined(customBalanceQuery.value.balance_path)
-    query.custom_used_path = trimmedOrUndefined(customBalanceQuery.value.used_path)
-    query.custom_granted_path = trimmedOrUndefined(customBalanceQuery.value.granted_path)
-  }
-  return query
-}
-
-function balanceQueryAuthType(): ProviderKeyBalanceQuery['auth_type'] {
-  if (balanceQueryTemplate.value === 'sub2api') {
-    return 'api_key'
-  }
-  if (balanceQueryTemplate.value === 'new_api') {
-    return 'api_key'
-  }
-  return form.value.auth_type
-}
-
-function inferBalanceQueryTemplate(): BalanceQueryTemplate {
-  const fingerprint = [
-    props.providerType || '',
-    props.endpoint?.provider_name || '',
-    props.endpoint?.base_url || ''
-  ].join(' ').toLowerCase()
-  return fingerprint.includes('sub2api') ? 'sub2api' : 'new_api'
-}
-
-function trimmedOrUndefined(value: string | null | undefined): string | undefined {
-  const trimmed = (value || '').trim()
-  return trimmed ? trimmed : undefined
-}
-
-async function persistPendingBalanceForCreatedKey(keyId: string): Promise<boolean> {
-  if (!props.providerId || !pendingBalanceSaveQuery.value) {
-    return false
-  }
-  try {
-    const result = await queryProviderKeyBalance(props.providerId, {
-      ...pendingBalanceSaveQuery.value,
-      key_id: keyId,
-      save_result: true,
-    })
-    if (result.status !== 'success' || !result.saved_to_key) {
-      showError(result.save_message || result.message || '余额配置未写入新 Key', '余额保存失败')
-      return false
-    }
-    pendingBalanceSaveQuery.value = null
-    return true
-  } catch (err: unknown) {
-    showError(parseApiError(err, '余额配置未写入新 Key'), '余额保存失败')
-    return false
-  }
 }
 
 async function handleSave() {
@@ -1928,7 +993,7 @@ async function handleSave() {
       success('密钥已更新', '成功')
     } else {
       // 新增模式
-      const created = await addProviderKey(props.providerId, {
+      await addProviderKey(props.providerId, {
         api_formats: form.value.api_formats,
         api_key: form.value.api_key,
         auth_type: form.value.auth_type,
@@ -1947,15 +1012,8 @@ async function handleSave() {
         model_include_patterns: parsePatternText(form.value.model_include_patterns_text),
         model_exclude_patterns: parsePatternText(form.value.model_exclude_patterns_text)
       })
-      const hadPendingBalanceSave = !!pendingBalanceSaveQuery.value
-      const balanceSaved = await persistPendingBalanceForCreatedKey(created.id)
 
-      success(
-        hadPendingBalanceSave && balanceSaved
-          ? '密钥已添加，余额配置已保存'
-          : '密钥已添加',
-        '成功'
-      )
+      success('密钥已添加', '成功')
       // 添加模式：不关闭对话框，只清除名称和密钥以便继续添加
       emit('saved')
       clearForNextAdd()

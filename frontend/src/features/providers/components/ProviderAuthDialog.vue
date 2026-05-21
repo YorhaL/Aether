@@ -1,10 +1,10 @@
 <template>
   <Dialog
     :open="open"
-    :title="dialogTitle"
-    description="独立配置上游余额/用量查询凭据，不影响模型调用 Key"
+    title="用户认证"
+    description="配置提供商的用户认证信息，用于余额查询、签到等操作"
     :icon="KeyRound"
-    size="4xl"
+    size="md"
     @update:open="$emit('update:open', $event)"
   >
     <form
@@ -23,30 +23,38 @@
       </div>
       <div
         v-else
-        class="space-y-5"
+        class="space-y-4"
       >
-        <div class="space-y-2">
-          <div class="flex items-center justify-between gap-3">
-            <Label>预设模板</Label>
-            <span class="text-xs text-muted-foreground">留空则自动使用供应商配置</span>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <button
-              v-for="arch in architectures"
-              :key="arch.architecture_id"
-              type="button"
-              class="h-8 rounded-md border px-3 text-xs font-medium transition-colors"
-              :class="selectedArchitectureId === arch.architecture_id
-                ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-                : 'border-border bg-background text-muted-foreground hover:border-primary/40 hover:text-foreground'"
-              @click="selectArchitecturePreset(arch.architecture_id)"
+        <!-- 认证模板 + 认证方式（并排） -->
+        <div class="flex gap-3">
+          <div
+            class="space-y-2"
+            :style="{ flex: currentAuthTypes.length > 1 ? 1 : 'auto', width: currentAuthTypes.length > 1 ? undefined : '100%' }"
+          >
+            <Label>认证模板</Label>
+            <Select
+              v-model="selectedArchitectureId"
+              @update:model-value="handleArchitectureChange"
             >
-              {{ formatArchitectureLabel(arch) }}
-            </button>
+              <SelectTrigger>
+                <SelectValue placeholder="选择认证模板" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="arch in architectures"
+                  :key="arch.architecture_id"
+                  :value="arch.architecture_id"
+                >
+                  {{ arch.display_name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
+
           <div
             v-if="currentAuthTypes.length > 1"
-            class="grid gap-2 sm:max-w-xs"
+            class="space-y-2"
+            style="flex: 1"
           >
             <Label>认证方式</Label>
             <Select
@@ -66,15 +74,6 @@
                 </SelectItem>
               </SelectContent>
             </Select>
-          </div>
-        </div>
-
-        <div class="space-y-1">
-          <div class="text-sm font-semibold text-foreground">
-            凭证配置
-          </div>
-          <div class="text-xs text-muted-foreground">
-            不同模板支持的凭据类型不同，API Key、访问令牌和 Refresh Token 会分别保留。
           </div>
         </div>
 
@@ -263,43 +262,19 @@
             :disabled="isVerifying || !canVerify"
             @click="handleVerify"
           >
-            <Loader2
-              v-if="isVerifying"
-              class="h-3.5 w-3.5 animate-spin"
-            />
-            <Play
-              v-else
-              class="h-3.5 w-3.5"
-            />
-            {{ isVerifying ? '测试中...' : '测试脚本' }}
+            {{ isVerifying ? '验证中...' : '验证' }}
           </Button>
           <Button
-            variant="outline"
-            :disabled="isSaving || isVerifying"
-            @click="handleFormat"
+            :disabled="isSaving || !canSave"
+            @click="handleSave"
           >
-            <Wand2 class="h-3.5 w-3.5" />
-            格式化
+            {{ isSaving ? '保存中...' : '保存' }}
           </Button>
           <Button
             variant="outline"
             @click="$emit('update:open', false)"
           >
             取消
-          </Button>
-          <Button
-            :disabled="isSaving || !canSave"
-            @click="handleSave"
-          >
-            <Loader2
-              v-if="isSaving"
-              class="h-3.5 w-3.5 animate-spin"
-            />
-            <Save
-              v-else
-              class="h-3.5 w-3.5"
-            />
-            {{ isSaving ? '保存中...' : '保存配置' }}
           </Button>
         </div>
       </div>
@@ -309,7 +284,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import { KeyRound, Loader2, Play, Save, Wand2 } from 'lucide-vue-next'
+import { KeyRound } from 'lucide-vue-next'
 import {
   Dialog,
   Button,
@@ -350,7 +325,6 @@ import { useProxyNodesStore } from '@/stores/proxy-nodes'
 const props = defineProps<{
   open: boolean
   providerId: string
-  providerName?: string
   providerWebsite?: string
   currentConfig?: Record<string, unknown> | null
 }>()
@@ -401,12 +375,6 @@ const architecturesLoaded = ref(false)
 const selectedArchitectureId = ref('new_api')
 const selectedAuthType = ref('')
 const formData = ref<Record<string, unknown>>({})
-
-const dialogTitle = computed(() => (
-  props.providerName
-    ? `配置用量查询 - ${props.providerName}`
-    : '配置用量查询'
-))
 
 // 当前架构支持的认证方式
 const currentAuthTypes = computed(() => {
@@ -473,26 +441,6 @@ function handleArchitectureChange() {
   formChanged.value = true
 }
 
-function selectArchitecturePreset(architectureId: string) {
-  if (selectedArchitectureId.value === architectureId) return
-  selectedArchitectureId.value = architectureId
-  handleArchitectureChange()
-}
-
-function formatArchitectureLabel(arch: ArchitectureInfo): string {
-  const labels: Record<string, string> = {
-    generic_api: '通用模板',
-    new_api: 'NewAPI',
-    sub2api: 'Sub2API',
-    anyrouter: 'AnyRouter',
-    done_hub: 'Done Hub',
-    yescode: 'YesCode',
-    cubence: 'Cubence',
-    nekocode: 'NekoCode',
-  }
-  return labels[arch.architecture_id] || arch.display_name
-}
-
 function handleAuthTypeChange() {
   resetFormData()
   verifyStatus.value = null
@@ -530,9 +478,7 @@ function resetFormData() {
   // 初始化表单数据
   const data: Record<string, unknown> = {}
   for (const [key, prop] of Object.entries(schema.properties)) {
-    data[key] = key === 'base_url'
-      ? (props.providerWebsite || (prop as Record<string, unknown>)['x-default-value'] || '')
-      : ((prop as Record<string, unknown>)['x-default-value'] ?? '')
+    data[key] = (prop as Record<string, unknown>)['x-default-value'] ?? ''
   }
   // 代理相关默认值
   data.proxy_enabled = false
@@ -547,22 +493,6 @@ function formatQuota(quota: number): string {
     return formatQuotaFromSchema(schema, quota)
   }
   return quota.toLocaleString()
-}
-
-function handleFormat() {
-  const normalized: Record<string, unknown> = { ...formData.value }
-  for (const [key, value] of Object.entries(normalized)) {
-    if (typeof value !== 'string') continue
-    normalized[key] = key === 'base_url'
-      ? value.trim().replace(/\/+$/, '')
-      : value.trim()
-  }
-  if (!normalized.base_url && props.providerWebsite) {
-    normalized.base_url = props.providerWebsite.replace(/\/+$/, '')
-  }
-  formData.value = normalized
-  verifyStatus.value = null
-  formChanged.value = true
 }
 
 async function handleVerify() {
@@ -747,10 +677,6 @@ function loadFromConfig(config: Record<string, unknown>) {
   if (!config?.connector) return
 
   hasExistingConfig.value = true
-  const connector = config.connector as {
-    auth_type?: string
-    credentials?: Record<string, unknown>
-  }
 
   // 根据已保存的 architecture_id 选择对应架构
   const architectureId = config.architecture_id || 'new_api'
@@ -758,15 +684,7 @@ function loadFromConfig(config: Record<string, unknown>) {
   selectedArchitectureId.value = archExists ? architectureId : 'new_api'
 
   // 从已保存的 connector auth_type 恢复认证方式选择
-  let savedAuthType = connector?.auth_type
-  if (
-    selectedArchitectureId.value === 'sub2api' &&
-    savedAuthType === 'api_key' &&
-    connector?.credentials?.refresh_token &&
-    !connector?.credentials?.api_key
-  ) {
-    savedAuthType = 'refresh_token'
-  }
+  const savedAuthType = config.connector?.auth_type
   const authTypes = currentAuthTypes.value
   if (savedAuthType && authTypes.some((t) => t.type === savedAuthType)) {
     selectedAuthType.value = savedAuthType
@@ -854,16 +772,6 @@ watch(
         selectedAuthType.value = ''
         resetFormData()
       }
-    }
-  }
-)
-
-watch(
-  () => props.providerWebsite,
-  (value) => {
-    if (!props.open || hasExistingConfig.value || !value) return
-    if (!formData.value.base_url) {
-      formData.value.base_url = value
     }
   }
 )

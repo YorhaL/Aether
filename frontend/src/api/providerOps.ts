@@ -12,13 +12,7 @@ import client from './client'
 // ==================== Types ====================
 
 /** 认证类型 */
-export type ConnectorAuthType =
-  | 'api_key'
-  | 'refresh_token'
-  | 'session_login'
-  | 'oauth'
-  | 'cookie'
-  | 'none'
+export type ConnectorAuthType = 'api_key' | 'session_login' | 'oauth' | 'cookie' | 'none'
 
 /** 操作类型 */
 export type ProviderActionType =

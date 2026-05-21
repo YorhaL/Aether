@@ -381,20 +381,6 @@ fn classifies_admin_refresh_provider_quota_as_admin_proxy_route() {
 }
 
 #[test]
-fn classifies_admin_query_provider_key_balance_as_admin_proxy_route() {
-    let headers = http::HeaderMap::new();
-    let uri: Uri = "/api/admin/endpoints/providers/provider-newapi/key-balance"
-        .parse()
-        .expect("uri should parse");
-    let decision = classify_control_route(&http::Method::POST, &uri, &headers)
-        .expect("decision should resolve");
-    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
-    assert_eq!(decision.route_family.as_deref(), Some("endpoints_manage"));
-    assert_eq!(decision.route_kind.as_deref(), Some("query_key_balance"));
-    assert!(!decision.is_execution_runtime_candidate());
-}
-
-#[test]
 fn admin_refresh_provider_quota_buffers_request_body_for_key_selection() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/endpoints/providers/provider-codex/refresh-quota"
@@ -404,25 +390,6 @@ fn admin_refresh_provider_quota_buffers_request_body_for_key_selection() {
         .expect("decision should resolve");
     let context = GatewayPublicRequestContext::from_request_parts(
         "trace-refresh-quota",
-        &http::Method::POST,
-        &uri,
-        &headers,
-        Some(decision),
-    );
-
-    assert!(local_proxy_route_requires_buffered_body(&context));
-}
-
-#[test]
-fn admin_query_provider_key_balance_buffers_request_body_for_key_secret() {
-    let headers = headers(&[]);
-    let uri: Uri = "/api/admin/endpoints/providers/provider-newapi/key-balance"
-        .parse()
-        .expect("uri should parse");
-    let decision = classify_control_route(&http::Method::POST, &uri, &headers)
-        .expect("decision should resolve");
-    let context = GatewayPublicRequestContext::from_request_parts(
-        "trace-key-balance",
         &http::Method::POST,
         &uri,
         &headers,

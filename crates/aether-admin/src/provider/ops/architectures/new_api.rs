@@ -10,8 +10,8 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
         "properties": {
             "api_key": {
                 "type": "string",
-                "title": "访问令牌",
-                "description": "在 New API 个人安全设置中获取的访问令牌，与 Cookie 二选一",
+                "title": "访问令牌 (API Key)",
+                "description": "New API 的访问令牌，与 Cookie 二选一",
                 "x-sensitive": true,
                 "x-input-type": "password"
             },
@@ -30,7 +30,7 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
             "user_id": {
                 "type": "string",
                 "title": "用户 ID",
-                "description": "可选；使用 Cookie 时可自动解析"
+                "description": "使用访问令牌时必填，使用 Cookie 时可选"
             }
         },
         "required": [],
@@ -64,6 +64,13 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
                 "type": "any_required",
                 "fields": ["api_key", "cookie"],
                 "message": "访问令牌和 Cookie 至少需要填写一个"
+            },
+            {
+                "type": "conditional_required",
+                "if": "api_key",
+                "then": ["user_id"],
+                "unless": "cookie",
+                "message": "使用访问令牌时，用户 ID 不能为空"
             }
         ]
     });

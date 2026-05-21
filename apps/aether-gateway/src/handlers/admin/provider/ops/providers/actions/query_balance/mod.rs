@@ -111,14 +111,11 @@ pub(super) async fn admin_provider_ops_run_query_balance_action(
 
     if status != http::StatusCode::OK {
         let cookie_auth = architecture.query_balance_cookie_auth_errors;
-        let new_api_token_auth = architecture.architecture_id == "new_api";
         return match status {
             http::StatusCode::UNAUTHORIZED => admin_provider_ops_action_error(
                 "auth_failed",
                 "query_balance",
-                if new_api_token_auth {
-                    "访问令牌无效，请使用 New API 个人安全设置里的访问令牌"
-                } else if cookie_auth {
+                if cookie_auth {
                     "Cookie 已失效，请重新配置"
                 } else {
                     "认证失败"
@@ -128,9 +125,7 @@ pub(super) async fn admin_provider_ops_run_query_balance_action(
             http::StatusCode::FORBIDDEN => admin_provider_ops_action_error(
                 "auth_failed",
                 "query_balance",
-                if new_api_token_auth {
-                    "访问令牌无效或无权限，请使用 New API 个人安全设置里的访问令牌"
-                } else if cookie_auth {
+                if cookie_auth {
                     "Cookie 已失效或无权限"
                 } else {
                     "无权限访问"

@@ -1,7 +1,15 @@
 <template>
+  <!-- 余额正在加载中 -->
+  <div
+    v-if="provider.ops_configured && isBalanceLoading(provider.id)"
+    class="flex items-center gap-1.5 text-xs text-muted-foreground"
+  >
+    <Loader2 class="h-3 w-3 animate-spin" />
+    <span>加载中...</span>
+  </div>
   <!-- 显示从上游 API 查询的余额 -->
   <div
-    v-if="provider.ops_configured && getProviderBalance(provider.id)"
+    v-else-if="provider.ops_configured && getProviderBalance(provider.id)"
     class="flex items-center gap-2 text-xs"
   >
     <!-- 余额文字：balance + points 分开显示，或普通余额 -->
@@ -87,35 +95,6 @@
       </div>
     </div>
   </div>
-  <!-- 显示保存到 Key 的手动余额查询摘要 -->
-  <div
-    v-else-if="getSavedKeyBalance(provider)"
-    class="space-y-0.5 text-xs"
-    :title="getSavedKeyBalanceTitle(provider)"
-  >
-    <div class="flex items-center gap-1.5">
-      <WalletCards class="h-3 w-3 text-primary" />
-      <span class="font-semibold text-foreground/90 tabular-nums">
-        {{ formatKeyBalanceAmount(getSavedKeyBalance(provider)?.total_available, getSavedKeyBalance(provider)?.currency || 'USD') }}
-      </span>
-    </div>
-    <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground/70">
-      <span v-if="toFiniteNumber(getSavedKeyBalance(provider)?.total_used) !== null">
-        已用 {{ formatKeyBalanceAmount(getSavedKeyBalance(provider)?.total_used, getSavedKeyBalance(provider)?.currency || 'USD') }}
-      </span>
-      <span>
-        {{ keyBalanceTemplateLabel(getSavedKeyBalance(provider)?.architecture_id) }} · {{ formatKeyBalanceUpdatedAt(getSavedKeyBalance(provider)?.updated_at) }}
-      </span>
-    </div>
-  </div>
-  <!-- 余额正在加载中 -->
-  <div
-    v-else-if="provider.ops_configured && isBalanceLoading(provider.id)"
-    class="flex items-center gap-1.5 text-xs text-muted-foreground"
-  >
-    <Loader2 class="h-3 w-3 animate-spin" />
-    <span>加载中...</span>
-  </div>
   <!-- 余额查询失败时显示错误 -->
   <div
     v-else-if="provider.ops_configured && getProviderBalanceError(provider.id)"
@@ -149,18 +128,11 @@
 </template>
 
 <script setup lang="ts">
-import { Loader2, WalletCards } from 'lucide-vue-next'
+import { Loader2 } from 'lucide-vue-next'
 import Badge from '@/components/ui/badge.vue'
-import type { ProviderKeyBalanceSummary, ProviderWithEndpointsSummary } from '@/api/endpoints'
+import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
 import { formatBillingType } from '@/utils/format'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
-import {
-  formatKeyBalanceAmount,
-  formatKeyBalanceUpdatedAt,
-  hasKeyBalanceSummary,
-  keyBalanceTemplateLabel,
-  toFiniteNumber,
-} from '@/features/providers/utils/keyBalanceSummary'
 
 defineProps<{
   provider: ProviderWithEndpointsSummary
@@ -175,19 +147,4 @@ defineProps<{
   formatResetCountdown: (resetsAt: number) => string
   getQuotaUsedColorClass: (provider: ProviderWithEndpointsSummary) => string
 }>()
-
-function getSavedKeyBalance(provider: ProviderWithEndpointsSummary): ProviderKeyBalanceSummary | null {
-  return hasKeyBalanceSummary(provider.key_balance_summary) ? provider.key_balance_summary : null
-}
-
-function getSavedKeyBalanceTitle(provider: ProviderWithEndpointsSummary): string {
-  const summary = getSavedKeyBalance(provider)
-  if (!summary) return ''
-  const parts = [
-    summary.key_name ? `Key: ${summary.key_name}` : null,
-    keyBalanceTemplateLabel(summary.architecture_id),
-    formatKeyBalanceUpdatedAt(summary.updated_at),
-  ].filter(Boolean)
-  return parts.join(' · ')
-}
 </script>

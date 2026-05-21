@@ -119,19 +119,12 @@ pub fn get_architecture(architecture_id: &str) -> Option<ProviderOpsArchitecture
 }
 
 pub fn normalize_architecture_id(architecture_id: &str) -> &'static str {
-    let compact = architecture_id
-        .trim()
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-
-    match compact.as_str() {
+    match architecture_id.trim() {
         "" => "generic_api",
-        "genericapi" => "generic_api",
-        "newapi" | "oneapi" => "new_api",
+        "generic_api" => "generic_api",
+        "new_api" => "new_api",
         "cubence" => "cubence",
-        "donehub" => "done_hub",
+        "done_hub" => "done_hub",
         "yescode" => "yescode",
         "nekocode" => "nekocode",
         "anyrouter" => "anyrouter",
@@ -143,7 +136,7 @@ pub fn normalize_architecture_id(architecture_id: &str) -> &'static str {
 pub fn admin_provider_ops_is_supported_auth_type(auth_type: &str) -> bool {
     matches!(
         auth_type,
-        "api_key" | "refresh_token" | "session_login" | "oauth" | "cookie" | "none"
+        "api_key" | "session_login" | "oauth" | "cookie" | "none"
     )
 }
 
@@ -227,8 +220,6 @@ mod tests {
         assert_eq!(normalize_architecture_id(""), "generic_api");
         assert_eq!(normalize_architecture_id("done_hub"), "done_hub");
         assert_eq!(normalize_architecture_id("new_api"), "new_api");
-        assert_eq!(normalize_architecture_id("newapi"), "new_api");
-        assert_eq!(normalize_architecture_id("one-api"), "new_api");
         assert_eq!(normalize_architecture_id("unknown"), "generic_api");
     }
 

@@ -555,64 +555,6 @@
                         </Button>
                       </div>
                     </div>
-                    <!-- 手动余额查询摘要 -->
-                    <div
-                      v-if="getKeyBalanceSummary(key)"
-                      class="mt-2 flex items-center gap-2 rounded-md border border-border/70 bg-muted/20 px-2.5 py-2 text-[11px]"
-                    >
-                      <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
-                        <span class="inline-flex items-center gap-1 font-medium text-foreground">
-                          <WalletCards class="h-3 w-3 text-primary" />
-                          上游余额 {{ formatKeyBalanceAmount(getKeyBalanceSummary(key)?.available, getKeyBalanceSummary(key)?.currency) }}
-                        </span>
-                        <span
-                          v-if="getKeyBalanceSummary(key)?.used !== null"
-                          class="text-muted-foreground"
-                        >
-                          已用 {{ formatKeyBalanceAmount(getKeyBalanceSummary(key)?.used, getKeyBalanceSummary(key)?.currency) }}
-                        </span>
-                        <span
-                          v-if="getKeyBalanceSummary(key)?.granted !== null"
-                          class="text-muted-foreground"
-                        >
-                          总额 {{ formatKeyBalanceAmount(getKeyBalanceSummary(key)?.granted, getKeyBalanceSummary(key)?.currency) }}
-                        </span>
-                        <span
-                          v-if="getKeyBalanceSummary(key)?.planName"
-                          class="text-muted-foreground"
-                        >
-                          套餐 {{ getKeyBalanceSummary(key)?.planName }}
-                        </span>
-                        <span class="text-muted-foreground/70">
-                          {{ getKeyBalanceSummary(key)?.templateLabel }} · {{ formatUpdatedAt(getKeyBalanceSummary(key)?.updatedAt || 0) }}
-                        </span>
-                        <span
-                          v-if="getKeyBalanceAutoRefreshIntervalMinutes(key) > 0"
-                          class="text-muted-foreground/70"
-                        >
-                          每 {{ getKeyBalanceAutoRefreshIntervalMinutes(key) }} 分钟自动
-                        </span>
-                        <span
-                          v-if="keyBalanceRefreshRequiresSavedSecret(key) && !hasSavedBalanceSecret(key)"
-                          class="text-amber-600 dark:text-amber-400"
-                        >
-                          需保存查询凭据
-                        </span>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        class="h-5 w-5 shrink-0 text-muted-foreground hover:text-foreground"
-                        :disabled="refreshingBalanceKeyId === key.id || !canRefreshKeyBalance(key)"
-                        :title="getKeyBalanceRefreshTitle(key)"
-                        @click.stop="handleRefreshKeyBalance(key)"
-                      >
-                        <RefreshCw
-                          class="h-3 w-3"
-                          :class="{ 'animate-spin': refreshingBalanceKeyId === key.id }"
-                        />
-                      </Button>
-                    </div>
                     <!-- Codex 上游额度信息（仅当有元数据时显示） -->
                     <div
                       v-if="hasCodexQuotaDisplayData(key)"
@@ -1275,7 +1217,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed, nextTick, onUnmounted } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import {
   Plus,
   Key,
@@ -1294,7 +1236,6 @@ import {
   ShieldX,
   Globe,
   GitBranch,
-  WalletCards,
 } from 'lucide-vue-next'
 import { parseApiError } from '@/utils/errorParser'
 import { useEscapeKey } from '@/composables/useEscapeKey'
@@ -1341,12 +1282,10 @@ import {
   exportKey,
   refreshProviderOAuth,
   refreshProviderQuota,
-  queryProviderKeyBalance,
   clearOAuthInvalid,
   type ProviderEndpoint,
   type EndpointAPIKey,
   type Model,
-  type ProviderKeyBalanceQuery,
   API_FORMAT_ORDER,
   sortApiFormats,
 } from '@/api/endpoints'
@@ -1391,17 +1330,6 @@ interface ProviderEndpointWithKeys extends ProviderEndpoint {
   rpm_limit?: number
 }
 
-interface KeyBalanceSummary {
-  available: number | null
-  used: number | null
-  granted: number | null
-  currency: string
-  updatedAt: number
-  templateLabel: string
-  planName: string | null
-  architectureId: string
-}
-
 interface Props {
   providerId: string | null
   open: boolean
@@ -1437,8 +1365,6 @@ let keysLoadRequestId = 0
 let mappingPreviewLoadRequestId = 0
 const DEFAULT_PROVIDER_KEYS_PAGE_SIZE = 3
 const CUSTOM_PROVIDER_KEYS_PAGE_SIZE = 4
-const BALANCE_AUTO_REFRESH_CHECK_MS = 60_000
-let balanceAutoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 function getProviderKeysPageSize(providerType?: string | null): number {
   return (providerType || '').trim().toLowerCase() === 'custom'
@@ -1462,7 +1388,6 @@ const editingKey = ref<EndpointAPIKey | null>(null)
 const deleteKeyConfirmOpen = ref(false)
 const keyToDelete = ref<EndpointAPIKey | null>(null)
 const togglingKeyId = ref<string | null>(null)
-const refreshingBalanceKeyId = ref<string | null>(null)
 
 // 密钥显示状态：key_id -> 完整密钥
 const revealedKeys = ref<Map<string, string>>(new Map())
@@ -1645,7 +1570,6 @@ watch(
       // 仅在抽屉刚打开时启动倒计时
       if (newOpen && !oldOpen) {
         startCountdownTimer()
-        startKeyBalanceAutoRefreshTimer()
       }
       void endpointsPromise.then(() => autoRefreshQuotaInBackground())
     } else if (!newOpen && oldOpen) {
@@ -1657,7 +1581,6 @@ watch(
 
       // 停止倒计时定时器
       stopCountdownTimer()
-      stopKeyBalanceAutoRefreshTimer()
       // 重置所有状态
       loading.value = false
       provider.value = null
@@ -1817,167 +1740,6 @@ function handleEditKey(endpoint: ProviderEndpoint | undefined, key: EndpointAPIK
     oauthKeyEditDialogOpen.value = true
   } else {
     keyFormDialogOpen.value = true
-  }
-}
-
-function canOpenKeyBalanceQuery(key: EndpointAPIKey): boolean {
-  return key.auth_type === 'api_key' || key.auth_type === 'bearer'
-}
-
-function normalizeBalanceArchitectureId(value: unknown): ProviderKeyBalanceQuery['architecture_id'] | undefined {
-  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_')
-  if (normalized === 'newapi' || normalized === 'new_api') return 'new_api'
-  if (normalized === 'sub2api') return 'sub2api'
-  if (normalized === 'generic' || normalized === 'custom' || normalized === 'generic_api') return 'generic_api'
-  return undefined
-}
-
-function canRefreshKeyBalance(key: EndpointAPIKey): boolean {
-  return canOpenKeyBalanceQuery(key)
-    && !!normalizeBalanceArchitectureId(key.upstream_metadata?.balance_query?.architecture_id)
-    && (!keyBalanceRefreshRequiresSavedSecret(key) || hasSavedBalanceSecret(key))
-}
-
-function hasSavedBalanceSecret(key: EndpointAPIKey): boolean {
-  return key.upstream_metadata?.balance_query?.query_config?.has_saved_secret === true
-}
-
-function keyBalanceRefreshRequiresSavedSecret(key: EndpointAPIKey): boolean {
-  const architectureId = normalizeBalanceArchitectureId(key.upstream_metadata?.balance_query?.architecture_id)
-  if (architectureId === 'new_api') return true
-  if (architectureId !== 'sub2api') return false
-  const credentialKind = String(
-    key.upstream_metadata?.balance_query?.query_config?.sub2api_credential_kind || ''
-  ).trim()
-  return credentialKind === 'access_token' || credentialKind === 'refresh_token'
-}
-
-function getKeyBalanceAutoRefreshIntervalMinutes(key: EndpointAPIKey): number {
-  const parsed = toFiniteNumber(
-    key.upstream_metadata?.balance_query?.query_config?.auto_refresh_interval_minutes
-  )
-  if (parsed === null || parsed <= 0) return 0
-  return Math.min(Math.floor(parsed), 10080)
-}
-
-function isKeyBalanceAutoRefreshDue(key: EndpointAPIKey): boolean {
-  const intervalMinutes = getKeyBalanceAutoRefreshIntervalMinutes(key)
-  if (intervalMinutes <= 0 || !canRefreshKeyBalance(key)) return false
-
-  const updatedAt = toFiniteNumber(key.upstream_metadata?.balance_query?.updated_at)
-  if (updatedAt === null || updatedAt <= 0) return true
-
-  const now = Math.floor(Date.now() / 1000)
-  return now - updatedAt >= intervalMinutes * 60
-}
-
-function startKeyBalanceAutoRefreshTimer() {
-  if (balanceAutoRefreshTimer) return
-  balanceAutoRefreshTimer = setInterval(() => {
-    void refreshDueKeyBalances()
-  }, BALANCE_AUTO_REFRESH_CHECK_MS)
-}
-
-function stopKeyBalanceAutoRefreshTimer() {
-  if (!balanceAutoRefreshTimer) return
-  clearInterval(balanceAutoRefreshTimer)
-  balanceAutoRefreshTimer = null
-}
-
-async function refreshDueKeyBalances() {
-  if (!props.open || !props.providerId || refreshingBalanceKeyId.value) return
-  const dueKey = providerKeys.value.find(key => key.is_active && isKeyBalanceAutoRefreshDue(key))
-  if (!dueKey) return
-  await handleRefreshKeyBalance(dueKey, { silent: true })
-}
-
-function getKeyBalanceRefreshTitle(key: EndpointAPIKey): string {
-  if (!canOpenKeyBalanceQuery(key)) {
-    return '余额查询仅支持 API Key 或 Bearer Token'
-  }
-  if (!canRefreshKeyBalance(key)) {
-    if (keyBalanceRefreshRequiresSavedSecret(key) && !hasSavedBalanceSecret(key)) {
-      return '需要先手动查询一次，并开启“保存余额查询凭据”'
-    }
-    return '缺少上次查询模板，请先手动查询一次余额'
-  }
-  const summary = getKeyBalanceSummary(key)
-  return summary?.templateLabel
-    ? `重新查询 ${summary.templateLabel} 余额`
-    : '重新查询余额'
-}
-
-function assignSavedBalanceQueryConfig(query: ProviderKeyBalanceQuery, key: EndpointAPIKey) {
-  const config = key.upstream_metadata?.balance_query?.query_config
-  if (!config || typeof config !== 'object') return
-
-  query.custom_base_url = trimmedStringOrUndefined(config.custom_base_url)
-  query.new_api_user_id = trimmedStringOrUndefined(config.new_api_user_id)
-
-  const sub2apiKind = String(config.sub2api_credential_kind || '').trim()
-  if (sub2apiKind === 'api_key' || sub2apiKind === 'access_token' || sub2apiKind === 'refresh_token') {
-    query.sub2api_credential_kind = sub2apiKind
-  }
-
-  query.custom_endpoint = trimmedStringOrUndefined(config.custom_endpoint)
-  const customMethod = String(config.custom_method || '').trim().toUpperCase()
-  if (customMethod === 'GET' || customMethod === 'POST') {
-    query.custom_method = customMethod
-  }
-  query.custom_currency = trimmedStringOrUndefined(config.custom_currency)
-  const customQuotaDivisor = toFiniteNumber(config.custom_quota_divisor)
-  if (customQuotaDivisor !== null && customQuotaDivisor > 0) {
-    query.custom_quota_divisor = customQuotaDivisor
-  }
-  const intervalMinutes = toFiniteNumber(config.auto_refresh_interval_minutes)
-  if (intervalMinutes !== null && intervalMinutes > 0) {
-    query.auto_refresh_interval_minutes = Math.min(Math.floor(intervalMinutes), 10080)
-  }
-  query.custom_balance_path = trimmedStringOrUndefined(config.custom_balance_path)
-  query.custom_used_path = trimmedStringOrUndefined(config.custom_used_path)
-  query.custom_granted_path = trimmedStringOrUndefined(config.custom_granted_path)
-}
-
-function trimmedStringOrUndefined(value: unknown): string | undefined {
-  const trimmed = typeof value === 'string' ? value.trim() : ''
-  return trimmed || undefined
-}
-
-async function handleRefreshKeyBalance(key: EndpointAPIKey, options: { silent?: boolean } = {}) {
-  if (!props.providerId || refreshingBalanceKeyId.value || !canRefreshKeyBalance(key)) return
-
-  const architectureId = normalizeBalanceArchitectureId(key.upstream_metadata?.balance_query?.architecture_id)
-  if (!architectureId) return
-
-  refreshingBalanceKeyId.value = key.id
-  try {
-    const query: ProviderKeyBalanceQuery = {
-      key_id: key.id,
-      auth_type: key.auth_type === 'bearer' ? 'bearer' : 'api_key',
-      api_formats: key.api_formats || [],
-      architecture_id: architectureId,
-      save_result: true,
-    }
-    assignSavedBalanceQueryConfig(query, key)
-
-    const result = await queryProviderKeyBalance(props.providerId, query)
-    if (result.status !== 'success') {
-      if (!options.silent) {
-        showError(result.message || '余额刷新失败', '错误')
-      }
-      return
-    }
-    if (!options.silent) {
-      showSuccess('余额已刷新')
-    }
-    await loadProviderKeysPage(currentKeyPage.value)
-    emit('refresh')
-  } catch (err: unknown) {
-    if (!options.silent) {
-      showError(parseApiError(err, '余额刷新失败'), '错误')
-    }
-  } finally {
-    refreshingBalanceKeyId.value = null
   }
 }
 
@@ -2936,7 +2698,7 @@ async function openAntigravityQuotaDialog(key: EndpointAPIKey) {
 }
 
 async function handleKeyChanged() {
-  await Promise.all([loadEndpoints(), loadProviderKeysPage(currentKeyPage.value), loadMappingPreview()])
+  await Promise.all([loadEndpoints(), loadMappingPreview()])
   emit('refresh')
   // 添加/修改 key 后自动获取 Antigravity 配额（新 key 的 upstream_metadata 为空）
   void autoRefreshQuotaInBackground({ ignoreCooldown: true })
@@ -3405,58 +3167,6 @@ function hasAntigravityQuotaDisplayData(key: EndpointAPIKey): boolean {
     return true
   }
   return hasAntigravityQuotaData(key.upstream_metadata)
-}
-
-function getKeyBalanceSummary(key: EndpointAPIKey): KeyBalanceSummary | null {
-  const metadata = key.upstream_metadata?.balance_query
-  if (!metadata) return null
-  const updatedAt = toFiniteNumber(metadata.updated_at)
-  const available = toFiniteNumber(metadata.total_available)
-  const used = toFiniteNumber(metadata.total_used)
-  const granted = toFiniteNumber(metadata.total_granted)
-  if (updatedAt === null || (available === null && used === null && granted === null)) {
-    return null
-  }
-  const architectureId = String(metadata.architecture_id || '').trim()
-  const labels: Record<string, string> = {
-    new_api: 'NewAPI',
-    sub2api: 'Sub2API',
-    generic_api: '自定义'
-  }
-  return {
-    available,
-    used,
-    granted,
-    currency: String(metadata.currency || 'USD').trim() || 'USD',
-    updatedAt,
-    templateLabel: labels[architectureId] || architectureId || '余额查询',
-    architectureId,
-    planName: typeof metadata.plan_name === 'string' && metadata.plan_name.trim()
-      ? metadata.plan_name.trim()
-      : null,
-  }
-}
-
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
-}
-
-function formatKeyBalanceAmount(value: unknown, currency = 'USD'): string {
-  const numberValue = toFiniteNumber(value)
-  if (numberValue === null) return '未知'
-  const normalizedCurrency = (currency || 'USD').toUpperCase()
-  const prefix = normalizedCurrency === 'USD'
-    ? '$'
-    : normalizedCurrency === 'CNY'
-      ? '¥'
-      : `${normalizedCurrency} `
-  const decimals = Math.abs(numberValue) >= 100 ? 2 : 4
-  return `${prefix}${numberValue.toFixed(decimals)}`
 }
 
 function formatUpdatedAt(updatedAt: number): string {
@@ -3975,7 +3685,6 @@ async function loadProviderKeysPage(page = currentKeyPage.value) {
     currentKeyPage.value = Math.min(result.page, nextTotalPages)
     keyPageSize.value = result.page_size
     syncCurrentSelections(endpoints.value, result.keys)
-    void refreshDueKeyBalances()
   } catch (err: unknown) {
     if (requestId !== keysLoadRequestId || props.providerId !== providerId) return
     providerKeys.value = []
@@ -4072,10 +3781,6 @@ useEscapeKey(() => {
 }, {
   disableOnInput: true,
   once: false
-})
-
-onUnmounted(() => {
-  stopKeyBalanceAutoRefreshTimer()
 })
 </script>
 

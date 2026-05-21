@@ -7,7 +7,7 @@ use aether_data_contracts::repository::candidates::{
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
-use serde_json::{json, Map, Value};
+use serde_json::json;
 use std::collections::BTreeMap;
 
 fn json_truthy(value: &serde_json::Value) -> bool {
@@ -25,80 +25,6 @@ fn endpoint_timestamp_or_now(value: Option<u64>, now_unix_secs: u64) -> serde_js
     unix_secs_to_rfc3339(value.unwrap_or(now_unix_secs))
         .map(serde_json::Value::String)
         .unwrap_or(serde_json::Value::Null)
-}
-
-fn finite_json_number(value: Option<&Value>) -> Option<f64> {
-    match value {
-        Some(Value::Number(number)) => number.as_f64().filter(|value| value.is_finite()),
-        Some(Value::String(value)) => value
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite()),
-        _ => None,
-    }
-}
-
-fn finite_json_u64(value: Option<&Value>) -> Option<u64> {
-    finite_json_number(value).and_then(|value| {
-        if value >= 0.0 {
-            Some(value as u64)
-        } else {
-            None
-        }
-    })
-}
-
-fn latest_key_balance_summary(keys: &[StoredProviderCatalogKey]) -> Value {
-    let mut selected: Option<(u64, &StoredProviderCatalogKey, &Map<String, Value>)> = None;
-
-    for key in keys {
-        let Some(balance) = key
-            .upstream_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("balance_query"))
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-        let Some(updated_at) = finite_json_u64(balance.get("updated_at")) else {
-            continue;
-        };
-        let has_balance_value = ["total_available", "total_used", "total_granted"]
-            .into_iter()
-            .any(|field| finite_json_number(balance.get(field)).is_some());
-        if !has_balance_value {
-            continue;
-        }
-
-        if selected
-            .as_ref()
-            .is_none_or(|(selected_updated_at, _, _)| updated_at > *selected_updated_at)
-        {
-            selected = Some((updated_at, key, balance));
-        }
-    }
-
-    let Some((updated_at, key, balance)) = selected else {
-        return Value::Null;
-    };
-
-    json!({
-        "key_id": key.id.clone(),
-        "key_name": key.name.clone(),
-        "updated_at": updated_at,
-        "architecture_id": balance.get("architecture_id").cloned().unwrap_or(Value::Null),
-        "status": balance.get("status").cloned().unwrap_or_else(|| json!("success")),
-        "executed_at": balance.get("executed_at").cloned().unwrap_or(Value::Null),
-        "response_time_ms": balance.get("response_time_ms").cloned().unwrap_or(Value::Null),
-        "total_available": balance.get("total_available").cloned().unwrap_or(Value::Null),
-        "total_used": balance.get("total_used").cloned().unwrap_or(Value::Null),
-        "total_granted": balance.get("total_granted").cloned().unwrap_or(Value::Null),
-        "currency": balance.get("currency").cloned().unwrap_or_else(|| json!("USD")),
-        "plan_name": balance.get("plan_name").cloned().unwrap_or(Value::Null),
-        "query_config": balance.get("query_config").cloned().unwrap_or(Value::Null),
-        "extra": balance.get("extra").cloned().unwrap_or(Value::Null),
-    })
 }
 
 pub(crate) fn build_admin_provider_summary_value(
@@ -232,7 +158,6 @@ pub(crate) fn build_admin_provider_summary_value(
         .and_then(|quota| quota.quota_expires_at_unix_secs)
         .or(provider.quota_expires_at_unix_secs)
         .and_then(unix_secs_to_rfc3339);
-    let key_balance_summary = latest_key_balance_summary(keys);
 
     json!({
         "id": provider.id.clone(),
@@ -271,7 +196,6 @@ pub(crate) fn build_admin_provider_summary_value(
         "endpoint_health_details": endpoint_health_details,
         "ops_configured": ops_configured,
         "ops_architecture_id": ops_architecture_id,
-        "key_balance_summary": key_balance_summary,
         "kiro_simulated_cache_enabled": kiro_simulated_cache_enabled,
         "created_at": endpoint_timestamp_or_now(provider.created_at_unix_ms, now_unix_secs),
         "updated_at": endpoint_timestamp_or_now(provider.updated_at_unix_secs, now_unix_secs),

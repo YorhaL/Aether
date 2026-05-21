@@ -8,9 +8,7 @@ use super::super::responses::{
 };
 use super::super::support::admin_provider_ops_json_object_map;
 use crate::handlers::admin::request::AdminAppState;
-use aether_admin::provider::ops::{
-    parse_sub2api_api_key_usage_payload, parse_sub2api_balance_payload,
-};
+use aether_admin::provider::ops::parse_sub2api_balance_payload;
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
 use serde_json::{json, Value};
@@ -26,23 +24,6 @@ pub(super) async fn admin_provider_ops_sub2api_balance_payload(
     proxy_snapshot: Option<&ProxySnapshot>,
 ) -> serde_json::Value {
     let start = std::time::Instant::now();
-    if let Some(api_key) = credentials
-        .get("api_key")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return admin_provider_ops_sub2api_api_key_balance_payload(
-            state,
-            provider_id,
-            base_url,
-            action_config,
-            api_key,
-            proxy_snapshot,
-            start,
-        )
-        .await;
-    }
     let (access_token, updated_credentials, _frontend_updated_credentials) =
         match admin_provider_ops_sub2api_exchange_token(
             state,
@@ -199,117 +180,6 @@ pub(super) async fn admin_provider_ops_sub2api_balance_payload(
                 );
             }
         };
-
-    admin_provider_ops_action_response(
-        "success",
-        "query_balance",
-        data,
-        None,
-        response_time_ms,
-        86400,
-    )
-}
-
-async fn admin_provider_ops_sub2api_api_key_balance_payload(
-    state: &AdminAppState<'_>,
-    provider_id: &str,
-    base_url: &str,
-    action_config: &serde_json::Map<String, serde_json::Value>,
-    api_key: &str,
-    proxy_snapshot: Option<&ProxySnapshot>,
-    start: std::time::Instant,
-) -> serde_json::Value {
-    let usage_endpoint = action_config
-        .get("api_key_usage_endpoint")
-        .or_else(|| action_config.get("usage_endpoint"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("/v1/usage");
-    let usage_url = admin_provider_ops_sub2api_request_url(base_url, usage_endpoint);
-    let auth_value = match reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")) {
-        Ok(value) => value,
-        Err(_) => {
-            return admin_provider_ops_action_error(
-                "parse_error",
-                "query_balance",
-                "API Key 格式无效",
-                Some(start.elapsed().as_millis() as u64),
-            );
-        }
-    };
-    let auth_headers = reqwest::header::HeaderMap::from_iter([
-        (reqwest::header::AUTHORIZATION, auth_value),
-        (
-            reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static("application/json"),
-        ),
-    ]);
-    let request_id = format!("provider-ops-action:sub2api:usage:{provider_id}");
-    let result = admin_provider_ops_execute_json_request(
-        state,
-        &request_id,
-        reqwest::Method::GET,
-        &usage_url,
-        &auth_headers,
-        None,
-        proxy_snapshot,
-    )
-    .await;
-    let response_time_ms = Some(start.elapsed().as_millis() as u64);
-    let (status, response_json) = match result {
-        Ok(result) => result,
-        Err(AdminProviderOpsExecuteJsonError::InvalidJson(message))
-        | Err(AdminProviderOpsExecuteJsonError::Transport(message)) => {
-            return admin_provider_ops_action_error(
-                "network_error",
-                "query_balance",
-                network_error_message(&message),
-                response_time_ms,
-            );
-        }
-    };
-    if matches!(
-        status,
-        http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
-    ) {
-        return admin_provider_ops_action_error(
-            "auth_failed",
-            "query_balance",
-            "认证失败，请检查 API Key",
-            response_time_ms,
-        );
-    }
-    if status != http::StatusCode::OK {
-        return admin_provider_ops_action_error(
-            "unknown_error",
-            "query_balance",
-            format!(
-                "HTTP {}: {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or("Unknown")
-            ),
-            response_time_ms,
-        );
-    }
-
-    let data = match parse_sub2api_api_key_usage_payload(action_config, &response_json) {
-        Ok(payload) => payload,
-        Err(message) => {
-            return admin_provider_ops_action_error(
-                if message.contains("无效") {
-                    "auth_failed"
-                } else if message == "响应格式无效" {
-                    "parse_error"
-                } else {
-                    "unknown_error"
-                },
-                "query_balance",
-                message,
-                response_time_ms,
-            );
-        }
-    };
 
     admin_provider_ops_action_response(
         "success",

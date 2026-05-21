@@ -1490,24 +1490,7 @@ async fn gateway_verifies_admin_provider_ops_locally_for_new_api_with_trusted_ad
                     .and_then(|value| value.to_str().ok()),
                 Some("session=foo")
             );
-            assert_eq!(
-                headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|value| value.to_str().ok()),
-                Some("cc-switch/1.0")
-            );
-            assert_eq!(
-                headers
-                    .get(axum::http::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok()),
-                Some("application/json")
-            );
-            assert_eq!(
-                headers
-                    .get(axum::http::header::ACCEPT)
-                    .and_then(|value| value.to_str().ok()),
-                Some("application/json")
-            );
+            assert!(headers.contains_key("sec-ch-ua"));
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
             encoder
                 .write_all(

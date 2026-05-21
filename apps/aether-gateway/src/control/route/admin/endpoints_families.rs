@@ -179,17 +179,6 @@ pub(super) fn classify_admin_endpoints_family_route(
         ))
     } else if method == http::Method::POST
         && normalized_path.starts_with("/api/admin/endpoints/providers/")
-        && normalized_path.ends_with("/key-balance")
-    {
-        Some(classified(
-            "admin_proxy",
-            "endpoints_manage",
-            "query_key_balance",
-            "admin:endpoints_manage",
-            false,
-        ))
-    } else if method == http::Method::POST
-        && normalized_path.starts_with("/api/admin/endpoints/providers/")
         && normalized_path.ends_with("/keys")
     {
         Some(classified(

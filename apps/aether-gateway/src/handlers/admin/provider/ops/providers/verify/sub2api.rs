@@ -6,8 +6,7 @@ use crate::handlers::admin::provider::ops::providers::config::persist_admin_prov
 use crate::handlers::admin::request::AdminAppState;
 use aether_admin::provider::ops::{
     admin_provider_ops_frontend_updated_credentials, admin_provider_ops_verify_failure,
-    admin_provider_ops_verify_success, admin_provider_ops_verify_user_payload,
-    parse_sub2api_api_key_usage_payload, parse_verify_payload, ADMIN_PROVIDER_OPS_USER_AGENT,
+    parse_verify_payload, ADMIN_PROVIDER_OPS_USER_AGENT,
 };
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
@@ -22,21 +21,6 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
     credentials: &Map<String, Value>,
     proxy_snapshot: Option<&ProxySnapshot>,
 ) -> Value {
-    if let Some(api_key) = credentials
-        .get("api_key")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return admin_provider_ops_local_sub2api_api_key_verify_response(
-            state,
-            base_url,
-            api_key,
-            proxy_snapshot,
-        )
-        .await;
-    }
-
     let (access_token, updated_credentials, frontend_updated_credentials) =
         match admin_provider_ops_sub2api_exchange_token(
             state,
@@ -106,78 +90,6 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
         status,
         &response_json,
         frontend_updated_credentials,
-    )
-}
-
-async fn admin_provider_ops_local_sub2api_api_key_verify_response(
-    state: &AdminAppState<'_>,
-    base_url: &str,
-    api_key: &str,
-    proxy_snapshot: Option<&ProxySnapshot>,
-) -> Value {
-    let usage_url = admin_provider_ops_sub2api_request_url(base_url, "/v1/usage");
-    let auth_value = match reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")) {
-        Ok(value) => value,
-        Err(_) => return admin_provider_ops_verify_failure("API Key 格式无效"),
-    };
-    let auth_headers = reqwest::header::HeaderMap::from_iter([
-        (reqwest::header::AUTHORIZATION, auth_value),
-        (
-            reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static("application/json"),
-        ),
-    ]);
-    let auth_headers =
-        admin_provider_ops_headers_with_transport_controls(&auth_headers, None, true);
-    let (status, response_json) = match admin_provider_ops_execute_json_request(
-        state,
-        "provider-ops-verify:sub2api:api-key",
-        reqwest::Method::GET,
-        &usage_url,
-        &auth_headers,
-        None,
-        proxy_snapshot,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(AdminProviderOpsExecuteJsonError::InvalidJson(message))
-        | Err(AdminProviderOpsExecuteJsonError::Transport(message)) => {
-            return admin_provider_ops_verify_failure(
-                admin_provider_ops_verify_execution_error_message(&message),
-            );
-        }
-    };
-    if matches!(
-        status,
-        http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
-    ) {
-        return admin_provider_ops_verify_failure("认证失败：API Key 无效或已过期");
-    }
-    if status != http::StatusCode::OK {
-        return admin_provider_ops_verify_failure(format!("验证失败：HTTP {}", status.as_u16()));
-    }
-
-    let payload = match parse_sub2api_api_key_usage_payload(&Map::new(), &response_json) {
-        Ok(payload) => payload,
-        Err(message) => return admin_provider_ops_verify_failure(message),
-    };
-    let quota = payload.get("total_available").and_then(Value::as_f64);
-    let extra = payload
-        .get("extra")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-
-    admin_provider_ops_verify_success(
-        admin_provider_ops_verify_user_payload(
-            Some("Sub2API API Key".to_string()),
-            Some("Sub2API API Key".to_string()),
-            None,
-            quota,
-            Some(extra),
-        ),
-        None,
     )
 }
 

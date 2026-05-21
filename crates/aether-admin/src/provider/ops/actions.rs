@@ -1,4 +1,3 @@
-use super::architectures::normalize_architecture_id;
 use super::verify::admin_provider_ops_value_as_f64;
 use serde_json::{json, Map, Value};
 
@@ -14,7 +13,7 @@ pub fn parse_query_balance_payload(
     action_config: &Map<String, Value>,
     response_json: &Value,
 ) -> Result<Value, String> {
-    match normalize_architecture_id(architecture_id) {
+    match architecture_id {
         "generic_api" | "new_api" | "anyrouter" | "done_hub" => {
             parse_new_api_balance_payload(action_config, response_json)
         }
@@ -114,73 +113,6 @@ pub fn parse_sub2api_balance_payload(
     ))
 }
 
-pub fn parse_sub2api_api_key_usage_payload(
-    action_config: &Map<String, Value>,
-    response_json: &Value,
-) -> Result<Value, String> {
-    let usage_data = sub2api_usage_response_object(response_json)?;
-    let is_valid = bool_value_from_candidates(
-        response_json,
-        usage_data,
-        &["is_active", "data.is_active", "isValid", "data.isValid"],
-    )
-    .unwrap_or(true);
-    if !is_valid {
-        return Err(response_json
-            .get("invalidMessage")
-            .or_else(|| response_json.get("message"))
-            .or_else(|| usage_data.get("invalidMessage"))
-            .or_else(|| usage_data.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("API Key 已禁用或无效")
-            .to_string());
-    }
-
-    let remaining = balance_value_from_candidates(
-        response_json,
-        usage_data,
-        action_config,
-        &["remaining_path", "available_path", "balance_path"],
-        &[
-            "remaining",
-            "data.remaining",
-            "quota.remaining",
-            "data.quota.remaining",
-            "balance",
-            "data.balance",
-        ],
-    )
-    .ok_or_else(|| "响应格式无效".to_string())?;
-    let currency = string_value_from_candidates(
-        response_json,
-        usage_data,
-        &["unit", "data.unit", "quota.unit", "data.quota.unit"],
-    )
-    .or_else(|| {
-        action_config
-            .get("currency")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-    })
-    .unwrap_or_else(|| "USD".to_string());
-
-    let mut extra = Map::new();
-    extra.insert("is_active".to_string(), json!(is_valid));
-    if let Some(quota) = usage_data.get("quota").filter(|value| value.is_object()) {
-        extra.insert("quota".to_string(), quota.clone());
-    }
-
-    Ok(build_balance_data(
-        None,
-        None,
-        Some(remaining),
-        &currency,
-        extra,
-    ))
-}
-
 pub fn attach_balance_checkin_outcome(
     action_payload: &mut Value,
     outcome: &ProviderOpsCheckinOutcome,
@@ -239,314 +171,37 @@ fn parse_new_api_balance_payload(
     action_config: &Map<String, Value>,
     response_json: &Value,
 ) -> Result<Value, String> {
-    let user_data = balance_response_object(response_json)?;
-    let quota_divisor = balance_divisor(action_config);
-    let total_available_raw = balance_value_from_candidates(
-        response_json,
-        user_data,
-        action_config,
-        &[
-            "balance_path",
-            "available_path",
-            "total_available_path",
-            "quota_path",
-        ],
-        &[
-            "total_available",
-            "data.total_available",
-            "balance",
-            "data.balance",
-            "available",
-            "data.available",
-            "remaining",
-            "data.remaining",
-            "quota",
-            "data.quota",
-            "balance_infos.0.total_balance",
-            "balance_infos[0].total_balance",
-            "data.balance_infos.0.total_balance",
-            "data.balance_infos[0].total_balance",
-            "balance_total",
-            "data.balance_total",
-            "total_balance",
-            "data.total_balance",
-        ],
-    );
-    let total_used_raw = balance_value_from_candidates(
-        response_json,
-        user_data,
-        action_config,
-        &[
-            "used_path",
-            "used_quota_path",
-            "spent_path",
-            "usage_path",
-            "total_used_path",
-        ],
-        &[
-            "used_quota",
-            "data.used_quota",
-            "used",
-            "data.used",
-            "total_used",
-            "data.total_used",
-            "spent",
-            "data.spent",
-            "usage",
-            "data.usage",
-        ],
-    );
-    let total_granted_raw = balance_value_from_candidates(
-        response_json,
-        user_data,
-        action_config,
-        &[
-            "granted_path",
-            "total_granted_path",
-            "limit_path",
-            "total_quota_path",
-        ],
-        &[
-            "total_granted",
-            "data.total_granted",
-            "total_quota",
-            "data.total_quota",
-            "granted",
-            "data.granted",
-            "limit",
-            "data.limit",
-            "balance_total",
-            "data.balance_total",
-            "total_balance",
-            "data.total_balance",
-        ],
-    );
-    let total_available_raw = total_available_raw.or(match (total_granted_raw, total_used_raw) {
-        (Some(granted), Some(used)) => Some((granted - used).max(0.0)),
-        _ => None,
-    });
-    let total_used_raw = total_used_raw.or(match (total_granted_raw, total_available_raw) {
-        (Some(granted), Some(available)) => Some((granted - available).max(0.0)),
-        _ => None,
-    });
-    let total_granted_raw = total_granted_raw.or(match (total_available_raw, total_used_raw) {
-        (Some(available), Some(used)) => Some(available + used),
-        _ => None,
-    });
-    let mut extra = Map::new();
-    if let Some(plan_name) = new_api_plan_name(user_data) {
-        extra.insert("plan_name".to_string(), json!(plan_name));
-    }
+    let user_data = if response_json.get("success").and_then(Value::as_bool) == Some(true)
+        && response_json.get("data").is_some_and(Value::is_object)
+    {
+        response_json.get("data")
+    } else if response_json.get("success").and_then(Value::as_bool) == Some(false) {
+        return Err(response_json
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("业务状态码表示失败")
+            .to_string());
+    } else {
+        Some(response_json)
+    };
+    let Some(user_data) = user_data.and_then(Value::as_object) else {
+        return Err("响应格式无效".to_string());
+    };
+    let quota_divisor = quota_divisor(action_config);
+    let total_available =
+        admin_provider_ops_value_as_f64(user_data.get("quota")).map(|value| value / quota_divisor);
+    let total_used = admin_provider_ops_value_as_f64(user_data.get("used_quota"))
+        .map(|value| value / quota_divisor);
     Ok(build_balance_data(
-        total_granted_raw.map(|value| value / quota_divisor),
-        total_used_raw.map(|value| value / quota_divisor),
-        total_available_raw.map(|value| value / quota_divisor),
+        None,
+        total_used,
+        total_available,
         action_config
             .get("currency")
             .and_then(Value::as_str)
             .unwrap_or("USD"),
-        extra,
+        Map::new(),
     ))
-}
-
-fn new_api_plan_name(user_data: &Value) -> Option<String> {
-    for key in ["group", "plan_name", "planName", "plan", "package"] {
-        let value = user_data.get(key).and_then(Value::as_str)?.trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn balance_response_object(response_json: &Value) -> Result<&Value, String> {
-    if let Some(success) = response_json.get("success").and_then(Value::as_bool) {
-        if !success {
-            return Err(response_json
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("业务状态码表示失败")
-                .to_string());
-        }
-        if let Some(data) = response_json.get("data").filter(|value| value.is_object()) {
-            return Ok(data);
-        }
-    }
-
-    if let Some(code) = response_json.get("code").and_then(Value::as_i64) {
-        if code != 0 {
-            return Err(response_json
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("查询余额失败")
-                .to_string());
-        }
-        if let Some(data) = response_json.get("data").filter(|value| value.is_object()) {
-            return Ok(data);
-        }
-    }
-
-    response_json
-        .as_object()
-        .map(|_| response_json)
-        .ok_or_else(|| "响应格式无效".to_string())
-}
-
-fn balance_value_from_candidates(
-    full_response: &Value,
-    response_data: &Value,
-    action_config: &Map<String, Value>,
-    config_keys: &[&str],
-    candidate_paths: &[&str],
-) -> Option<f64> {
-    for key in config_keys {
-        if let Some(path) = action_config.get(*key).and_then(Value::as_str) {
-            let path = path.trim();
-            if path.is_empty() {
-                continue;
-            }
-            if let Some(value) = balance_value_at_path(full_response, path)
-                .or_else(|| balance_value_at_path(response_data, path))
-            {
-                return Some(value);
-            }
-        }
-    }
-
-    for path in candidate_paths {
-        if let Some(value) = balance_value_at_path(full_response, path)
-            .or_else(|| balance_value_at_path(response_data, path))
-        {
-            return Some(value);
-        }
-    }
-
-    None
-}
-
-fn balance_value_at_path(value: &Value, path: &str) -> Option<f64> {
-    let mut current = value;
-    for segment in path
-        .split('.')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-    {
-        current = value_at_path_segment(current, segment)?;
-    }
-    admin_provider_ops_value_as_f64(Some(current))
-}
-
-fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-    let mut current = value;
-    for segment in path
-        .split('.')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-    {
-        current = value_at_path_segment(current, segment)?;
-    }
-    Some(current)
-}
-
-fn value_at_path_segment<'a>(mut current: &'a Value, segment: &str) -> Option<&'a Value> {
-    if !segment.contains('[') {
-        return if current.is_array() {
-            segment
-                .parse::<usize>()
-                .ok()
-                .and_then(|index| current.get(index))
-        } else {
-            current.get(segment)
-        };
-    }
-
-    let mut rest = segment;
-    if let Some(open) = rest.find('[') {
-        let head = rest[..open].trim();
-        if !head.is_empty() {
-            current = current.get(head)?;
-        }
-        rest = &rest[open..];
-    }
-
-    while let Some(stripped) = rest.strip_prefix('[') {
-        let close = stripped.find(']')?;
-        let index = stripped[..close].trim().parse::<usize>().ok()?;
-        current = current.get(index)?;
-        rest = stripped[close + 1..].trim();
-        if rest.is_empty() {
-            return Some(current);
-        }
-    }
-
-    current.get(rest)
-}
-
-fn bool_value_from_candidates(
-    full_response: &Value,
-    response_data: &Value,
-    candidate_paths: &[&str],
-) -> Option<bool> {
-    for path in candidate_paths {
-        if let Some(value) = value_at_path(full_response, path)
-            .or_else(|| value_at_path(response_data, path))
-            .and_then(Value::as_bool)
-        {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn string_value_from_candidates(
-    full_response: &Value,
-    response_data: &Value,
-    candidate_paths: &[&str],
-) -> Option<String> {
-    for path in candidate_paths {
-        if let Some(value) = value_at_path(full_response, path)
-            .or_else(|| value_at_path(response_data, path))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn sub2api_usage_response_object(response_json: &Value) -> Result<&Value, String> {
-    if let Some(success) = response_json.get("success").and_then(Value::as_bool) {
-        if !success {
-            return Err(response_json
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("查询失败")
-                .to_string());
-        }
-        if let Some(data) = response_json.get("data").filter(|value| value.is_object()) {
-            return Ok(data);
-        }
-    }
-
-    if let Some(code) = response_json.get("code").and_then(Value::as_i64) {
-        if code != 0 {
-            return Err(response_json
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("查询失败")
-                .to_string());
-        }
-        if let Some(data) = response_json.get("data").filter(|value| value.is_object()) {
-            return Ok(data);
-        }
-    }
-
-    response_json
-        .as_object()
-        .map(|_| response_json)
-        .ok_or_else(|| "响应格式无效".to_string())
 }
 
 fn parse_cubence_balance_payload(
@@ -759,12 +414,6 @@ fn quota_divisor(action_config: &Map<String, Value>) -> f64 {
         .unwrap_or(500000.0)
 }
 
-fn balance_divisor(action_config: &Map<String, Value>) -> f64 {
-    admin_provider_ops_value_as_f64(action_config.get("balance_divisor"))
-        .filter(|value| *value > 0.0)
-        .unwrap_or_else(|| quota_divisor(action_config))
-}
-
 fn parse_rfc3339_unix_secs(value: Option<&Value>) -> Option<i64> {
     let raw = value?.as_str()?.trim();
     if raw.is_empty() {
@@ -817,8 +466,7 @@ fn parse_subscription(value: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_balance_checkin_outcome, parse_query_balance_payload,
-        parse_sub2api_api_key_usage_payload, parse_sub2api_balance_payload,
+        attach_balance_checkin_outcome, parse_query_balance_payload, parse_sub2api_balance_payload,
         ProviderOpsCheckinOutcome,
     };
     use serde_json::json;
@@ -840,109 +488,6 @@ mod tests {
 
         assert_eq!(payload["total_available"], json!(5.0));
         assert_eq!(payload["total_used"], json!(1.0));
-    }
-
-    #[test]
-    fn new_api_alias_parser_supports_balance_field_fallbacks() {
-        let payload = parse_query_balance_payload(
-            "oneapi",
-            &json!({ "quota_divisor": 1, "currency": "CNY" })
-                .as_object()
-                .cloned()
-                .expect("config"),
-            &json!({
-                "success": true,
-                "data": {
-                    "balance": 12.5,
-                    "used": 2.25
-                }
-            }),
-        )
-        .expect("payload should parse");
-
-        assert_eq!(payload["currency"], json!("CNY"));
-        assert_eq!(payload["total_available"], json!(12.5));
-        assert_eq!(payload["total_used"], json!(2.25));
-    }
-
-    #[test]
-    fn new_api_parser_supports_total_available_and_total_used_fields() {
-        let payload = parse_query_balance_payload(
-            "new_api",
-            &json!({ "quota_divisor": 1 })
-                .as_object()
-                .cloned()
-                .expect("config"),
-            &json!({
-                "data": {
-                    "total_available": 9.75,
-                    "total_used": 1.25
-                }
-            }),
-        )
-        .expect("payload should parse");
-
-        assert_eq!(payload["total_available"], json!(9.75));
-        assert_eq!(payload["total_used"], json!(1.25));
-        assert_eq!(payload["total_granted"], json!(11.0));
-    }
-
-    #[test]
-    fn new_api_parser_matches_cc_switch_usage_script_shape() {
-        let payload = parse_query_balance_payload(
-            "new_api",
-            &json!({ "quota_divisor": 500000, "currency": "USD" })
-                .as_object()
-                .cloned()
-                .expect("config"),
-            &json!({
-                "success": true,
-                "data": {
-                    "group": "默认套餐",
-                    "quota": 2_500_000,
-                    "used_quota": 500_000
-                }
-            }),
-        )
-        .expect("payload should parse");
-
-        assert_eq!(payload["total_available"], json!(5.0));
-        assert_eq!(payload["total_used"], json!(1.0));
-        assert_eq!(payload["total_granted"], json!(6.0));
-        assert_eq!(payload["currency"], json!("USD"));
-        assert_eq!(payload["extra"]["plan_name"], json!("默认套餐"));
-    }
-
-    #[test]
-    fn generic_api_parser_supports_deepseek_balance_shape() {
-        let payload = parse_query_balance_payload(
-            "generic_api",
-            &json!({
-                "quota_divisor": 1,
-                "currency": "CNY",
-                "balance_path": "balance_infos[0].total_balance"
-            })
-            .as_object()
-            .cloned()
-            .expect("config"),
-            &json!({
-                "is_available": true,
-                "balance_infos": [
-                    {
-                        "currency": "CNY",
-                        "total_balance": "128.50",
-                        "granted_balance": "8.50",
-                        "topped_up_balance": "120.00"
-                    }
-                ]
-            }),
-        )
-        .expect("payload should parse");
-
-        assert_eq!(payload["currency"], json!("CNY"));
-        assert_eq!(payload["total_available"], json!(128.5));
-        assert_eq!(payload["total_used"], json!(null));
-        assert_eq!(payload["total_granted"], json!(null));
     }
 
     #[test]
@@ -993,28 +538,6 @@ mod tests {
 
         assert_eq!(payload["total_available"], json!(10.0));
         assert_eq!(payload["extra"]["active_subscriptions"], json!(2));
-    }
-
-    #[test]
-    fn sub2api_api_key_usage_parser_matches_cc_switch_shape() {
-        let payload = parse_sub2api_api_key_usage_payload(
-            &json!({ "currency": "USD" })
-                .as_object()
-                .cloned()
-                .expect("config"),
-            &json!({
-                "is_active": true,
-                "quota": {
-                    "remaining": "12.5",
-                    "unit": "USD"
-                }
-            }),
-        )
-        .expect("payload should parse");
-
-        assert_eq!(payload["total_available"], json!(12.5));
-        assert_eq!(payload["currency"], json!("USD"));
-        assert_eq!(payload["extra"]["is_active"], json!(true));
     }
 
     #[test]

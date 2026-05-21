@@ -5,38 +5,6 @@ use super::{
 use serde_json::{json, Map, Value};
 
 pub(super) fn spec() -> ProviderOpsArchitectureSpec {
-    let api_key_usage_schema = json!({
-        "type": "object",
-        "properties": {
-            "base_url": {
-                "type": "string",
-                "title": "站点地址",
-                "description": "API 基础地址"
-            },
-            "api_key": {
-                "type": "string",
-                "title": "API Key",
-                "description": "用于访问 Sub2API /v1/usage 的模型 API Key",
-                "x-sensitive": true,
-                "x-input-type": "password",
-                "x-help": "请求 GET /v1/usage，并通过 Authorization: Bearer <API Key> 查询余量"
-            }
-        },
-        "required": ["api_key"],
-        "x-auth-method": "bearer",
-        "x-auth-type": "api_key",
-        "x-field-groups": [
-            { "fields": ["base_url"] },
-            { "fields": ["api_key"] }
-        ],
-        "x-validation": [
-            {
-                "type": "required",
-                "fields": ["api_key"],
-                "message": "请填写 API Key"
-            }
-        ]
-    });
     let session_login_schema = json!({
         "type": "object",
         "properties": {
@@ -93,7 +61,7 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
         },
         "required": ["refresh_token"],
         "x-auth-method": "bearer",
-        "x-auth-type": "refresh_token",
+        "x-auth-type": "api_key",
         "x-field-groups": [
             { "fields": ["base_url"] },
             { "fields": ["refresh_token"] }
@@ -112,7 +80,7 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
         display_name: "Sub2API",
         description: "Sub2API 风格中转站的预设配置",
         hidden: false,
-        credentials_schema: api_key_usage_schema.clone(),
+        credentials_schema: session_login_schema.clone(),
         verify_endpoint: "/api/v1/auth/me?timezone=Asia/Shanghai",
         verify_mode: ProviderOpsVerifyMode::Sub2ApiExchange,
         balance_mode: ProviderOpsBalanceMode::Sub2ApiDualRequest,
@@ -120,17 +88,12 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
         query_balance_cookie_auth_errors: false,
         supported_auth_types: vec![
             ProviderOpsAuthSpec {
-                auth_type: "api_key",
-                display_name: "API Key 用量接口",
-                credentials_schema: api_key_usage_schema,
-            },
-            ProviderOpsAuthSpec {
                 auth_type: "session_login",
                 display_name: "账号密码",
                 credentials_schema: session_login_schema,
             },
             ProviderOpsAuthSpec {
-                auth_type: "refresh_token",
+                auth_type: "api_key",
                 display_name: "Refresh Token",
                 credentials_schema: refresh_token_schema,
             },
@@ -138,7 +101,7 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
         supported_actions: vec![ProviderOpsActionSpec {
             action_type: "query_balance",
             display_name: "查询余额",
-            description: "查询 Sub2API API Key 用量或账户余额和订阅信息",
+            description: "查询 Sub2API 账户余额和订阅信息",
             config_schema: json!({
                 "type": "object",
                 "properties": {
@@ -151,7 +114,7 @@ pub(super) fn spec() -> ProviderOpsArchitectureSpec {
                 "required": []
             }),
         }],
-        default_connector: Some("api_key"),
+        default_connector: Some("session_login"),
     }
 }
 
@@ -160,7 +123,6 @@ pub(super) fn default_action_config(action_type: &str) -> Option<Map<String, Val
         "query_balance" => Some(json_object(json!({
             "endpoint": "/api/v1/auth/me?timezone=Asia/Shanghai",
             "subscription_endpoint": "/api/v1/subscriptions/summary",
-            "api_key_usage_endpoint": "/v1/usage",
             "method": "GET",
             "currency": "USD"
         }))),

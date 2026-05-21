@@ -402,46 +402,12 @@ export interface GrokUpstreamMetadata {
   account_user_id?: string | null
 }
 
-export interface BalanceQueryUpstreamMetadata {
-  updated_at?: number
-  architecture_id?: string | null
-  status?: string | null
-  executed_at?: string | null
-  response_time_ms?: number | null
-  total_available?: number | null
-  total_used?: number | null
-  total_granted?: number | null
-  currency?: string | null
-  plan_name?: string | null
-  query_config?: {
-    custom_base_url?: string | null
-    new_api_user_id?: string | null
-    sub2api_credential_kind?: 'api_key' | 'access_token' | 'refresh_token' | string | null
-    custom_endpoint?: string | null
-    custom_method?: 'GET' | 'POST' | string | null
-    custom_currency?: string | null
-    custom_quota_divisor?: number | null
-    custom_balance_path?: string | null
-    custom_used_path?: string | null
-    custom_granted_path?: string | null
-    auto_refresh_interval_minutes?: number | null
-    has_saved_secret?: boolean | null
-  } | null
-  extra?: Record<string, unknown> | null
-}
-
-export interface ProviderKeyBalanceSummary extends BalanceQueryUpstreamMetadata {
-  key_id?: string | null
-  key_name?: string | null
-}
-
 export interface UpstreamMetadata {
   codex?: CodexUpstreamMetadata
   antigravity?: AntigravityUpstreamMetadata
   kiro?: KiroUpstreamMetadata
   chatgpt_web?: ChatGPTWebUpstreamMetadata
   grok?: GrokUpstreamMetadata
-  balance_query?: BalanceQueryUpstreamMetadata
 }
 
 // 按格式的健康度数据
@@ -718,7 +684,6 @@ export interface ProviderWithEndpointsSummary {
   failover_rules?: FailoverRulesConfig | null
   ops_configured: boolean  // 是否配置了扩展操作（余额监控等）
   ops_architecture_id?: string  // 扩展操作使用的架构 ID（如 cubence, anyrouter）
-  key_balance_summary?: ProviderKeyBalanceSummary | null
   kiro_simulated_cache_enabled?: boolean
   created_at: string
   updated_at: string

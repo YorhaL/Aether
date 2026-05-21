@@ -250,9 +250,6 @@ pub(super) fn build_admin_provider_ops_saved_config_value(
     provider: &StoredProviderCatalogProvider,
     payload: AdminProviderOpsSaveConfigRequest,
 ) -> Result<serde_json::Value, String> {
-    let architecture_id =
-        admin_provider_ops_pure::normalize_architecture_id(payload.architecture_id.as_str())
-            .to_string();
     let auth_type = payload.connector.auth_type.trim().to_string();
     if auth_type.is_empty() || !admin_provider_ops_is_supported_auth_type(auth_type.as_str()) {
         return Err("connector.auth_type 必须是合法的认证类型".to_string());
@@ -260,7 +257,7 @@ pub(super) fn build_admin_provider_ops_saved_config_value(
 
     let merged_credentials = admin_provider_ops_merge_credentials(
         state,
-        architecture_id.as_str(),
+        payload.architecture_id.as_str(),
         provider,
         payload.connector.credentials,
     );
@@ -281,7 +278,7 @@ pub(super) fn build_admin_provider_ops_saved_config_value(
         .collect::<serde_json::Map<String, serde_json::Value>>();
 
     Ok(json!({
-        "architecture_id": architecture_id,
+        "architecture_id": payload.architecture_id,
         "base_url": payload.base_url,
         "connector": {
             "auth_type": auth_type,
@@ -331,16 +328,14 @@ pub(super) fn build_admin_provider_ops_config_payload(
         });
     };
     let connector = admin_provider_ops_connector_object(provider_ops_config);
-    let architecture_id = provider_ops_config
-        .get("architecture_id")
-        .and_then(serde_json::Value::as_str)
-        .map(admin_provider_ops_pure::normalize_architecture_id)
-        .unwrap_or("generic_api");
 
     json!({
         "provider_id": provider_id,
         "is_configured": true,
-        "architecture_id": architecture_id,
+        "architecture_id": provider_ops_config
+            .get("architecture_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("generic_api"),
         "base_url": resolve_admin_provider_ops_base_url(
             provider,
             endpoints,

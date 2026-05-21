@@ -21,7 +21,6 @@ const OAUTH_ACCOUNT_BLOCK_PREFIX: &str = "[ACCOUNT_BLOCK] ";
 const OAUTH_EXPIRED_PREFIX: &str = "[OAUTH_EXPIRED] ";
 const OAUTH_REFRESH_FAILED_PREFIX: &str = "[REFRESH_FAILED] ";
 const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
-const BALANCE_QUERY_SECRET_CIPHERTEXT_KEY: &str = "secret_ciphertext";
 
 pub(crate) fn provider_catalog_key_supports_format(
     key: &StoredProviderCatalogKey,
@@ -172,31 +171,6 @@ pub(crate) fn parse_catalog_auth_config_json(
         .ok()?
         .as_object()
         .cloned()
-}
-
-fn sanitized_admin_upstream_metadata(upstream_metadata: Option<&Value>) -> Value {
-    let Some(mut metadata) = upstream_metadata.cloned() else {
-        return Value::Null;
-    };
-    let Some(balance_query) = metadata
-        .as_object_mut()
-        .and_then(|metadata| metadata.get_mut("balance_query"))
-        .and_then(Value::as_object_mut)
-    else {
-        return metadata;
-    };
-    let has_saved_secret = balance_query
-        .remove(BALANCE_QUERY_SECRET_CIPHERTEXT_KEY)
-        .is_some();
-    if has_saved_secret {
-        let query_config = balance_query
-            .entry("query_config".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        if let Some(query_config) = query_config.as_object_mut() {
-            query_config.insert("has_saved_secret".to_string(), Value::Bool(true));
-        }
-    }
-    metadata
 }
 
 pub(crate) fn default_provider_key_status_snapshot() -> serde_json::Value {
@@ -1963,7 +1937,7 @@ pub(crate) fn build_admin_provider_key_response(
     );
     payload.insert(
         "upstream_metadata".to_string(),
-        sanitized_admin_upstream_metadata(key.upstream_metadata.as_ref()),
+        json!(key.upstream_metadata),
     );
     payload.insert("proxy".to_string(), json!(key.proxy));
     payload.insert("fingerprint".to_string(), json!(key.fingerprint));

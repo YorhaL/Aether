@@ -12,13 +12,6 @@ pub(crate) fn admin_provider_id_for_refresh_quota(request_path: &str) -> Option<
         .map(ToOwned::to_owned)
 }
 
-pub(crate) fn admin_provider_id_for_key_balance(request_path: &str) -> Option<String> {
-    request_path
-        .strip_prefix("/api/admin/endpoints/providers/")?
-        .strip_suffix("/key-balance")
-        .map(ToOwned::to_owned)
-}
-
 pub(crate) fn admin_reveal_key_id(request_path: &str) -> Option<String> {
     request_path
         .strip_prefix("/api/admin/endpoints/keys/")?

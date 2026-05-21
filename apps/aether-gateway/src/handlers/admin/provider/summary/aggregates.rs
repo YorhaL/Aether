@@ -31,7 +31,7 @@ pub(crate) async fn build_admin_provider_summary_payload(
         active_global_model_ids_result,
     ) = tokio::join!(
         state.list_provider_catalog_endpoints_by_provider_ids(&provider_ids),
-        state.list_provider_catalog_keys_by_provider_ids(&provider_ids),
+        state.list_provider_catalog_key_summaries_by_provider_ids(&provider_ids),
         state.read_provider_quota_snapshot(provider_id),
         state.list_provider_model_stats(&provider_ids),
         state.list_active_global_model_ids_by_provider_ids(&provider_ids),
@@ -197,7 +197,7 @@ pub(crate) async fn build_admin_providers_summary_payload(
     } else {
         let (endpoints_result, keys_result, model_stats_result, active_global_model_refs_result) = tokio::join!(
             state.list_provider_catalog_endpoints_by_provider_ids(&provider_ids),
-            state.list_provider_catalog_keys_by_provider_ids(&provider_ids),
+            state.list_provider_catalog_key_summaries_by_provider_ids(&provider_ids),
             state.list_provider_model_stats(&provider_ids),
             state.list_active_global_model_ids_by_provider_ids(&provider_ids),
         );

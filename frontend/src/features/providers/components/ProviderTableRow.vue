@@ -163,7 +163,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground/70 hover:text-foreground"
-          title="配置用量查询"
+          title="扩展操作配置"
           @click="$emit('openOpsConfig', provider)"
         >
           <KeyRound class="h-3.5 w-3.5" />
