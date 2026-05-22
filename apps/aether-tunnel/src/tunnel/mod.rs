@@ -476,6 +476,8 @@ mod tests {
             server_label: "gateway-owned-tunnel".to_string(),
             aether_url: config.aether_url.clone(),
             management_token: config.management_token.clone(),
+            tunnel_security: config.tunnel_security,
+            tunnel_encryption_key: config.tunnel_encryption_key.clone(),
             node_name: config.node_name.clone(),
             node_id: Arc::new(std::sync::RwLock::new(node_id.to_string())),
             aether_client: Arc::new(AetherClient::new(

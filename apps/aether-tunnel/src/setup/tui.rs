@@ -99,7 +99,7 @@ impl ServerTab {
                     value: "off".into(),
                     kind: FieldKind::Text,
                     required: false,
-                    help: "off or non_tls_required for secure ws:// tunnel MVP",
+                    help: "off or non_tls_required; http:// plus a key auto-enables secure tunnel",
                 },
                 Field {
                     label: "Tunnel Encryption Key",

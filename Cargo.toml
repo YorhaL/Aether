@@ -67,6 +67,7 @@ aether-http = { path = "crates/aether-http" }
 aether-runtime = { path = "crates/aether-runtime" }
 aether-testkit = { path = "crates/aether-testkit" }
 aes = "0.8"
+aes-gcm = "0.10"
 async-stream = "0.3"
 async-trait = "0.1"
 axum = "0.8"

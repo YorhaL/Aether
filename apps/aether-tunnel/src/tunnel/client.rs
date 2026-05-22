@@ -17,6 +17,10 @@ use crate::egress_proxy::{
 };
 use crate::state::{AppState, ServerContext};
 use aether_contracts::tunnel::{CURRENT_TUNNEL_PROTOCOL_VERSION, TUNNEL_PROTOCOL_VERSION_HEADER};
+use aether_contracts::tunnel_security::{
+    SecureFrameCodec, TunnelSecurityRole, TUNNEL_SECURITY_HEADER, TUNNEL_SECURITY_NON_TLS_REQUIRED,
+    TUNNEL_SECURITY_SESSION_HEADER,
+};
 
 use super::{dispatcher, heartbeat, writer};
 
@@ -45,16 +49,28 @@ pub async fn connect_and_run(
     // Build WebSocket request with auth headers
     let mut request = ws_url.clone().into_client_request()?;
     let headers = request.headers_mut();
-    headers.insert(
-        "Authorization",
-        http::HeaderValue::from_str(&format!("Bearer {}", server.management_token))?,
-    );
+    if server.tunnel_security != crate::config::TunnelSecurity::NonTlsRequired {
+        headers.insert(
+            "Authorization",
+            http::HeaderValue::from_str(&format!("Bearer {}", server.management_token))?,
+        );
+    }
     headers.insert(
         TUNNEL_PROTOCOL_VERSION_HEADER,
         http::HeaderValue::from_str(&CURRENT_TUNNEL_PROTOCOL_VERSION.to_string())?,
     );
     let node_id = server.node_id.read().unwrap().clone();
     headers.insert("X-Node-Id", http::HeaderValue::from_str(&node_id)?);
+    if server.tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
+        headers.insert(
+            TUNNEL_SECURITY_HEADER,
+            http::HeaderValue::from_static(TUNNEL_SECURITY_NON_TLS_REQUIRED),
+        );
+        headers.insert(
+            TUNNEL_SECURITY_SESSION_HEADER,
+            http::HeaderValue::from_str(&node_id)?,
+        );
+    }
     // Use dynamic node_name (may be updated by remote config) instead of
     // the static server.node_name, so that remote name changes take effect
     // on the next reconnect.
@@ -119,6 +135,19 @@ pub async fn connect_and_run(
             handshake_timeout.as_millis()
         )
     })??;
+    let security = if server.tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
+        let key = server
+            .tunnel_encryption_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("secure tunnel requires tunnel_encryption_key"))?;
+        Some(Arc::new(SecureFrameCodec::new(
+            key,
+            &node_id,
+            TunnelSecurityRole::Client,
+        )?))
+    } else {
+        None
+    };
     let stale_timeout = state
         .config
         .tunnel_stale_timeout()
@@ -146,10 +175,11 @@ pub async fn connect_and_run(
     let (ws_sink, ws_read) = futures_util::StreamExt::split(ws_stream);
 
     // Spawn writer task (with WebSocket ping keepalive)
-    let (frame_tx, mut writer_handle) = writer::spawn_writer_with_metrics(
+    let (frame_tx, mut writer_handle) = writer::spawn_writer_with_metrics_and_security(
         ws_sink,
         ping_interval,
         Some(Arc::clone(&server.tunnel_metrics)),
+        security.clone(),
     );
     let drain_signal = spawn_drain_signal(conn_idx, frame_tx.clone(), drain.clone());
 
@@ -174,13 +204,14 @@ pub async fn connect_and_run(
     let state_clone = Arc::clone(state);
     let server_clone = Arc::clone(server);
     let outcome = tokio::select! {
-        result = dispatcher::run(
+        result = dispatcher::run_with_security(
             state_clone,
             server_clone,
             ws_read,
             frame_tx.clone(),
             hb_handle,
             drain.clone(),
+            security.clone(),
         ) => {
             match result {
                 Ok(()) => Ok(TunnelOutcome::Disconnected),

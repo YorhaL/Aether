@@ -123,10 +123,14 @@ version = "0.1.0"
 name = "aether-contracts"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
  "bytes",
  "flate2",
+ "hmac",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

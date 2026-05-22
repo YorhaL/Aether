@@ -18,7 +18,10 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, ServerEntry, TunnelPoolSizing};
+use crate::config::{
+    effective_tunnel_security, validate_tunnel_encryption_key, Config, ServerEntry,
+    TunnelPoolSizing,
+};
 use crate::net;
 use crate::registration::client::AetherClient;
 use crate::runtime::{self, DynamicConfig};
@@ -212,8 +215,24 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             &entry.aether_url,
             &entry.management_token,
         ));
+        let tunnel_security = effective_tunnel_security(
+            &entry.aether_url,
+            entry.tunnel_security,
+            entry.tunnel_encryption_key.as_deref(),
+        );
+        if tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
+            let key = entry
+                .tunnel_encryption_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("tunnel_encryption_key must be set for secure non-TLS tunnel")
+                })?;
+            validate_tunnel_encryption_key(key)?;
+        }
         match client
-            .register(&config, &node_name, &public_ip, Some(&hw_info))
+            .register(&config, entry, &node_name, &public_ip, Some(&hw_info))
             .await
         {
             Ok(node_id) => {
@@ -603,7 +622,13 @@ async fn retry_failed_registration(
         }
 
         match client
-            .register(&state.config, &node_name, &public_ip, Some(&hw_info))
+            .register(
+                &state.config,
+                &entry,
+                &node_name,
+                &public_ip,
+                Some(&hw_info),
+            )
             .await
         {
             Ok(node_id) => {
@@ -681,6 +706,12 @@ fn build_server_context(
         server_label: label.to_string(),
         aether_url: entry.aether_url.clone(),
         management_token: entry.management_token.clone(),
+        tunnel_security: effective_tunnel_security(
+            &entry.aether_url,
+            entry.tunnel_security,
+            entry.tunnel_encryption_key.as_deref(),
+        ),
+        tunnel_encryption_key: entry.tunnel_encryption_key.clone(),
         node_name: node_name.to_string(),
         node_id: Arc::new(RwLock::new(node_id)),
         aether_client: client,

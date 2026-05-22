@@ -278,6 +278,31 @@ impl FromStr for TunnelSecurity {
     }
 }
 
+pub fn validate_tunnel_encryption_key(value: &str) -> anyhow::Result<()> {
+    aether_contracts::tunnel_security::decode_psk(value)
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!(err))
+}
+
+pub fn effective_tunnel_security(
+    aether_url: &str,
+    configured: Option<TunnelSecurity>,
+    tunnel_encryption_key: Option<&str>,
+) -> TunnelSecurity {
+    if configured == Some(TunnelSecurity::NonTlsRequired) {
+        return TunnelSecurity::NonTlsRequired;
+    }
+    if aether_url.trim_start().starts_with("http://")
+        && tunnel_encryption_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+    {
+        return TunnelSecurity::NonTlsRequired;
+    }
+    TunnelSecurity::Off
+}
+
 /// Aether tunnel agent.
 ///
 /// Deployed on overseas VPS to relay API traffic for Aether instances
@@ -713,12 +738,18 @@ impl Config {
         if self.node_name.trim().is_empty() {
             anyhow::bail!("node_name must not be empty");
         }
-        if self.tunnel_security == TunnelSecurity::NonTlsRequired
-            && normalized_proxy_url(&self.tunnel_encryption_key).is_none()
-        {
-            anyhow::bail!(
-                "tunnel_encryption_key must be set when tunnel_security=non_tls_required"
-            );
+        let effective_security = effective_tunnel_security(
+            &self.aether_url,
+            Some(self.tunnel_security),
+            self.tunnel_encryption_key.as_deref(),
+        );
+        if effective_security == TunnelSecurity::NonTlsRequired {
+            let Some(key) = normalized_proxy_url(&self.tunnel_encryption_key) else {
+                anyhow::bail!(
+                    "tunnel_encryption_key must be set when tunnel_security=non_tls_required"
+                );
+            };
+            validate_tunnel_encryption_key(key)?;
         }
         for &port in &self.allowed_ports {
             if port == 0 {
@@ -1465,7 +1496,7 @@ aether_url = "http://aether.example.com"
 management_token = "ae_test"
 node_name = "jp-proxy-01"
 tunnel_security = "non_tls_required"
-tunnel_encryption_key = "base64-32-bytes"
+tunnel_encryption_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
 "#,
         )
         .expect("server tunnel security TOML");
@@ -1477,7 +1508,7 @@ tunnel_encryption_key = "base64-32-bytes"
         );
         assert_eq!(
             cfg.servers[0].tunnel_encryption_key.as_deref(),
-            Some("base64-32-bytes")
+            Some("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
         );
     }
 
@@ -1740,11 +1771,59 @@ node_name = "tunnel-test"
             "--tunnel-security",
             "non_tls_required",
             "--tunnel-encryption-key",
-            "base64-32-bytes",
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
         ]);
         with_key
             .validate()
             .expect("non_tls_required with a PSK should validate");
+    }
+
+    #[test]
+    fn validate_infers_non_tls_security_for_http_url_with_key() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-encryption-key",
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        ]);
+
+        assert_eq!(config.tunnel_security, TunnelSecurity::Off);
+        assert_eq!(
+            effective_tunnel_security(
+                &config.aether_url,
+                Some(config.tunnel_security),
+                config.tunnel_encryption_key.as_deref(),
+            ),
+            TunnelSecurity::NonTlsRequired
+        );
+        config
+            .validate()
+            .expect("http URL with PSK should infer secure tunnel mode");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_tunnel_encryption_key() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-encryption-key",
+            "not-a-valid-32-byte-key",
+        ]);
+
+        let error = config
+            .validate()
+            .expect_err("invalid PSK should fail validation");
+        assert!(error.to_string().contains("base64-encoded 32 bytes"));
     }
 
     #[test]
