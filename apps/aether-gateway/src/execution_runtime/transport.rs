@@ -38,6 +38,9 @@ use crate::{AppState, GatewayError};
 const HUB_RELAY_CONTENT_TYPE: &str = "application/vnd.aether.tunnel-envelope";
 const HUB_RELAY_ERROR_HEADER: &str = "x-aether-tunnel-error";
 const TUNNEL_RELAY_PATH_PREFIX: &str = "/api/internal/tunnel/relay";
+const DEFAULT_TUNNEL_TIMEOUT_MS: u64 = 60_000;
+const MIN_TUNNEL_TIMEOUT_SECS: u64 = 1;
+const MAX_TUNNEL_TIMEOUT_SECS: u64 = 300;
 pub(crate) fn format_upstream_request_error(err: &reqwest::Error) -> String {
     let mut kinds = Vec::new();
     if err.is_connect() {
@@ -176,6 +179,12 @@ struct RelayRequestMeta {
     method: String,
     url: String,
     headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_first_byte_timeout_ms: Option<u64>,
     timeout: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     follow_redirects: Option<bool>,
@@ -193,6 +202,13 @@ pub(crate) struct ExecutionTransportControls {
     follow_redirects: Option<bool>,
     http1_only: bool,
     accept_invalid_certs: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TunnelTimeoutMetadata {
+    request_timeout_ms: Option<u64>,
+    stream_first_byte_timeout_ms: Option<u64>,
+    legacy_timeout_secs: u64,
 }
 
 pub(crate) enum DirectUpstreamResponse {
@@ -579,6 +595,7 @@ fn build_direct_tunnel_request_meta(
     headers: &HeaderMap,
     transport_controls: ExecutionTransportControls,
 ) -> tunnel_protocol::RequestMeta {
+    let timeout_metadata = resolve_tunnel_timeout_metadata(plan);
     tunnel_protocol::RequestMeta {
         provider_id: Some(plan.provider_id.clone()),
         endpoint_id: Some(plan.endpoint_id.clone()),
@@ -586,7 +603,10 @@ fn build_direct_tunnel_request_meta(
         method: plan.method.clone(),
         url: plan.url.clone(),
         headers: header_map_to_string_map(headers).into_iter().collect(),
-        timeout: resolve_relay_timeout_seconds(plan),
+        stream: plan.stream,
+        request_timeout_ms: timeout_metadata.request_timeout_ms,
+        stream_first_byte_timeout_ms: timeout_metadata.stream_first_byte_timeout_ms,
+        timeout: timeout_metadata.legacy_timeout_secs,
         follow_redirects: transport_controls.follow_redirects,
         http1_only: transport_controls.http1_only,
         transport_profile: plan.transport_profile.clone(),
@@ -753,7 +773,8 @@ async fn send_via_tunnel_relay(
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     let client = build_relay_client(plan.timeouts.as_ref())?;
     let relay_url = build_relay_url(plan.proxy.as_ref(), node_id);
-    let timeout_secs = resolve_relay_timeout_seconds(plan);
+    let timeout_metadata = resolve_tunnel_timeout_metadata(plan);
+    let timeout_secs = timeout_metadata.legacy_timeout_secs;
     let envelope = build_relay_envelope(
         RelayRequestMeta {
             provider_id: plan.provider_id.clone(),
@@ -762,6 +783,9 @@ async fn send_via_tunnel_relay(
             method: method.as_str().to_string(),
             url: plan.url.clone(),
             headers: header_map_to_string_map(&headers),
+            stream: plan.stream,
+            request_timeout_ms: timeout_metadata.request_timeout_ms,
+            stream_first_byte_timeout_ms: timeout_metadata.stream_first_byte_timeout_ms,
             timeout: timeout_secs,
             follow_redirects: transport_controls.follow_redirects,
             http1_only: transport_controls.http1_only,
@@ -791,15 +815,22 @@ async fn send_via_tunnel_relay(
         .request(reqwest::Method::POST, relay_url)
         .header(reqwest::header::CONTENT_TYPE, HUB_RELAY_CONTENT_TYPE)
         .body(envelope);
-    if let Some(timeout) = total_timeout {
-        request = request.timeout(timeout);
+    if !plan.stream {
+        if let Some(timeout) = total_timeout {
+            request = request.timeout(timeout);
+        }
     }
 
+    let first_byte_timeout = if plan.stream {
+        resolve_tunnel_first_byte_timeout(plan)
+    } else {
+        None
+    };
+
     let started_at = Instant::now();
-    let response = request
-        .send()
+    let response = send_relay_request(request, first_byte_timeout)
         .await
-        .map_err(|err| ExecutionRuntimeTransportError::RelayError(err.to_string()))?;
+        .map_err(ExecutionRuntimeTransportError::RelayError)?;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     let status_code = response.status().as_u16();
     let proxy_timing = response
@@ -867,6 +898,21 @@ async fn send_via_tunnel_relay(
     }
 
     Ok(response)
+}
+
+async fn send_relay_request(
+    request: reqwest::RequestBuilder,
+    first_byte_timeout: Option<Duration>,
+) -> Result<reqwest::Response, String> {
+    if let Some(timeout) = first_byte_timeout {
+        return match tokio::time::timeout(timeout, request.send()).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err("tunnel relay first byte timeout".to_string()),
+        };
+    }
+
+    request.send().await.map_err(|err| err.to_string())
 }
 
 pub(crate) fn build_request_body(
@@ -965,18 +1011,49 @@ fn resolve_tunnel_base_url_from_proxy(proxy: &ProxySnapshot) -> Option<String> {
 }
 
 fn resolve_relay_timeout_seconds(plan: &ExecutionPlan) -> u64 {
-    let ms = plan
-        .timeouts
+    resolve_tunnel_timeout_metadata(plan).legacy_timeout_secs
+}
+
+fn resolve_tunnel_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
+    plan.stream.then(|| {
+        Duration::from_millis(
+            resolve_selected_tunnel_timeout_ms(plan).unwrap_or(DEFAULT_TUNNEL_TIMEOUT_MS),
+        )
+    })
+}
+
+fn resolve_tunnel_timeout_metadata(plan: &ExecutionPlan) -> TunnelTimeoutMetadata {
+    TunnelTimeoutMetadata {
+        request_timeout_ms: plan
+            .timeouts
+            .as_ref()
+            .and_then(|timeouts| timeouts.total_ms),
+        stream_first_byte_timeout_ms: plan
+            .timeouts
+            .as_ref()
+            .and_then(|timeouts| timeouts.first_byte_ms),
+        legacy_timeout_secs: timeout_ms_to_secs(
+            resolve_selected_tunnel_timeout_ms(plan).unwrap_or(DEFAULT_TUNNEL_TIMEOUT_MS),
+        ),
+    }
+}
+
+fn resolve_selected_tunnel_timeout_ms(plan: &ExecutionPlan) -> Option<u64> {
+    plan.timeouts
         .as_ref()
         .and_then(|timeouts| {
-            timeouts
-                .read_ms
-                .or(timeouts.total_ms)
-                .or(timeouts.connect_ms)
+            if plan.stream {
+                timeouts.first_byte_ms.or(timeouts.total_ms)
+            } else {
+                timeouts.total_ms.or(timeouts.first_byte_ms)
+            }
         })
-        .unwrap_or(60_000);
+        .map(|value| value.max(1))
+}
+
+fn timeout_ms_to_secs(ms: u64) -> u64 {
     let secs = ms.div_ceil(1_000);
-    secs.clamp(1, 300)
+    secs.clamp(MIN_TUNNEL_TIMEOUT_SECS, MAX_TUNNEL_TIMEOUT_SECS)
 }
 
 fn resolve_tunnel_node_id(proxy: Option<&ProxySnapshot>) -> Option<String> {
@@ -1522,12 +1599,12 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        build_browser_wreq_client, build_client, build_execution_response_body,
-        build_request_headers, execute_sync_plan, record_manual_proxy_request_failure,
-        record_manual_proxy_request_outcome, record_manual_proxy_request_success,
-        record_manual_proxy_stream_error, resolve_execution_transport_controls,
-        response_body_is_json, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
-        ExecutionTransportControls,
+        build_browser_wreq_client, build_client, build_direct_tunnel_request_meta,
+        build_execution_response_body, build_request_headers, execute_sync_plan,
+        record_manual_proxy_request_failure, record_manual_proxy_request_outcome,
+        record_manual_proxy_request_success, record_manual_proxy_stream_error,
+        resolve_execution_transport_controls, response_body_is_json, DirectSyncExecutionRuntime,
+        ExecutionRuntimeTransportError, ExecutionTransportControls,
     };
     use crate::constants::{
         EXECUTION_RUNTIME_LOOP_GUARD_HEADER, EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN,
@@ -1627,6 +1704,64 @@ mod tests {
         assert!(forwarded
             .get("x-aether-execution-accept-invalid-certs")
             .is_none());
+    }
+
+    #[test]
+    fn tunnel_request_meta_uses_total_timeout_for_non_stream_requests() {
+        let plan = tunnel_timeout_plan(false);
+        let meta = build_direct_tunnel_request_meta(
+            &plan,
+            &reqwest::header::HeaderMap::new(),
+            ExecutionTransportControls::default(),
+        );
+
+        assert!(!meta.stream);
+        assert_eq!(meta.request_timeout_ms, Some(90_000));
+        assert_eq!(meta.stream_first_byte_timeout_ms, Some(12_345));
+        assert_eq!(meta.timeout, 90);
+    }
+
+    #[test]
+    fn tunnel_request_meta_uses_first_byte_timeout_for_stream_requests() {
+        let plan = tunnel_timeout_plan(true);
+        let meta = build_direct_tunnel_request_meta(
+            &plan,
+            &reqwest::header::HeaderMap::new(),
+            ExecutionTransportControls::default(),
+        );
+
+        assert!(meta.stream);
+        assert_eq!(meta.request_timeout_ms, Some(90_000));
+        assert_eq!(meta.stream_first_byte_timeout_ms, Some(12_345));
+        assert_eq!(meta.timeout, 13);
+    }
+
+    fn tunnel_timeout_plan(stream: bool) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: "req-timeout".into(),
+            candidate_id: None,
+            provider_name: Some("provider".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+            stream,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("gpt-4.1".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                total_ms: Some(90_000),
+                first_byte_ms: Some(12_345),
+                ..ExecutionTimeouts::default()
+            }),
+        }
     }
 
     fn tunnel_proxy_snapshot(base_url: String) -> ProxySnapshot {

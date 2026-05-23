@@ -185,6 +185,12 @@ pub struct RequestMeta {
     pub method: String,
     pub url: String,
     pub headers: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_byte_timeout_ms: Option<u64>,
     #[serde(default = "default_timeout", deserialize_with = "deserialize_timeout")]
     pub timeout: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

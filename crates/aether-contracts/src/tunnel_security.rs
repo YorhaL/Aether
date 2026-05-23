@@ -39,6 +39,8 @@ pub enum TunnelSecurityError {
     MissingEncryptedFlag,
     #[error("secure tunnel frame payload is too short")]
     PayloadTooShort,
+    #[error("secure tunnel frame sequence is not the expected next value")]
+    UnexpectedSequence,
     #[error("secure tunnel frame encryption failed")]
     Encrypt,
     #[error("secure tunnel frame decryption failed")]
@@ -51,6 +53,7 @@ pub struct SecureFrameCodec {
     seal_prefix: [u8; 4],
     open_prefix: [u8; 4],
     next_sequence: AtomicU64,
+    next_open_sequence: AtomicU64,
 }
 
 impl SecureFrameCodec {
@@ -90,6 +93,7 @@ impl SecureFrameCodec {
             seal_prefix,
             open_prefix,
             next_sequence: AtomicU64::new(0),
+            next_open_sequence: AtomicU64::new(0),
         })
     }
 
@@ -132,6 +136,10 @@ impl SecureFrameCodec {
 
         let mut payload = frame.payload.clone();
         let sequence = payload.get_u64();
+        let expected_sequence = self.next_open_sequence.load(Ordering::Relaxed);
+        if sequence != expected_sequence {
+            return Err(TunnelSecurityError::UnexpectedSequence);
+        }
         let nonce_bytes = nonce_bytes(self.open_prefix, sequence);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let clear_flags = frame.flags & !FLAG_ENCRYPTED;
@@ -146,6 +154,8 @@ impl SecureFrameCodec {
                 },
             )
             .map_err(|_| TunnelSecurityError::Decrypt)?;
+        self.next_open_sequence
+            .store(expected_sequence.wrapping_add(1), Ordering::Relaxed);
 
         Ok(Frame::new(
             frame.stream_id,
@@ -241,6 +251,68 @@ mod tests {
             server.decrypt_frame(wire),
             Err(TunnelSecurityError::Decrypt)
         ));
+    }
+
+    #[test]
+    fn secure_frame_rejects_replayed_sequence() {
+        let client = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Client)
+            .expect("client codec");
+        let server = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Server)
+            .expect("server codec");
+        let encrypted = client
+            .encrypt_frame(Frame::new(
+                1,
+                MsgType::RequestBody,
+                0,
+                Bytes::from_static(b"secret"),
+            ))
+            .expect("encrypt");
+        let wire = Frame::decode(encrypted).expect("wire frame");
+
+        server.decrypt_frame(wire.clone()).expect("first decrypt");
+        assert!(matches!(
+            server.decrypt_frame(wire),
+            Err(TunnelSecurityError::UnexpectedSequence)
+        ));
+    }
+
+    #[test]
+    fn secure_frame_rejects_out_of_order_sequence_without_advancing() {
+        let client = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Client)
+            .expect("client codec");
+        let server = SecureFrameCodec::new(&test_key(), "session-1", TunnelSecurityRole::Server)
+            .expect("server codec");
+        let first = Frame::decode(
+            client
+                .encrypt_frame(Frame::new(
+                    1,
+                    MsgType::RequestBody,
+                    0,
+                    Bytes::from_static(b"first"),
+                ))
+                .expect("encrypt first"),
+        )
+        .expect("first wire frame");
+        let second = Frame::decode(
+            client
+                .encrypt_frame(Frame::new(
+                    1,
+                    MsgType::RequestBody,
+                    0,
+                    Bytes::from_static(b"second"),
+                ))
+                .expect("encrypt second"),
+        )
+        .expect("second wire frame");
+
+        assert!(matches!(
+            server.decrypt_frame(second),
+            Err(TunnelSecurityError::UnexpectedSequence)
+        ));
+        assert_eq!(
+            server.decrypt_frame(first).expect("first decrypt").payload,
+            Bytes::from_static(b"first")
+        );
     }
 
     #[test]

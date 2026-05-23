@@ -221,6 +221,13 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             entry.tunnel_encryption_key.as_deref(),
         );
         if tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
+            if entry.aether_url.trim_start().starts_with("http://") {
+                warn!(
+                    server = %label,
+                    url = %entry.aether_url,
+                    "secure tunnel frame encryption starts after registration; deliver install and registration credentials over HTTPS or another trusted bootstrap channel"
+                );
+            }
             let key = entry
                 .tunnel_encryption_key
                 .as_deref()

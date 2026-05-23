@@ -229,7 +229,7 @@ node_name = "jp-proxy-02"
 tunnel_encryption_key = "base64-32-bytes"
 ```
 
-`tunnel_security = "non_tls_required"` 是非 TLS secure tunnel 的 MVP 配置面：它要求同时提供当前 `[[servers]]` 条目的 `tunnel_encryption_key`，后续握手使用 `node_name` / `X-Node-Id` 查找对应 PSK，不引入 `tunnel_encryption_key_id`。`wss://` 仍是推荐方案；`ws:// + secure tunnel` 只保护 Aether ↔ tunnel 之间的 token 和 payload，不等价于 HTTPS 伪装，也不覆盖 tunnel ↔ origin/provider 这段链路。
+`tunnel_security = "non_tls_required"` 是非 TLS secure tunnel 的 MVP 配置面：它要求同时提供当前 `[[servers]]` 条目的 `tunnel_encryption_key`，后续握手使用 `node_name` / `X-Node-Id` 查找对应 PSK，不引入 `tunnel_encryption_key_id`。`wss://` 仍是推荐方案；`ws:// + secure tunnel` 只加密注册完成后的 WebSocket tunnel frame，不保护安装脚本、注册请求、`management_token` 或 PSK 的首次分发；这些 bootstrap 凭据仍必须通过 HTTPS 或其他可信通道交付。它不等价于 HTTPS 伪装，也不覆盖 tunnel ↔ origin/provider 这段链路。
 
 如果 `aether_url` 使用 `http://` 且当前 `[[servers]]` 条目提供了 `tunnel_encryption_key`，省略 `tunnel_security` 时运行时会自动按 `non_tls_required` 生效；显式配置 `tunnel_security = "off"` 会关闭该自动推断。secure tunnel 会在 WebSocket tunnel 上加密所有二进制 tunnel frame；未配置 key 或显式关闭的旧节点仍按原明文协议工作。
 
