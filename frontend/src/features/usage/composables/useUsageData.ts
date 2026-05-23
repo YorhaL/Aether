@@ -13,6 +13,7 @@ import type {
 import { createDefaultStats } from '../types'
 import { log } from '@/utils/logger'
 import { getErrorStatus } from '@/types/api-error'
+import { isUsageProviderVisible, normalizeUsageProviderStats } from '../utils/providerStats'
 
 export interface UseUsageDataOptions {
   isAdminPage: Ref<boolean>
@@ -36,11 +37,6 @@ export interface FilterParams {
   api_format?: string
   status?: string
   client_family?: string
-}
-
-function isUsageProviderVisible(provider: string | undefined | null): provider is string {
-  const normalized = provider?.trim().toLowerCase()
-  return !!normalized && !['unknown', 'unknow', 'pending'].includes(normalized)
 }
 
 export function useUsageData(options: UseUsageDataOptions) {
@@ -171,29 +167,8 @@ export function useUsageData(options: UseUsageDataOptions) {
             return true
           }
 
-          const visibleProviderData = providerData.filter(item => isUsageProviderVisible(item.provider))
-          providerStats.value = visibleProviderData.map(item => ({
-            providerId: item.provider_id,
-            providerKey: item.provider_key,
-            providerIdentitySource: item.provider_identity_source,
-            provider: item.provider,
-            requests: item.request_count,
-            totalTokens: item.total_tokens || 0,
-            effectiveInputTokens: item.effective_input_tokens || 0,
-            totalInputContext: item.total_input_context || 0,
-            outputTokens: item.output_tokens || 0,
-            cacheReadTokens: item.cache_read_tokens || 0,
-            cacheCreationTokens: item.cache_creation_tokens || 0,
-            cacheHitRate: item.cache_hit_rate || 0,
-            totalCost: item.total_cost,
-            actualCost: item.actual_cost,
-            successRate: item.success_rate,
-            avgResponseTime: item.avg_response_time_ms > 0
-              ? `${(item.avg_response_time_ms / 1000).toFixed(2)}s`
-              : '-'
-          }))
-
-          availableProviders.value = visibleProviderData.map(item => item.provider).sort()
+          providerStats.value = normalizeUsageProviderStats(providerData)
+          availableProviders.value = providerStats.value.map(item => item.provider).sort()
         } catch (error) {
           if (requestId !== loadStatsRequestId) {
             return true
