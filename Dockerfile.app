@@ -25,7 +25,7 @@ RUN ln -s /opt/aether/releases/image /opt/aether/current
 # --- final stage: distroless runtime ---
 FROM gcr.io/distroless/static-debian12
 
-COPY --from=layout --chown=65532:65532 /opt/aether /opt/aether
+COPY --from=layout /opt/aether /opt/aether
 
 WORKDIR /opt/aether
 
@@ -39,5 +39,5 @@ EXPOSE 8084
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/opt/aether/current/bin/aether-gateway", "--healthcheck"]
 
-USER 65532:65532
+USER root
 ENTRYPOINT ["/opt/aether/current/bin/aether-gateway"]
