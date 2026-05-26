@@ -372,6 +372,11 @@ describe('isModelTestableEndpoint', () => {
 })
 
 describe('formatModelTestDiagnostic', () => {
+  it('maps model permission skips to an actionable label', () => {
+    expect(formatModelTestDiagnostic('key_model_not_allowed'))
+      .toBe('Key 未允许当前模型，已跳过')
+  })
+
   it('maps pool account blocked scheduler code to an actionable label', () => {
     expect(formatModelTestDiagnostic('pool_account_blocked')).toBe('账号已失效，需重新授权')
   })

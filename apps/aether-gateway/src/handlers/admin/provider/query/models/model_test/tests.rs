@@ -63,6 +63,68 @@ fn sample_openai_image_transport(provider_type: &str) -> AdminGatewayProviderTra
     }
 }
 
+fn sample_catalog_key_with_allowed_models(
+    allowed_models: Option<serde_json::Value>,
+) -> aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey {
+    let mut key =
+        aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("sample provider key should build");
+    key.allowed_models = allowed_models;
+    key
+}
+
+#[test]
+fn provider_query_model_test_allows_keys_without_model_restrictions() {
+    let unrestricted = sample_catalog_key_with_allowed_models(None);
+    let empty = sample_catalog_key_with_allowed_models(Some(json!([])));
+
+    assert!(provider_query_key_allows_effective_test_model(
+        &unrestricted,
+        "model-b",
+        "model-b-upstream",
+    ));
+    assert!(provider_query_key_allows_effective_test_model(
+        &empty,
+        "model-b",
+        "model-b-upstream",
+    ));
+}
+
+#[test]
+fn provider_query_model_test_filters_key_disallowed_for_requested_model() {
+    let key = sample_catalog_key_with_allowed_models(Some(json!(["model-a"])));
+
+    assert!(!provider_query_key_allows_effective_test_model(
+        &key,
+        "model-b",
+        "model-b-upstream",
+    ));
+}
+
+#[test]
+fn provider_query_model_test_allows_key_for_requested_or_mapped_model() {
+    let requested_allowed = sample_catalog_key_with_allowed_models(Some(json!(["model-b"])));
+    let mapped_allowed = sample_catalog_key_with_allowed_models(Some(json!(["MODEL-B-UPSTREAM"])));
+
+    assert!(provider_query_key_allows_effective_test_model(
+        &requested_allowed,
+        "model-b",
+        "model-b-upstream",
+    ));
+    assert!(provider_query_key_allows_effective_test_model(
+        &mapped_allowed,
+        "model-b",
+        "model-b-upstream",
+    ));
+}
+
 #[test]
 fn provider_query_test_request_body_preserves_custom_model() {
     let payload = json!({

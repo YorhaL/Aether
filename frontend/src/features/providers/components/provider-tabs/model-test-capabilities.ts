@@ -41,6 +41,7 @@ const MODEL_TEST_BEARER_INHERITS_PROVIDER_FORMATS = new Set([
 ])
 
 const MODEL_TEST_DIAGNOSTIC_LABELS: Record<string, string> = {
+  key_model_not_allowed: 'Key 未允许当前模型，已跳过',
   pool_account_blocked: '账号已失效，需重新授权',
 }
 
