@@ -12,6 +12,20 @@ const CODEX_DEFAULT_INSTRUCTIONS: &str = "";
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
 const CODEX_DEFAULT_REASONING_SUMMARY: &str = "auto";
 const CODEX_REASONING_ENCRYPTED_CONTENT_INCLUDE: &str = "reasoning.encrypted_content";
+const CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS: &[&str] = &[
+    "max_output_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "user",
+    "metadata",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "stream_options",
+    "previous_response_id",
+];
 const CODEX_DEFAULT_USER_AGENT: &str =
     "codex-tui/0.122.0 (Mac OS 15.2.0; arm64) vscode/2.6.11 (codex-tui; 0.122.0)";
 const CODEX_DEFAULT_ORIGINATOR: &str = "codex-tui";
@@ -729,17 +743,10 @@ pub fn apply_codex_openai_responses_special_body_edits(
         return;
     };
 
-    if !body_rules_handle_path(body_rules, "max_output_tokens") {
-        body_object.remove("max_output_tokens");
-    }
-    if !body_rules_handle_path(body_rules, "temperature") {
-        body_object.remove("temperature");
-    }
-    if !body_rules_handle_path(body_rules, "top_p") {
-        body_object.remove("top_p");
-    }
-    if !body_rules_handle_path(body_rules, "metadata") {
-        body_object.remove("metadata");
+    for field in CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS {
+        if !body_rules_handle_path(body_rules, field) {
+            body_object.remove(*field);
+        }
     }
     if is_openai_responses_compact_request(provider_api_format) {
         body_object.remove("store");
@@ -881,6 +888,7 @@ mod tests {
         apply_codex_openai_responses_chat_body_edits,
         apply_codex_openai_responses_special_body_edits,
         apply_openai_responses_compact_special_body_edits, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
+        CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS,
     };
     use serde_json::json;
 
@@ -1007,6 +1015,42 @@ mod tests {
             json!("lookup_account")
         );
         assert!(provider_request_body["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn codex_responses_body_edits_strip_sub2api_unsupported_fields() {
+        let mut provider_request_body = json!({
+            "input": [{"role": "user", "content": "hello"}],
+            "model": "gpt-5.4",
+            "max_output_tokens": 1024,
+            "max_completion_tokens": 1024,
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "frequency_penalty": 0.1,
+            "presence_penalty": 0.1,
+            "user": "user-123",
+            "metadata": {"client": "cursor"},
+            "prompt_cache_retention": "24h",
+            "safety_identifier": "safe-user-123",
+            "stream_options": {"include_usage": true},
+            "previous_response_id": "resp_123"
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        for field in CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS {
+            assert!(
+                provider_request_body.get(*field).is_none(),
+                "{field} must be stripped"
+            );
+        }
+        assert_eq!(provider_request_body["input"][0]["content"], json!("hello"));
     }
 
     #[test]
