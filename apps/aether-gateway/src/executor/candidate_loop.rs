@@ -538,6 +538,10 @@ fn resolve_stream_candidate_watchdog_timeout(
     Duration::from_millis(timeout_ms)
 }
 
+fn stream_candidate_watchdog_timeout_message() -> &'static str {
+    "Stream first byte timeout"
+}
+
 async fn execute_stream_candidate_with_watchdog<Fut>(
     state: &(impl RequestCandidateRuntimeWriter + ?Sized),
     trace_id: &str,
@@ -577,9 +581,7 @@ where
                     status: RequestCandidateStatus::Failed,
                     status_code: Some(http::StatusCode::GATEWAY_TIMEOUT.as_u16()),
                     error_type: Some("local_stream_candidate_watchdog_timeout".to_string()),
-                    error_message: Some(format!(
-                        "local stream candidate attempt exceeded watchdog timeout of {timeout_ms}ms"
-                    )),
+                    error_message: Some(stream_candidate_watchdog_timeout_message().to_string()),
                     latency_ms: None,
                     started_at_unix_ms: Some(candidate_started_unix_ms),
                     finished_at_unix_ms: Some(finished_at_unix_ms),
@@ -899,7 +901,7 @@ mod tests {
         assert!(record
             .error_message
             .as_deref()
-            .is_some_and(|message| message.contains("25ms")));
+            .is_some_and(|message| message == "Stream first byte timeout"));
         assert_eq!(record.candidate_index, 2);
     }
 }
