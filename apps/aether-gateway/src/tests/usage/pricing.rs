@@ -637,7 +637,20 @@ fn assert_usage_and_pricing(
             Some(expected_response_time_ms)
         );
     }
-    assert_eq!(stored_usage.first_byte_time_ms, expected_ttfb_ms);
+    if expected_ttfb_ms.is_some() {
+        let first_byte_time_ms = stored_usage
+            .first_byte_time_ms
+            .expect("stream usage should record first visible text time");
+        assert!(
+            stored_usage
+                .response_time_ms
+                .is_some_and(|response_time_ms| response_time_ms >= first_byte_time_ms),
+            "stream first_byte_time_ms should not exceed response_time_ms: first_byte={first_byte_time_ms}, response={:?}",
+            stored_usage.response_time_ms
+        );
+    } else {
+        assert_eq!(stored_usage.first_byte_time_ms, None);
+    }
     assert_eq!(
         stored_usage.settlement_input_price_per_1m(),
         Some(INPUT_PRICE_PER_1M)
@@ -893,7 +906,7 @@ async fn gateway_records_openai_stream_usage_and_pricing_with_cache_tokens_impl(
         cache_read_tokens: 40,
     };
     let stream_body = [
-        "data: {\"id\":\"chatcmpl-openai-usage-pricing-stream-123\",\"choices\":[]}\n\n",
+        "data: {\"id\":\"chatcmpl-openai-usage-pricing-stream-123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n",
         "data: [DONE]\n\n",
     ];
     let frames = build_stream_frames(
@@ -1084,7 +1097,7 @@ async fn gateway_records_claude_stream_usage_and_pricing_with_cache_breakdown_im
         cache_read_tokens: 10,
     };
     let stream_body = [
-        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-claude-usage-pricing-stream-123\",\"type\":\"message\",\"model\":\"claude-sonnet-4-5-upstream\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
     ];
     let frames = build_stream_frames(
@@ -1273,7 +1286,8 @@ async fn gateway_records_gemini_stream_usage_and_pricing_with_cache_read_tokens_
         cache_creation_ephemeral_1h_tokens: 0,
         cache_read_tokens: 30,
     };
-    let stream_body = ["data: {\"candidates\":[]}\n\n"];
+    let stream_body =
+        ["data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n"];
     let frames = build_stream_frames(
         &stream_body,
         standardized_usage_json(expected),

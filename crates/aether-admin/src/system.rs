@@ -1284,16 +1284,31 @@ pub fn ldap_module_config_is_valid(config: Option<&StoredLdapModuleConfig>) -> b
             .is_some()
 }
 
+pub struct AdminModuleValidationInput<'a> {
+    pub module_name: &'a str,
+    pub oauth_providers: &'a [StoredOAuthProviderModuleConfig],
+    pub ldap_config: Option<&'a StoredLdapModuleConfig>,
+    pub gemini_files_has_capable_key: bool,
+    pub important_notification_configured: bool,
+    pub server_chan_push_configured: bool,
+    pub bark_push_configured: bool,
+    pub s3_backup_configured: bool,
+}
+
 pub fn build_admin_module_validation_result(
-    module_name: &str,
-    oauth_providers: &[StoredOAuthProviderModuleConfig],
-    ldap_config: Option<&StoredLdapModuleConfig>,
-    gemini_files_has_capable_key: bool,
-    important_notification_configured: bool,
-    server_chan_push_configured: bool,
-    bark_push_configured: bool,
-    s3_backup_configured: bool,
+    input: AdminModuleValidationInput<'_>,
 ) -> (bool, Option<String>) {
+    let AdminModuleValidationInput {
+        module_name,
+        oauth_providers,
+        ldap_config,
+        gemini_files_has_capable_key,
+        important_notification_configured,
+        server_chan_push_configured,
+        bark_push_configured,
+        s3_backup_configured,
+    } = input;
+
     match module_name {
         "oauth" => {
             if oauth_providers.is_empty() {

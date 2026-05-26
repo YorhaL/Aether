@@ -353,16 +353,15 @@ enum RegisterUserBody {
     LegacyJsonFirebaseToken,
 }
 
+type RegisterUserRequestParts = (
+    BTreeMap<String, String>,
+    &'static str,
+    Option<Value>,
+    Option<Vec<u8>>,
+);
+
 impl RegisterUserBody {
-    fn request_parts(
-        self,
-        token: &str,
-    ) -> (
-        BTreeMap<String, String>,
-        &'static str,
-        Option<Value>,
-        Option<Vec<u8>>,
-    ) {
+    fn request_parts(self, token: &str) -> RegisterUserRequestParts {
         match self {
             Self::ProtoOneTimeToken => (
                 register_user_proto_headers(),
@@ -1101,7 +1100,7 @@ mod tests {
         );
         let expected_body = proto_string_field_body(1, one_time_token);
         assert_eq!(
-            requests[0].body_bytes.as_ref().map(|body| body.as_slice()),
+            requests[0].body_bytes.as_deref(),
             Some(expected_body.as_slice())
         );
     }

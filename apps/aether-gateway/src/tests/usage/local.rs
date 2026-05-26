@@ -1213,7 +1213,7 @@ async fn gateway_handles_local_openai_chat_stream_report_with_local_reporting_wh
         any(|_request: Request| async move {
             let frames = concat!(
                 "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"chatcmpl-local-report-stream-123\\\",\\\"usage\\\":{\\\"input_tokens\\\":2,\\\"output_tokens\\\":4,\\\"total_tokens\\\":6}}\\n\\n\"}}\n",
+                "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"chatcmpl-local-report-stream-123\\\",\\\"choices\\\":[{\\\"index\\\":0,\\\"delta\\\":{\\\"content\\\":\\\"hello\\\"}}],\\\"usage\\\":{\\\"input_tokens\\\":2,\\\"output_tokens\\\":4,\\\"total_tokens\\\":6}}\\n\\n\"}}\n",
                 "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: [DONE]\\n\\n\"}}\n",
                 "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":31,\"ttfb_ms\":11}}}\n",
                 "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
@@ -1286,7 +1286,7 @@ async fn gateway_handles_local_openai_chat_stream_report_with_local_reporting_wh
         strip_sse_keepalive_comments(&response.text().await.expect("stream body should read"));
     assert_eq!(
         body_text,
-        "data: {\"id\":\"chatcmpl-local-report-stream-123\",\"usage\":{\"input_tokens\":2,\"output_tokens\":4,\"total_tokens\":6}}\n\ndata: [DONE]\n\n"
+        "data: {\"id\":\"chatcmpl-local-report-stream-123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}],\"usage\":{\"input_tokens\":2,\"output_tokens\":4,\"total_tokens\":6}}\n\ndata: [DONE]\n\n"
     );
 
     let stored_usage = wait_for_usage_status(
@@ -1297,7 +1297,8 @@ async fn gateway_handles_local_openai_chat_stream_report_with_local_reporting_wh
     .await;
     assert_eq!(stored_usage.status, "completed");
     assert_eq!(stored_usage.total_tokens, 6);
-    assert_eq!(stored_usage.first_byte_time_ms, Some(11));
+    assert!(stored_usage.first_byte_time_ms.is_some());
+    assert!(stored_usage.response_time_ms >= stored_usage.first_byte_time_ms);
     assert!(stored_usage.is_stream);
 
     let stored_candidates = request_candidate_repository

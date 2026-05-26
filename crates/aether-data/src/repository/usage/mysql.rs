@@ -166,8 +166,16 @@ ON DUPLICATE KEY UPDATE
   status_code = VALUES(status_code),
   error_message = VALUES(error_message),
   error_category = VALUES(error_category),
-  response_time_ms = VALUES(response_time_ms),
-  first_byte_time_ms = VALUES(first_byte_time_ms),
+  response_time_ms = CASE
+    WHEN VALUES(response_time_ms) IS NULL OR VALUES(response_time_ms) = 0
+    THEN COALESCE(response_time_ms, VALUES(response_time_ms))
+    ELSE VALUES(response_time_ms)
+  END,
+  first_byte_time_ms = CASE
+    WHEN VALUES(first_byte_time_ms) IS NULL OR VALUES(first_byte_time_ms) = 0
+    THEN COALESCE(first_byte_time_ms, VALUES(first_byte_time_ms))
+    ELSE VALUES(first_byte_time_ms)
+  END,
   status = VALUES(status),
   billing_status = VALUES(billing_status),
   request_metadata = VALUES(request_metadata),

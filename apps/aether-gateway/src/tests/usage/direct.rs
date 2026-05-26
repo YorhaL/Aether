@@ -485,7 +485,7 @@ async fn gateway_records_usage_for_execution_runtime_stream_when_runtime_enabled
         any(|_request: Request| async move {
             let frames = concat!(
                 "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"chatcmpl-usage-stream-123\\\",\\\"usage\\\":{\\\"input_tokens\\\":2,\\\"output_tokens\\\":4,\\\"total_tokens\\\":6}}\\n\\n\"}}\n",
+                "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"chatcmpl-usage-stream-123\\\",\\\"choices\\\":[{\\\"index\\\":0,\\\"delta\\\":{\\\"content\\\":\\\"hello\\\"}}],\\\"usage\\\":{\\\"input_tokens\\\":2,\\\"output_tokens\\\":4,\\\"total_tokens\\\":6}}\\n\\n\"}}\n",
                 "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: [DONE]\\n\\n\"}}\n",
                 "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":51,\"ttfb_ms\":19}}}\n",
                 "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
@@ -539,7 +539,8 @@ async fn gateway_records_usage_for_execution_runtime_stream_when_runtime_enabled
     assert_eq!(stored.status, "completed");
     assert_eq!(stored.billing_status, "pending");
     assert_eq!(stored.total_tokens, 6);
-    assert_eq!(stored.first_byte_time_ms, Some(19));
+    assert!(stored.first_byte_time_ms.is_some());
+    assert!(stored.response_time_ms >= stored.first_byte_time_ms);
     assert_eq!(stored.is_stream, true);
 
     gateway_handle.abort();
@@ -572,7 +573,7 @@ async fn gateway_records_pending_usage_before_execution_runtime_stream_headers_a
                     allow_execution_response.notified().await;
                     let frames = concat!(
                         "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"chatcmpl-usage-stream-pending-123\\\",\\\"usage\\\":{\\\"input_tokens\\\":2,\\\"output_tokens\\\":4,\\\"total_tokens\\\":6}}\\n\\n\"}}\n",
+                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"chatcmpl-usage-stream-pending-123\\\",\\\"choices\\\":[{\\\"index\\\":0,\\\"delta\\\":{\\\"content\\\":\\\"hello\\\"}}],\\\"usage\\\":{\\\"input_tokens\\\":2,\\\"output_tokens\\\":4,\\\"total_tokens\\\":6}}\\n\\n\"}}\n",
                         "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: [DONE]\\n\\n\"}}\n",
                         "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":51,\"ttfb_ms\":19}}}\n",
                         "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
@@ -688,7 +689,8 @@ async fn gateway_records_pending_usage_before_execution_runtime_stream_headers_a
     }
     let stored = stored.expect("usage should be finalized");
     assert_eq!(stored.status, "completed");
-    assert_eq!(stored.first_byte_time_ms, Some(19));
+    assert!(stored.first_byte_time_ms.is_some());
+    assert!(stored.response_time_ms >= stored.first_byte_time_ms);
 
     gateway_handle.abort();
     execution_runtime_handle.abort();

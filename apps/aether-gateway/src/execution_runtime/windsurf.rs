@@ -4044,7 +4044,10 @@ fn language_server_env(proxy_url: Option<&str>) -> BTreeMap<String, String> {
             .or_else(|| std::env::var_os("HOME"))
             .filter(|value| !value.is_empty())
         {
-            env.insert("USERPROFILE".to_string(), PathBuf::from(home).display().to_string());
+            env.insert(
+                "USERPROFILE".to_string(),
+                PathBuf::from(home).display().to_string(),
+            );
         }
     }
     if let Some(proxy_url) = proxy_url.filter(|value| !value.trim().is_empty()) {

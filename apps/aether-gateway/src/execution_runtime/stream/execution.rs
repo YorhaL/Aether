@@ -17,7 +17,7 @@ use aether_scheduler_core::{
 };
 use aether_usage_runtime::{
     build_lifecycle_usage_seed, build_stream_terminal_usage_payload_seed,
-    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed,
+    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed, LifecycleUsageSeed,
     UsageBodyCapturePolicy, UsageRequestRecordLevel, UsageRuntimeAccess,
     DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
 };
@@ -603,6 +603,209 @@ fn append_stream_capture_bytes(
     if keep_len < chunk.len() {
         *truncated = true;
     }
+}
+
+const CLIENT_VISIBLE_TEXT_TRACKER_MAX_BUFFER_BYTES: usize = 256 * 1024;
+
+struct ClientVisibleTextTracker {
+    client_api_format: String,
+    buffered: Vec<u8>,
+    observed: bool,
+}
+
+impl ClientVisibleTextTracker {
+    fn new(client_api_format: &str) -> Self {
+        Self {
+            client_api_format: client_api_format.trim().to_ascii_lowercase(),
+            buffered: Vec::new(),
+            observed: false,
+        }
+    }
+
+    fn observe_chunk(&mut self, chunk: &[u8]) -> bool {
+        if self.observed || chunk.is_empty() {
+            return false;
+        }
+
+        self.buffered.extend_from_slice(chunk);
+        while let Some((block_end, separator_len)) = find_sse_block_boundary(&self.buffered) {
+            let block_len = block_end + separator_len;
+            let block = self.buffered.drain(..block_len).collect::<Vec<_>>();
+            if sse_block_has_client_visible_text(&self.client_api_format, &block) {
+                self.observed = true;
+                self.buffered.clear();
+                return true;
+            }
+        }
+
+        if self.buffered.len() > CLIENT_VISIBLE_TEXT_TRACKER_MAX_BUFFER_BYTES {
+            self.buffered.clear();
+        }
+
+        false
+    }
+}
+
+fn sse_block_has_client_visible_text(client_api_format: &str, block: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(block);
+    let mut data_lines = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        data_lines.push(data.strip_prefix(' ').unwrap_or(data));
+    }
+
+    if data_lines.is_empty() {
+        return false;
+    }
+
+    let data = data_lines.join("\n");
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return false;
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
+
+    stream_json_has_client_visible_text(client_api_format, &value)
+}
+
+fn stream_json_has_client_visible_text(client_api_format: &str, value: &Value) -> bool {
+    if client_api_format.contains("openai:chat") || client_api_format.contains("openai_chat") {
+        return openai_chat_stream_json_has_visible_text(value);
+    }
+    if client_api_format.contains("openai:responses")
+        || client_api_format.contains("openai_responses")
+    {
+        return openai_responses_stream_json_has_visible_text(value);
+    }
+    if client_api_format.contains("claude") {
+        return claude_stream_json_has_visible_text(value);
+    }
+    if client_api_format.contains("gemini") {
+        return gemini_stream_json_has_visible_text(value);
+    }
+
+    openai_chat_stream_json_has_visible_text(value)
+        || openai_responses_stream_json_has_visible_text(value)
+        || claude_stream_json_has_visible_text(value)
+        || gemini_stream_json_has_visible_text(value)
+}
+
+fn visible_text_value(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace()))
+}
+
+fn openai_chat_stream_json_has_visible_text(value: &Value) -> bool {
+    value
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                choice
+                    .get("delta")
+                    .and_then(Value::as_object)
+                    .is_some_and(|delta| {
+                        visible_text_value(delta.get("content"))
+                            || visible_text_value(delta.get("refusal"))
+                    })
+                    || visible_text_value(choice.get("text"))
+            })
+        })
+}
+
+fn openai_responses_stream_json_has_visible_text(value: &Value) -> bool {
+    match value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "response.output_text.delta" => visible_text_value(value.get("delta")),
+        "response.output_text.done" => visible_text_value(value.get("text")),
+        "response.completed" => value
+            .get("response")
+            .is_some_and(openai_response_body_has_visible_text),
+        _ => false,
+    }
+}
+
+fn openai_response_body_has_visible_text(value: &Value) -> bool {
+    value
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        content.iter().any(|part| {
+                            part.get("type")
+                                .and_then(Value::as_str)
+                                .is_some_and(|kind| matches!(kind, "output_text" | "text"))
+                                && visible_text_value(part.get("text"))
+                        })
+                    })
+            })
+        })
+}
+
+fn claude_stream_json_has_visible_text(value: &Value) -> bool {
+    match value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "content_block_delta" => {
+            value
+                .get("delta")
+                .and_then(Value::as_object)
+                .is_some_and(|delta| {
+                    delta.get("type").and_then(Value::as_str) == Some("text_delta")
+                        && visible_text_value(delta.get("text"))
+                })
+        }
+        "content_block_start" => value
+            .get("content_block")
+            .and_then(Value::as_object)
+            .is_some_and(|block| {
+                block.get("type").and_then(Value::as_str) == Some("text")
+                    && visible_text_value(block.get("text"))
+            }),
+        _ => false,
+    }
+}
+
+fn gemini_stream_json_has_visible_text(value: &Value) -> bool {
+    let event = value
+        .get("response")
+        .filter(|response| response.get("candidates").is_some())
+        .unwrap_or(value);
+    event
+        .get("candidates")
+        .and_then(Value::as_array)
+        .is_some_and(|candidates| {
+            candidates.iter().any(|candidate| {
+                candidate
+                    .get("content")
+                    .and_then(|content| content.get("parts"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            !part
+                                .get("thought")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                                && visible_text_value(part.get("text"))
+                        })
+                    })
+            })
+        })
 }
 
 fn observe_stream_usage_bytes(
@@ -1736,19 +1939,72 @@ fn should_refresh_stream_usage_telemetry(
         || (next_elapsed.is_some() && next_elapsed != previous_elapsed)
 }
 
+fn stream_elapsed_ms_since(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn first_visible_text_telemetry(
+    stream_started_at: Instant,
+    upstream_telemetry: Option<&ExecutionTelemetry>,
+) -> ExecutionTelemetry {
+    let elapsed_ms = stream_elapsed_ms_since(stream_started_at);
+    ExecutionTelemetry {
+        ttfb_ms: Some(elapsed_ms),
+        elapsed_ms: Some(elapsed_ms),
+        upstream_bytes: upstream_telemetry.and_then(|telemetry| telemetry.upstream_bytes),
+    }
+}
+
+fn usage_refresh_telemetry(
+    upstream_telemetry: &ExecutionTelemetry,
+    usage_stream_telemetry: Option<&ExecutionTelemetry>,
+) -> ExecutionTelemetry {
+    ExecutionTelemetry {
+        ttfb_ms: usage_stream_telemetry.and_then(|telemetry| telemetry.ttfb_ms),
+        elapsed_ms: upstream_telemetry.elapsed_ms,
+        upstream_bytes: upstream_telemetry.upstream_bytes,
+    }
+}
+
+fn maybe_record_first_visible_text_started(
+    state: &AppState,
+    lifecycle_seed: &LifecycleUsageSeed,
+    status_code: u16,
+    tracker: &mut ClientVisibleTextTracker,
+    chunk: &[u8],
+    stream_started_at: Instant,
+    upstream_telemetry: Option<&ExecutionTelemetry>,
+    usage_stream_telemetry: &mut Option<ExecutionTelemetry>,
+) {
+    if usage_stream_telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.ttfb_ms)
+        .is_some()
+    {
+        return;
+    }
+    if !tracker.observe_chunk(chunk) {
+        return;
+    }
+
+    let telemetry = first_visible_text_telemetry(stream_started_at, upstream_telemetry);
+    state.usage_runtime.record_stream_started(
+        state.data.as_ref(),
+        lifecycle_seed,
+        status_code,
+        Some(&telemetry),
+    );
+    *usage_stream_telemetry = Some(telemetry);
+}
+
 fn build_terminal_stream_telemetry(
     stream_started_at: Instant,
     telemetry: Option<&ExecutionTelemetry>,
     usage_stream_telemetry: Option<&ExecutionTelemetry>,
     upstream_bytes: u64,
 ) -> ExecutionTelemetry {
-    let current_elapsed_ms = stream_started_at
-        .elapsed()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
-    let ttfb_ms = telemetry
-        .and_then(|telemetry| telemetry.ttfb_ms)
-        .or_else(|| usage_stream_telemetry.and_then(|telemetry| telemetry.ttfb_ms));
+    let current_elapsed_ms = stream_elapsed_ms_since(stream_started_at);
+    let ttfb_ms = usage_stream_telemetry.and_then(|telemetry| telemetry.ttfb_ms);
     let prior_elapsed_ms = telemetry
         .and_then(|telemetry| telemetry.elapsed_ms)
         .or_else(|| usage_stream_telemetry.and_then(|telemetry| telemetry.elapsed_ms))
@@ -2279,6 +2535,9 @@ async fn execute_stream_from_frame_stream(
     let mut prefetched_body = Vec::new();
     let mut prefetched_inspection_body = Vec::new();
     let mut prefetched_telemetry: Option<ExecutionTelemetry> = None;
+    let mut prefetched_usage_telemetry: Option<ExecutionTelemetry> = None;
+    let mut prefetched_client_visible_text_tracker =
+        ClientVisibleTextTracker::new(plan.client_api_format.as_str());
     let mut reached_eof = false;
     let mut sync_json_stream_bridge_active = false;
     if skip_direct_finalize_prefetch {
@@ -2356,7 +2615,7 @@ async fn execute_stream_from_frame_stream(
                         candidate_id,
                         report_kind,
                         headers,
-                        prefetched_telemetry,
+                        prefetched_usage_telemetry.clone(),
                         &provider_prefetched_body,
                         failure,
                     )
@@ -2389,7 +2648,7 @@ async fn execute_stream_from_frame_stream(
                                     candidate_id,
                                     report_kind,
                                     headers,
-                                    prefetched_telemetry,
+                                    prefetched_usage_telemetry.clone(),
                                     &prefetched_body,
                                     failure,
                                 )
@@ -2420,7 +2679,7 @@ async fn execute_stream_from_frame_stream(
                             candidate_id,
                             report_kind,
                             headers,
-                            prefetched_telemetry,
+                            prefetched_usage_telemetry.clone(),
                             &provider_prefetched_body,
                             error_status_code,
                             error_body_json,
@@ -2458,7 +2717,7 @@ async fn execute_stream_from_frame_stream(
                                 headers,
                                 Some(body_json),
                                 None,
-                                prefetched_telemetry,
+                                prefetched_usage_telemetry.clone(),
                             );
                             record_sync_terminal_usage(
                                 state,
@@ -2500,6 +2759,19 @@ async fn execute_stream_from_frame_stream(
                                         "text/event-stream".to_string(),
                                     );
                                     stream_terminal_summary = outcome.terminal_summary;
+                                    if prefetched_usage_telemetry
+                                        .as_ref()
+                                        .and_then(|telemetry| telemetry.ttfb_ms)
+                                        .is_none()
+                                        && prefetched_client_visible_text_tracker
+                                            .observe_chunk(&outcome.sse_body)
+                                    {
+                                        prefetched_usage_telemetry =
+                                            Some(first_visible_text_telemetry(
+                                                stream_started_at,
+                                                prefetched_telemetry.as_ref(),
+                                            ));
+                                    }
                                     prefetched_body.extend_from_slice(&outcome.sse_body);
                                     prefetched_chunks.push(Bytes::from(outcome.sse_body));
                                     sync_json_stream_bridge_active = true;
@@ -2524,7 +2796,7 @@ async fn execute_stream_from_frame_stream(
                                         candidate_id,
                                         report_kind,
                                         headers,
-                                        prefetched_telemetry,
+                                        prefetched_usage_telemetry.clone(),
                                         &provider_prefetched_body,
                                         failure,
                                     )
@@ -2557,7 +2829,7 @@ async fn execute_stream_from_frame_stream(
                                     candidate_id,
                                     report_kind,
                                     headers,
-                                    prefetched_telemetry,
+                                    prefetched_usage_telemetry.clone(),
                                     &provider_prefetched_body,
                                     failure,
                                 )
@@ -2588,7 +2860,7 @@ async fn execute_stream_from_frame_stream(
                                     candidate_id,
                                     report_kind,
                                     headers,
-                                    prefetched_telemetry,
+                                    prefetched_usage_telemetry.clone(),
                                     &provider_prefetched_body,
                                     failure,
                                 )
@@ -2599,6 +2871,18 @@ async fn execute_stream_from_frame_stream(
                         normalized_chunk
                     };
                     if !rewritten_chunk.is_empty() {
+                        if prefetched_usage_telemetry
+                            .as_ref()
+                            .and_then(|telemetry| telemetry.ttfb_ms)
+                            .is_none()
+                            && prefetched_client_visible_text_tracker
+                                .observe_chunk(&rewritten_chunk)
+                        {
+                            prefetched_usage_telemetry = Some(first_visible_text_telemetry(
+                                stream_started_at,
+                                prefetched_telemetry.as_ref(),
+                            ));
+                        }
                         prefetched_body.extend_from_slice(&rewritten_chunk);
                         prefetched_chunks.push(Bytes::from(rewritten_chunk));
                     }
@@ -2639,7 +2923,7 @@ async fn execute_stream_from_frame_stream(
                         candidate_id,
                         report_kind,
                         headers,
-                        prefetched_telemetry,
+                        prefetched_usage_telemetry.clone(),
                         &provider_prefetched_body,
                         build_stream_failure_from_execution_error(&error),
                     )
@@ -2652,11 +2936,16 @@ async fn execute_stream_from_frame_stream(
     drop(private_stream_normalizer);
     drop(local_stream_rewriter);
 
+    let initial_usage_telemetry = prefetched_usage_telemetry.clone().or_else(|| {
+        prefetched_telemetry
+            .as_ref()
+            .map(|telemetry| usage_refresh_telemetry(telemetry, None))
+    });
     state.usage_runtime.record_stream_started(
         state.data.as_ref(),
         &lifecycle_seed,
         status_code,
-        prefetched_telemetry.as_ref(),
+        initial_usage_telemetry.as_ref(),
     );
     if let Some(snapshot) = request_candidate_status_snapshot {
         let state_bg = state.clone();
@@ -2698,6 +2987,7 @@ async fn execute_stream_from_frame_stream(
     let prefetched_chunks_for_body = prefetched_chunks;
     let sync_json_stream_bridge_active_for_report = sync_json_stream_bridge_active;
     let initial_telemetry = prefetched_telemetry;
+    let initial_client_visible_text_tracker = prefetched_client_visible_text_tracker;
     let initial_reached_eof = reached_eof;
     let direct_stream_finalize_kind_owned = direct_stream_finalize_kind;
     let candidate_started_unix_secs_for_report = candidate_started_unix_secs;
@@ -2787,7 +3077,8 @@ async fn execute_stream_from_frame_stream(
         let mut client_stream_completion_tracker = ClientVisibleStreamCompletionTracker::default();
         let mut client_visible_stream_completed =
             client_stream_completion_tracker.observe_chunk(&prefetched_body_for_report);
-        let mut usage_stream_telemetry: Option<ExecutionTelemetry> = initial_telemetry.clone();
+        let mut client_visible_text_tracker = initial_client_visible_text_tracker;
+        let mut usage_stream_telemetry: Option<ExecutionTelemetry> = initial_usage_telemetry;
         let mut telemetry: Option<ExecutionTelemetry> = initial_telemetry;
         let reached_eof = initial_reached_eof;
         let mut downstream_dropped = false;
@@ -3136,32 +3427,6 @@ async fn execute_stream_from_frame_stream(
                             continue;
                         }
 
-                        if usage_stream_telemetry
-                            .as_ref()
-                            .and_then(|telemetry| telemetry.ttfb_ms)
-                            .is_none()
-                        {
-                            let first_data_elapsed_ms = stream_started_at_for_report
-                                .elapsed()
-                                .as_millis()
-                                .min(u128::from(u64::MAX))
-                                as u64;
-                            let first_data_telemetry = ExecutionTelemetry {
-                                ttfb_ms: Some(first_data_elapsed_ms),
-                                elapsed_ms: Some(first_data_elapsed_ms),
-                                upstream_bytes: telemetry
-                                    .as_ref()
-                                    .and_then(|telemetry| telemetry.upstream_bytes),
-                            };
-                            state_for_report.usage_runtime.record_stream_started(
-                                state_for_report.data.as_ref(),
-                                &lifecycle_seed_for_report,
-                                status_code,
-                                Some(&first_data_telemetry),
-                            );
-                            usage_stream_telemetry = Some(first_data_telemetry);
-                        }
-
                         append_stream_capture_bytes(
                             &mut buffered_body,
                             &rewritten_chunk,
@@ -3185,6 +3450,16 @@ async fn execute_stream_from_frame_stream(
                             );
                             downstream_dropped = true;
                         } else {
+                            maybe_record_first_visible_text_started(
+                                &state_for_report,
+                                &lifecycle_seed_for_report,
+                                status_code,
+                                &mut client_visible_text_tracker,
+                                rewritten_chunk.as_ref(),
+                                stream_started_at_for_report,
+                                telemetry.as_ref(),
+                                &mut usage_stream_telemetry,
+                            );
                             client_visible_stream_completed |= client_stream_completion_tracker
                                 .observe_chunk(rewritten_chunk.as_ref());
                             client_stream_bytes.fetch_add(rewritten_chunk_len, Ordering::Relaxed);
@@ -3210,18 +3485,22 @@ async fn execute_stream_from_frame_stream(
                     StreamFramePayload::Telemetry {
                         telemetry: frame_telemetry,
                     } => {
+                        let usage_frame_telemetry = usage_refresh_telemetry(
+                            &frame_telemetry,
+                            usage_stream_telemetry.as_ref(),
+                        );
                         let should_refresh_stream_usage = should_refresh_stream_usage_telemetry(
                             usage_stream_telemetry.as_ref(),
-                            &frame_telemetry,
+                            &usage_frame_telemetry,
                         );
                         if should_refresh_stream_usage {
                             state_for_report.usage_runtime.record_stream_started(
                                 state_for_report.data.as_ref(),
                                 &lifecycle_seed_for_report,
                                 status_code,
-                                Some(&frame_telemetry),
+                                Some(&usage_frame_telemetry),
                             );
-                            usage_stream_telemetry = Some(frame_telemetry.clone());
+                            usage_stream_telemetry = Some(usage_frame_telemetry);
                         }
                         telemetry = Some(frame_telemetry);
                     }
@@ -3327,6 +3606,16 @@ async fn execute_stream_from_frame_stream(
                                 );
                                 downstream_dropped = true;
                             } else {
+                                maybe_record_first_visible_text_started(
+                                    &state_for_report,
+                                    &lifecycle_seed_for_report,
+                                    status_code,
+                                    &mut client_visible_text_tracker,
+                                    rewritten_chunk.as_ref(),
+                                    stream_started_at_for_report,
+                                    telemetry.as_ref(),
+                                    &mut usage_stream_telemetry,
+                                );
                                 client_visible_stream_completed |= client_stream_completion_tracker
                                     .observe_chunk(rewritten_chunk.as_ref());
                                 client_stream_bytes
@@ -3398,6 +3687,16 @@ async fn execute_stream_from_frame_stream(
                             );
                             downstream_dropped = true;
                         } else {
+                            maybe_record_first_visible_text_started(
+                                &state_for_report,
+                                &lifecycle_seed_for_report,
+                                status_code,
+                                &mut client_visible_text_tracker,
+                                flushed_chunk.as_ref(),
+                                stream_started_at_for_report,
+                                telemetry.as_ref(),
+                                &mut usage_stream_telemetry,
+                            );
                             client_visible_stream_completed |= client_stream_completion_tracker
                                 .observe_chunk(flushed_chunk.as_ref());
                             client_stream_bytes.fetch_add(flushed_chunk_len, Ordering::Relaxed);
@@ -3831,7 +4130,7 @@ mod tests {
         stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
-        ClientVisibleStreamCompletionTracker,
+        ClientVisibleStreamCompletionTracker, ClientVisibleTextTracker,
     };
     use crate::control::GatewayControlDecision;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
@@ -4726,6 +5025,35 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn client_visible_text_tracker_ignores_control_role_and_tool_events_until_text() {
+        let mut tracker = ClientVisibleTextTracker::new("openai:chat");
+        assert!(!tracker.observe_chunk(
+            b": keepalive\n\n\
+              data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"
+        ));
+        assert!(!tracker.observe_chunk(
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\n"
+        ));
+        assert!(
+            tracker.observe_chunk(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+        );
+        assert!(!tracker
+            .observe_chunk(b"data: {\"choices\":[{\"delta\":{\"content\":\"again\"}}]}\n\n"));
+    }
+
+    #[test]
+    fn client_visible_text_tracker_detects_responses_output_text_across_chunks() {
+        let mut tracker = ClientVisibleTextTracker::new("openai:responses");
+        assert!(!tracker.observe_chunk(
+            b"event: response.created\n\
+              data: {\"type\":\"response.created\"}\n\n\
+              event: response.output_text.delta\n\
+              data: {\"type\":\"response.output_text.delta\",\"delta\":\""
+        ));
+        assert!(tracker.observe_chunk(b"Hi\"}\n\n"));
+    }
+
     #[tokio::test]
     async fn sse_body_stream_emits_initial_and_periodic_keepalive_without_business_chunks() {
         let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
@@ -5315,7 +5643,7 @@ mod tests {
                 b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
             ));
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"first\\\"}\\n\\n\"}}\n",
+                b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"first\\\",\\\"choices\\\":[{\\\"index\\\":0,\\\"delta\\\":{\\\"content\\\":\\\"hello\\\"}}]}\\n\\n\"}}\n",
             ));
             release_terminal_for_stream.notified().await;
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
@@ -5364,7 +5692,10 @@ mod tests {
         })
         .await
         .expect("first business chunk should arrive");
-        assert_eq!(first.as_ref(), b"data: {\"id\":\"first\"}\n\n");
+        assert_eq!(
+            first.as_ref(),
+            b"data: {\"id\":\"first\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"
+        );
         tokio::time::sleep(Duration::from_millis(30)).await;
         drop(body_stream);
         release_terminal.notify_one();
@@ -5863,6 +6194,193 @@ mod tests {
             .expect("response body should read");
         let text = String::from_utf8(body.to_vec()).expect("response body should be utf8");
         assert!(text.contains("response.output_text.delta"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn execute_execution_runtime_stream_waits_for_visible_text_before_recording_first_byte() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let role_only_seen = Arc::new(Notify::new());
+        let release_text = Arc::new(Notify::new());
+        let text_seen = Arc::new(Notify::new());
+        let release_terminal = Arc::new(Notify::new());
+        let role_only_seen_for_route = Arc::clone(&role_only_seen);
+        let release_text_for_route = Arc::clone(&release_text);
+        let text_seen_for_route = Arc::clone(&text_seen);
+        let release_terminal_for_route = Arc::clone(&release_terminal);
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/execute/stream",
+                any(move |_request: Request| {
+                    let role_only_seen = Arc::clone(&role_only_seen_for_route);
+                    let release_text = Arc::clone(&release_text_for_route);
+                    let text_seen = Arc::clone(&text_seen_for_route);
+                    let release_terminal = Arc::clone(&release_terminal_for_route);
+                    async move {
+                        let frames = stream! {
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
+                            ));
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"choices\\\":[{\\\"delta\\\":{\\\"role\\\":\\\"assistant\\\"}}]}\\n\\n\"}}\n",
+                            ));
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"ttfb_ms\":11,\"elapsed_ms\":12}}}\n",
+                            ));
+                            role_only_seen.notify_one();
+                            release_text.notified().await;
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"hello\\\"}}]}\\n\\n\"}}\n",
+                            ));
+                            text_seen.notify_one();
+                            release_terminal.notified().await;
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":50}}}\n",
+                            ));
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n",
+                            ));
+                        };
+                        let mut response = axum::http::Response::new(Body::from_stream(frames));
+                        response.headers_mut().insert(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/x-ndjson"),
+                        );
+                        response
+                    }
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            })
+            .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let plan = ExecutionPlan {
+            request_id: "req-live-stream-visible-text".into(),
+            candidate_id: Some("cand-live-stream-visible-text".into()),
+            provider_name: Some("openai".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://api.openai.com/v1/chat/completions".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+            ]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.4",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("gpt-5.4".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        )
+        .with_execution_runtime_candidate(true);
+
+        let response = execute_execution_runtime_stream(
+            &state,
+            plan,
+            "trace-live-stream-visible-text",
+            &decision,
+            "openai_chat_stream",
+            None,
+            Some(json!({
+                "provider_api_format": "openai:chat",
+                "client_api_format": "openai:chat",
+            })),
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        role_only_seen.notified().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let role_only_usage = loop {
+            let usage = usage_repository
+                .find_by_request_id("req-live-stream-visible-text")
+                .await
+                .expect("usage should read");
+            if usage.as_ref().is_some_and(|usage| {
+                usage.status == "streaming" && usage.response_time_ms == Some(12)
+            }) {
+                break usage.expect("streaming usage should exist");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "usage should record streaming status"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(role_only_usage.first_byte_time_ms, None);
+        assert_eq!(role_only_usage.response_time_ms, Some(12));
+
+        release_text.notify_one();
+        text_seen.notified().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let visible_text_usage = loop {
+            let usage = usage_repository
+                .find_by_request_id("req-live-stream-visible-text")
+                .await
+                .expect("usage should read");
+            if usage
+                .as_ref()
+                .is_some_and(|usage| usage.first_byte_time_ms.is_some())
+            {
+                break usage.expect("visible text usage should exist");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "usage should record first byte only after visible text"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(visible_text_usage.first_byte_time_ms.unwrap_or(0) >= 12);
+
+        release_terminal.notify_one();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let text = String::from_utf8(body.to_vec()).expect("response body should be utf8");
+        assert!(text.contains("\"role\":\"assistant\""));
+        assert!(text.contains("\"content\":\"hello\""));
 
         server.abort();
     }

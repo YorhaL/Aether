@@ -317,14 +317,16 @@ pub(crate) fn build_admin_module_validation_result(
     runtime: &AdminModuleRuntimeState,
 ) -> (bool, Option<String>) {
     admin_system_kernel::build_admin_module_validation_result(
-        module.name,
-        &runtime.oauth_providers,
-        runtime.ldap_config.as_ref(),
-        runtime.gemini_files_has_capable_key,
-        runtime.important_notification_configured,
-        runtime.server_chan_push_configured,
-        runtime.bark_push_configured,
-        runtime.s3_backup_configured,
+        admin_system_kernel::AdminModuleValidationInput {
+            module_name: module.name,
+            oauth_providers: &runtime.oauth_providers,
+            ldap_config: runtime.ldap_config.as_ref(),
+            gemini_files_has_capable_key: runtime.gemini_files_has_capable_key,
+            important_notification_configured: runtime.important_notification_configured,
+            server_chan_push_configured: runtime.server_chan_push_configured,
+            bark_push_configured: runtime.bark_push_configured,
+            s3_backup_configured: runtime.s3_backup_configured,
+        },
     )
 }
 
