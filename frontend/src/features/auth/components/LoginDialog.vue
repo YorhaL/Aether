@@ -265,6 +265,7 @@ import { oauthApi, type OAuthProviderInfo } from '@/api/oauth'
 import { getClientDeviceId } from '@/utils/deviceId'
 import { getApiUrl } from '@/utils/url'
 import { getOAuthIcon } from '@/utils/oauth-icons'
+import { navigateAfterLogin } from '@/features/auth/utils/loginRedirect'
 
 const props = defineProps<{
   modelValue: boolean
@@ -361,15 +362,7 @@ async function handleLogin(event?: Event) {
   if (success) {
     const targetPath = consumeStoredRedirectPath() ?? (authStore.canAccessAdmin ? '/admin/dashboard' : '/dashboard')
 
-    try {
-      const navigationFailure = await router.push(targetPath)
-      if (navigationFailure) {
-        throw navigationFailure
-      }
-    } catch {
-      showError('登录成功，但跳转失败，请刷新页面或手动进入控制台')
-      return
-    }
+    await navigateAfterLogin(router, targetPath)
 
     showSuccess('登录成功，正在跳转...')
 
