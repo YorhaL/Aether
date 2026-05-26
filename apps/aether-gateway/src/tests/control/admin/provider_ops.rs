@@ -32,6 +32,30 @@ use crate::constants::{
 };
 use crate::data::{GatewayDataConfig, GatewayDataState};
 
+const SUB2API_PROVIDER_OPS_BALANCE_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_sub2api_provider_ops_balance_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(SUB2API_PROVIDER_OPS_BALANCE_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("sub2api provider ops balance test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 async fn start_managed_redis_or_skip() -> Option<ManagedRedisServer> {
     match ManagedRedisServer::start().await {
         Ok(server) => Some(server),
@@ -4328,8 +4352,15 @@ async fn gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hit
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation() {
+#[test]
+fn gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation() {
+    run_sub2api_provider_ops_balance_test(
+        "gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation",
+        gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation_impl() {
     let ops = Router::new()
         .route(
             "/api/v1/auth/refresh",
@@ -4533,8 +4564,15 @@ async fn gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_r
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path(
+#[test]
+fn gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path() {
+    run_sub2api_provider_ops_balance_test(
+        "gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path",
+        gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path_impl(
 ) {
     let nested_refresh_hits = Arc::new(Mutex::new(0usize));
     let nested_refresh_hits_clone = Arc::clone(&nested_refresh_hits);
@@ -4742,8 +4780,15 @@ async fn gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_wh
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_sub2api_balance_with_session_login() {
+#[test]
+fn gateway_handles_admin_provider_ops_sub2api_balance_with_session_login() {
+    run_sub2api_provider_ops_balance_test(
+        "gateway_handles_admin_provider_ops_sub2api_balance_with_session_login",
+        gateway_handles_admin_provider_ops_sub2api_balance_with_session_login_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_sub2api_balance_with_session_login_impl() {
     let ops = Router::new()
         .route(
             "/api/v1/auth/login",

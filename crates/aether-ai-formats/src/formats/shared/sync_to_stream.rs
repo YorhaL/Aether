@@ -20,6 +20,7 @@ use crate::formats::shared::stream_core::common::{
 use crate::formats::shared::stream_core::{
     CanonicalStreamFrame, StreamingStandardFormatMatrix, StreamingStandardTerminalObserver,
 };
+use crate::formats::shared::stream_rewrite::maybe_build_ai_surface_stream_rewriter;
 use crate::formats::shared::AiSurfaceFinalizeError;
 
 pub struct SyncToStreamBridgeOutcome {
@@ -668,7 +669,11 @@ fn maybe_bridge_aether_sse_response_capture_to_stream(
         client_api_format,
     );
     let sse_body = if captured_api_format == client_api_format {
-        body_text.as_bytes().to_vec()
+        if captured_api_format == "claude:messages" {
+            sanitize_same_format_claude_sse_body(body_text.as_bytes(), report_context)?
+        } else {
+            body_text.as_bytes().to_vec()
+        }
     } else {
         rewrite_sse_body_between_formats(
             body_text.as_bytes(),
@@ -687,6 +692,34 @@ fn maybe_bridge_aether_sse_response_capture_to_stream(
         sse_body,
         terminal_summary,
     }))
+}
+
+fn sanitize_same_format_claude_sse_body(
+    body: &[u8],
+    report_context: Option<&Value>,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    let mut context = report_context
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let object = context
+        .as_object_mut()
+        .expect("same-format Claude context should stay object");
+    object.insert(
+        "provider_api_format".to_string(),
+        Value::String("claude:messages".to_string()),
+    );
+    object.insert(
+        "client_api_format".to_string(),
+        Value::String("claude:messages".to_string()),
+    );
+
+    let Some(mut rewriter) = maybe_build_ai_surface_stream_rewriter(Some(&context)) else {
+        return Ok(body.to_vec());
+    };
+    let mut out = rewriter.push_chunk(body)?;
+    out.extend(rewriter.finish()?);
+    Ok(out)
 }
 
 fn response_capture_header<'a>(headers: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
@@ -1347,6 +1380,49 @@ mod tests {
                 .and_then(|summary| summary.finish_reason.as_deref()),
             Some("stop")
         );
+    }
+
+    #[test]
+    fn rewrites_same_format_claude_capture_to_sanitize_read_tool_input() {
+        let captured_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_read_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-5.5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_read_1\",\"name\":\"Read\",\"input\":{\"file_path\":\"D:/projects/UIAutoTest/docs/prd/msr.md\",\"offset\":0,\"limit\":2000,\"pages\":\"\"}}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srv_1\",\"name\":\"web_search\",\"input\":{\"query\":\"rust\"}}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &json!({
+                "status_code": 200,
+                "headers": {
+                    "content-type": "text/event-stream",
+                    "x-aether-control-endpoint-signature": "claude:messages"
+                },
+                "body": captured_body
+            }),
+            "openai:responses",
+            "claude:messages",
+            None,
+        )
+        .expect("bridge should succeed")
+        .expect("capture should bridge");
+
+        let output = utf8(outcome.sse_body);
+        assert!(output.contains("\"name\":\"Read\""));
+        assert!(output.contains("\"limit\":2000"));
+        assert!(output.contains("\"type\":\"server_tool_use\""));
+        assert!(output.contains("\"name\":\"web_search\""));
+        assert!(!output.contains("\"pages\":\"\""));
+        assert!(!output.contains("\\\"pages\\\":\\\"\\\""));
     }
 
     #[test]

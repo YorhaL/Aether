@@ -14,7 +14,8 @@ use crate::ai_serving::planner::common::{
 };
 use crate::ai_serving::planner::spec_metadata::local_standard_spec_metadata;
 use crate::ai_serving::planner::standard::{
-    apply_codex_openai_responses_special_headers, request_body_build_failure_extra_data,
+    apply_codex_openai_responses_special_headers, apply_deepseek_tool_call_thinking_compat,
+    is_deepseek_provider, request_body_build_failure_extra_data,
 };
 use crate::ai_serving::transport::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body,
@@ -43,6 +44,8 @@ use super::payload::{
     mark_skipped_local_standard_candidate_with_failure_diagnostic,
 };
 use super::{LocalStandardCandidateAttempt, LocalStandardDecisionInput, LocalStandardSpec};
+
+const OMITTED_THINKING_TEXT: &str = "Previous thinking omitted.";
 
 pub(crate) struct LocalStandardCandidatePayloadParts {
     pub(super) auth_header: String,
@@ -114,8 +117,6 @@ fn sanitize_claude_thinking_block(block: Value) -> (Option<Value>, bool) {
 }
 
 fn sanitize_claude_message_content_for_non_native_thinking(content: &mut Value) -> bool {
-    const OMITTED_THINKING_TEXT: &str = "Previous thinking omitted.";
-
     if content.is_object() {
         let original = std::mem::take(content);
         let (sanitized, changed) = sanitize_claude_thinking_block(original);
@@ -175,12 +176,94 @@ fn sanitize_claude_request_thinking_signatures_for_non_native(body_json: &mut Va
         .unwrap_or(false)
 }
 
+fn remove_claude_redacted_thinking_block(block: Value) -> (Option<Value>, bool) {
+    let Some(object) = block.as_object() else {
+        return (Some(block), false);
+    };
+    let block_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if block_type == "redacted_thinking" {
+        return (None, true);
+    }
+    (Some(block), false)
+}
+
+fn sanitize_claude_message_content_for_deepseek_thinking(content: &mut Value) -> bool {
+    if content.is_object() {
+        let original = std::mem::take(content);
+        let (sanitized, changed) = remove_claude_redacted_thinking_block(original);
+        if changed {
+            *content = sanitized.unwrap_or_else(|| {
+                serde_json::json!({
+                    "type": "text",
+                    "text": OMITTED_THINKING_TEXT,
+                })
+            });
+        }
+        return changed;
+    }
+
+    let Some(blocks) = content.as_array_mut() else {
+        return false;
+    };
+    let original_blocks = std::mem::take(blocks);
+    let mut changed = false;
+    let mut sanitized_blocks = Vec::with_capacity(original_blocks.len());
+    for block in original_blocks {
+        let (sanitized, block_changed) = remove_claude_redacted_thinking_block(block);
+        changed |= block_changed;
+        if let Some(sanitized) = sanitized {
+            sanitized_blocks.push(sanitized);
+        }
+    }
+    if changed && sanitized_blocks.is_empty() {
+        sanitized_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": OMITTED_THINKING_TEXT,
+        }));
+    }
+    *blocks = sanitized_blocks;
+    changed
+}
+
+fn sanitize_claude_request_redacted_thinking_for_deepseek(body_json: &mut Value) -> bool {
+    body_json
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .map(|messages| {
+            messages.iter_mut().fold(false, |changed, message| {
+                let is_assistant = message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| role.trim().eq_ignore_ascii_case("assistant"));
+                if !is_assistant {
+                    return changed;
+                }
+                let content_changed = message
+                    .get_mut("content")
+                    .is_some_and(sanitize_claude_message_content_for_deepseek_thinking);
+                changed || content_changed
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn apply_non_native_claude_thinking_signature_compat(
     provider_request_body: &mut Value,
     provider_api_format: &str,
     transport: &GatewayProviderTransportSnapshot,
 ) {
     if crate::ai_serving::normalize_api_format_alias(provider_api_format) != "claude:messages" {
+        return;
+    }
+    if is_deepseek_provider(
+        transport.provider.provider_type.as_str(),
+        transport.endpoint.base_url.as_str(),
+    ) {
+        let _ = sanitize_claude_request_redacted_thinking_for_deepseek(provider_request_body);
         return;
     }
     if provider_preserves_claude_thinking_signatures(
@@ -523,6 +606,13 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         provider_api_format,
         transport,
     );
+    apply_deepseek_tool_call_thinking_compat(
+        &mut provider_request_body,
+        transport.provider.provider_type.as_str(),
+        transport.endpoint.base_url.as_str(),
+        provider_api_format,
+        Some(body_json),
+    );
     if let Some(mapping) =
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
             state,
@@ -570,6 +660,13 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             &mut provider_request_body,
             provider_api_format,
             transport,
+        );
+        apply_deepseek_tool_call_thinking_compat(
+            &mut provider_request_body,
+            transport.provider.provider_type.as_str(),
+            transport.endpoint.base_url.as_str(),
+            provider_api_format,
+            Some(body_json),
         );
     }
 
@@ -1086,6 +1183,7 @@ async fn build_kiro_cross_format_payload_parts(
 mod tests {
     use super::{
         provider_preserves_claude_thinking_signatures,
+        sanitize_claude_request_redacted_thinking_for_deepseek,
         sanitize_claude_request_thinking_signatures_for_non_native,
     };
     use serde_json::json;
@@ -1150,6 +1248,46 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_sanitizer_preserves_plain_thinking_but_removes_redacted() {
+        let mut body = json!({
+            "model": "claude-opus-4-1",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "I should keep this short.",
+                        "signature": "sig_123"
+                    },
+                    {
+                        "type": "redacted_thinking",
+                        "data": "opaque"
+                    },
+                    {
+                        "type": "text",
+                        "text": "Done."
+                    }
+                ]
+            }]
+        });
+
+        assert!(sanitize_claude_request_redacted_thinking_for_deepseek(
+            &mut body
+        ));
+        assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][0]["content"][0]["type"], json!("thinking"));
+        assert_eq!(
+            body["messages"][0]["content"][0]["thinking"],
+            json!("I should keep this short.")
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["signature"],
+            json!("sig_123")
+        );
+        assert_eq!(body["messages"][0]["content"][1]["text"], json!("Done."));
+    }
+
+    #[test]
     fn official_claude_providers_preserve_thinking_signatures() {
         assert!(provider_preserves_claude_thinking_signatures(
             "anthropic",
@@ -1166,6 +1304,14 @@ mod tests {
         assert!(provider_preserves_claude_thinking_signatures(
             "amazon_bedrock",
             "https://relay.example.com"
+        ));
+        assert!(!provider_preserves_claude_thinking_signatures(
+            "deepseek",
+            "https://relay.example.com"
+        ));
+        assert!(!provider_preserves_claude_thinking_signatures(
+            "custom",
+            "https://api.deepseek.com"
         ));
         assert!(!provider_preserves_claude_thinking_signatures(
             "openai",

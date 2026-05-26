@@ -21,7 +21,10 @@ use serde_json::{json, Map, Value};
 use super::AiSurfaceFinalizeError;
 use crate::formats::gemini::generate_content::stream::GeminiProviderState;
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
-use crate::formats::shared::response::remove_empty_pages_from_tool_arguments;
+use crate::formats::shared::response::{
+    remove_empty_pages_from_tool_arguments, remove_empty_pages_from_tool_input_value,
+    sanitize_claude_read_tool_inputs,
+};
 use crate::formats::shared::stream_core::common::{
     content_part_from_openai_image_generation_item, map_openai_finish_reason_to_gemini,
     parse_json_arguments_value, CanonicalContentPart, CanonicalStreamEvent, CanonicalUsage,
@@ -480,8 +483,13 @@ fn maybe_build_standard_same_format_sync_body(
         return None;
     }
 
+    let mut body_json = body_json.clone();
+    if expected_api_format == "claude:messages" {
+        sanitize_claude_read_tool_inputs(&mut body_json);
+    }
+
     Some(client_body_with_report_context_model(
-        body_json.clone(),
+        body_json,
         report_context,
         &client_api_format,
     ))
@@ -2530,8 +2538,20 @@ pub fn aggregate_claude_stream_sync_response(body: &[u8]) -> Option<Value> {
                 }
             }
             "tool_use" => {
+                let tool_name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(input) = block.get("input") {
+                    let sanitized = remove_empty_pages_from_tool_input_value(&tool_name, input);
+                    if sanitized != *input {
+                        block.insert("input".to_string(), sanitized);
+                    }
+                }
                 if !state.partial_json.is_empty() {
-                    let arguments = remove_empty_pages_from_tool_arguments(&state.partial_json);
+                    let arguments =
+                        remove_empty_pages_from_tool_arguments(&tool_name, &state.partial_json);
                     let input = serde_json::from_str::<Value>(&arguments)
                         .unwrap_or(Value::String(arguments));
                     block.insert("input".to_string(), input);
@@ -3115,6 +3135,59 @@ mod tests {
     }
 
     #[test]
+    fn aggregates_claude_stream_removes_empty_pages_from_start_tool_input() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_read\",\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/a.txt\",\"limit\":20,\"pages\":\"\"}}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        let aggregated =
+            aggregate_claude_stream_sync_response(body.as_bytes()).expect("body should aggregate");
+
+        assert_eq!(
+            aggregated["content"][0]["input"],
+            json!({
+                "file_path": "/tmp/a.txt",
+                "limit": 20,
+            })
+        );
+    }
+
+    #[test]
+    fn aggregates_claude_stream_preserves_empty_pages_for_non_read_tool_input() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_search\",\"name\":\"Search\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"\\\",\\\"pages\\\":\\\"\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        let aggregated =
+            aggregate_claude_stream_sync_response(body.as_bytes()).expect("body should aggregate");
+
+        assert_eq!(aggregated["content"][0]["type"], "tool_use");
+        assert_eq!(
+            aggregated["content"][0]["input"],
+            json!({
+                "query": "",
+                "pages": "",
+            })
+        );
+    }
+
+    #[test]
     fn aggregates_gemini_stream_deltas_media_and_signatures_into_sync_body() {
         let body = concat!(
             "data: {\"responseId\":\"resp_gem_stream_123\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"rea\",\"thought\":true}]}}]}\n\n",
@@ -3383,6 +3456,67 @@ mod tests {
         .expect("body should exist");
 
         assert_eq!(body_json, provider_body_json);
+    }
+
+    #[test]
+    fn same_format_claude_sync_body_sanitizes_read_tool_input() {
+        let report_context = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "needs_conversion": false,
+        });
+        let provider_body_json = json!({
+            "id": "msg_read",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_read",
+                    "name": "Read",
+                    "input": {
+                        "file_path": "/tmp/a.txt",
+                        "limit": 20,
+                        "pages": ""
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_search",
+                    "name": "Search",
+                    "input": {
+                        "query": "",
+                        "pages": ""
+                    }
+                }
+            ]
+        });
+
+        let body_json = maybe_build_standard_same_format_sync_body_from_normalized_payload(
+            "claude_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect("same-format sync body should succeed")
+        .expect("body should exist");
+
+        assert_eq!(
+            body_json["content"][0]["input"],
+            json!({
+                "file_path": "/tmp/a.txt",
+                "limit": 20,
+            })
+        );
+        assert_eq!(
+            body_json["content"][1]["input"],
+            json!({
+                "query": "",
+                "pages": "",
+            })
+        );
     }
 
     #[test]

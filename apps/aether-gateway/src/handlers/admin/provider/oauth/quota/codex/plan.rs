@@ -1,6 +1,6 @@
 use super::super::shared::{
-    build_provider_quota_execution_plan, default_provider_quota_execution_timeouts,
-    execute_provider_quota_plan, ProviderQuotaExecutionOutcome,
+    build_provider_quota_execution_plan, execute_provider_quota_plan,
+    resolve_provider_quota_execution_timeouts, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
@@ -38,11 +38,10 @@ pub(super) async fn execute_codex_quota_plan(
                 .await
         }
     };
-    let timeouts = state
-        .resolve_transport_execution_timeouts(transport)
-        .or(Some(default_provider_quota_execution_timeouts(
-            proxy.as_ref(),
-        )));
+    let timeouts = Some(resolve_provider_quota_execution_timeouts(
+        state.resolve_transport_execution_timeouts(transport),
+        proxy.as_ref(),
+    ));
     let plan = build_provider_quota_execution_plan(
         transport,
         spec,

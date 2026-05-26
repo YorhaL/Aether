@@ -1,8 +1,8 @@
 use super::shared::{
-    build_provider_quota_execution_plan, build_quota_snapshot_payload,
-    default_provider_quota_execution_timeouts, execute_provider_quota_plan,
+    build_provider_quota_execution_plan, build_quota_snapshot_payload, execute_provider_quota_plan,
     extract_execution_error_message, persist_provider_quota_refresh_state,
-    quota_refresh_success_invalid_state, ProviderQuotaExecutionOutcome,
+    quota_refresh_success_invalid_state, resolve_provider_quota_execution_timeouts,
+    ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
@@ -33,11 +33,10 @@ async fn execute_windsurf_probe_plan(
                 .await
         }
     };
-    let timeouts = state
-        .resolve_transport_execution_timeouts(transport)
-        .or(Some(default_provider_quota_execution_timeouts(
-            proxy.as_ref(),
-        )));
+    let timeouts = Some(resolve_provider_quota_execution_timeouts(
+        state.resolve_transport_execution_timeouts(transport),
+        proxy.as_ref(),
+    ));
     let plan = build_provider_quota_execution_plan(
         transport,
         spec,

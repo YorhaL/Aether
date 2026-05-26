@@ -29,7 +29,10 @@ pub fn canonicalize_tool_arguments(value: Option<Value>) -> String {
     }
 }
 
-pub fn remove_empty_pages_from_tool_arguments(arguments: &str) -> String {
+pub fn remove_empty_pages_from_tool_arguments(tool_name: &str, arguments: &str) -> String {
+    if tool_name != "Read" {
+        return arguments.to_string();
+    }
     let Ok(mut value) = serde_json::from_str::<Value>(arguments) else {
         return arguments.to_string();
     };
@@ -41,6 +44,44 @@ pub fn remove_empty_pages_from_tool_arguments(arguments: &str) -> String {
     }
     object.remove("pages");
     serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
+}
+
+pub fn remove_empty_pages_from_tool_input_value(tool_name: &str, input: &Value) -> Value {
+    if tool_name != "Read" || input.get("pages").and_then(Value::as_str) != Some("") {
+        return input.clone();
+    }
+    let Some(object) = input.as_object() else {
+        return input.clone();
+    };
+    let mut object = object.clone();
+    object.remove("pages");
+    Value::Object(object)
+}
+
+pub fn sanitize_claude_read_tool_inputs(value: &mut Value) -> bool {
+    let Some(content) = value.get_mut("content").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for block in content {
+        let Some(block_object) = block.as_object_mut() else {
+            continue;
+        };
+        if block_object.get("type").and_then(Value::as_str) != Some("tool_use")
+            || block_object.get("name").and_then(Value::as_str) != Some("Read")
+        {
+            continue;
+        }
+        let Some(input) = block_object.get("input") else {
+            continue;
+        };
+        let sanitized = remove_empty_pages_from_tool_input_value("Read", input);
+        if sanitized != *input {
+            block_object.insert("input".to_string(), sanitized);
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub fn prepare_local_success_response_parts(
@@ -131,7 +172,8 @@ mod tests {
         build_generated_tool_call_id, build_local_success_background_report,
         build_local_success_conversion_background_report, canonicalize_tool_arguments,
         prepare_local_success_response_parts, prepare_local_success_response_parts_owned,
-        remove_empty_pages_from_tool_arguments, LocalSyncReportParts,
+        remove_empty_pages_from_tool_arguments, sanitize_claude_read_tool_inputs,
+        LocalSyncReportParts,
     };
     use std::collections::BTreeMap;
 
@@ -153,17 +195,74 @@ mod tests {
     fn removes_empty_pages_from_tool_arguments() {
         assert_eq!(
             remove_empty_pages_from_tool_arguments(
+                "Read",
                 r#"{"file_path":"/tmp/a.txt","offset":1,"limit":20,"pages":""}"#
             ),
             r#"{"file_path":"/tmp/a.txt","offset":1,"limit":20}"#
         );
         assert_eq!(
-            remove_empty_pages_from_tool_arguments(r#"{"pages":"1-2"}"#),
+            remove_empty_pages_from_tool_arguments("Search", r#"{"query":"","pages":""}"#),
+            r#"{"query":"","pages":""}"#
+        );
+        assert_eq!(
+            remove_empty_pages_from_tool_arguments("Read", r#"{"pages":"1-2"}"#),
             r#"{"pages":"1-2"}"#
         );
         assert_eq!(
-            remove_empty_pages_from_tool_arguments(r#"{"pages":"#),
+            remove_empty_pages_from_tool_arguments("Read", r#"{"pages":"#),
             r#"{"pages":"#
+        );
+    }
+
+    #[test]
+    fn sanitizes_claude_read_tool_inputs_only() {
+        let mut value = serde_json::json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {
+                        "file_path": "/tmp/a.txt",
+                        "limit": 20,
+                        "pages": ""
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "name": "Search",
+                    "input": {
+                        "query": "",
+                        "pages": ""
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {
+                        "pages": "1-2"
+                    }
+                }
+            ]
+        });
+
+        assert!(sanitize_claude_read_tool_inputs(&mut value));
+        assert_eq!(
+            value["content"][0]["input"],
+            serde_json::json!({
+                "file_path": "/tmp/a.txt",
+                "limit": 20,
+            })
+        );
+        assert_eq!(
+            value["content"][1]["input"],
+            serde_json::json!({
+                "query": "",
+                "pages": "",
+            })
+        );
+        assert_eq!(
+            value["content"][2]["input"],
+            serde_json::json!({"pages": "1-2"})
         );
     }
 

@@ -46,6 +46,23 @@ pub(super) fn default_provider_quota_execution_timeouts(
     }
 }
 
+pub(super) fn resolve_provider_quota_execution_timeouts(
+    configured: Option<ExecutionTimeouts>,
+    proxy: Option<&ProxySnapshot>,
+) -> ExecutionTimeouts {
+    let defaults = default_provider_quota_execution_timeouts(proxy);
+    let Some(mut timeouts) = configured else {
+        return defaults;
+    };
+    timeouts.connect_ms = timeouts.connect_ms.or(defaults.connect_ms);
+    timeouts.read_ms = timeouts.read_ms.or(defaults.read_ms);
+    timeouts.write_ms = timeouts.write_ms.or(defaults.write_ms);
+    timeouts.pool_ms = timeouts.pool_ms.or(defaults.pool_ms);
+    timeouts.total_ms = timeouts.total_ms.or(defaults.total_ms);
+    timeouts.first_byte_ms = timeouts.first_byte_ms.or(defaults.first_byte_ms);
+    timeouts
+}
+
 pub(crate) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
     admin_provider_quota_pure::provider_auto_remove_banned_keys(config)
 }

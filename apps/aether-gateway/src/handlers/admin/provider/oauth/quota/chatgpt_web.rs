@@ -1,8 +1,8 @@
 use super::shared::{
-    build_quota_snapshot_payload, default_provider_quota_execution_timeouts,
-    execute_provider_quota_plan, extract_execution_error_message,
+    build_quota_snapshot_payload, execute_provider_quota_plan, extract_execution_error_message,
     oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
-    quota_key_auto_removed, quota_refresh_success_invalid_state, ProviderQuotaExecutionOutcome,
+    quota_key_auto_removed, quota_refresh_success_invalid_state,
+    resolve_provider_quota_execution_timeouts, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
@@ -72,11 +72,10 @@ async fn execute_chatgpt_web_quota_plan(
                 .await
         }
     };
-    let timeouts = state
-        .resolve_transport_execution_timeouts(transport)
-        .or(Some(default_provider_quota_execution_timeouts(
-            proxy.as_ref(),
-        )));
+    let timeouts = Some(resolve_provider_quota_execution_timeouts(
+        state.resolve_transport_execution_timeouts(transport),
+        proxy.as_ref(),
+    ));
     let spec =
         build_chatgpt_web_pool_quota_request(&transport.key.id, &endpoint.base_url, authorization);
     let resolved_transport_profile = state.resolve_transport_profile(transport);

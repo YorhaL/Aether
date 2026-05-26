@@ -29,6 +29,7 @@ struct OpenAIResponsesProviderToolState {
     call_id: String,
     name: String,
     arguments: String,
+    emitted_arguments_len: usize,
     started_emitted: bool,
 }
 
@@ -510,6 +511,74 @@ impl OpenAIResponsesProviderState {
         });
     }
 
+    fn emit_ready_tool_call(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        index: usize,
+    ) {
+        let (id, model) = self.identity(report_context);
+        let Some(state) = self.tool_calls.get_mut(&index) else {
+            return;
+        };
+        if state.name.is_empty() {
+            return;
+        }
+        if !state.started_emitted {
+            out.push(CanonicalStreamFrame {
+                id: id.clone(),
+                model: model.clone(),
+                event: CanonicalStreamEvent::ToolCallStart {
+                    index,
+                    call_id: if state.call_id.is_empty() {
+                        build_generated_tool_call_id(index)
+                    } else {
+                        state.call_id.clone()
+                    },
+                    name: state.name.clone(),
+                },
+            });
+            state.started_emitted = true;
+        }
+        if state.emitted_arguments_len > state.arguments.len() {
+            state.emitted_arguments_len = 0;
+        }
+        let pending = state
+            .arguments
+            .get(state.emitted_arguments_len..)
+            .unwrap_or_default()
+            .to_string();
+        if pending.is_empty() {
+            return;
+        }
+        state.emitted_arguments_len = state.arguments.len();
+        out.push(CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::ToolCallArgumentsDelta {
+                index,
+                arguments: pending,
+            },
+        });
+    }
+
+    fn merge_tool_call_arguments(state: &mut OpenAIResponsesProviderToolState, arguments: &str) {
+        if arguments.is_empty() {
+            return;
+        }
+        if arguments.starts_with(&state.arguments) {
+            state
+                .arguments
+                .push_str(&arguments[state.arguments.len()..]);
+        } else if state.arguments != arguments {
+            if state.emitted_arguments_len == 0 {
+                state.arguments = arguments.to_string();
+            } else {
+                state.arguments.push_str(arguments);
+            }
+        }
+    }
+
     fn emit_tool_call_item(
         &mut self,
         report_context: &Value,
@@ -527,7 +596,6 @@ impl OpenAIResponsesProviderState {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         let index = self.tool_index_for_key(key, output_index);
-        let (id, model) = self.identity(report_context);
         let state = self.tool_calls.entry(index).or_default();
         state.call_id = item
             .get("call_id")
@@ -540,50 +608,13 @@ impl OpenAIResponsesProviderState {
             .and_then(Value::as_str)
             .unwrap_or(state.name.as_str())
             .to_string();
-        if !state.started_emitted {
-            out.push(CanonicalStreamFrame {
-                id: id.clone(),
-                model: model.clone(),
-                event: CanonicalStreamEvent::ToolCallStart {
-                    index,
-                    call_id: if state.call_id.is_empty() {
-                        build_generated_tool_call_id(index)
-                    } else {
-                        state.call_id.clone()
-                    },
-                    name: if state.name.is_empty() {
-                        "unknown".to_string()
-                    } else {
-                        state.name.clone()
-                    },
-                },
-            });
-            state.started_emitted = true;
-        }
         let completed_arguments = item
             .get("arguments")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let missing = if completed_arguments.starts_with(&state.arguments) {
-            completed_arguments[state.arguments.len()..].to_string()
-        } else if state.arguments == completed_arguments {
-            String::new()
-        } else {
-            completed_arguments.clone()
-        };
-        if missing.is_empty() {
-            return;
-        }
-        state.arguments.push_str(&missing);
-        out.push(CanonicalStreamFrame {
-            id,
-            model,
-            event: CanonicalStreamEvent::ToolCallArgumentsDelta {
-                index,
-                arguments: missing,
-            },
-        });
+        Self::merge_tool_call_arguments(state, &completed_arguments);
+        self.emit_ready_tool_call(report_context, out, index);
     }
 
     fn emit_missing_tool_result(
@@ -978,44 +1009,22 @@ impl OpenAIResponsesProviderState {
                     .and_then(Value::as_u64)
                     .map(|value| value as usize);
                 let index = self.tool_index_for_key(key, output_index);
-                let (id, model) = self.identity(report_context);
                 let state = self.tool_calls.entry(index).or_default();
-                state.call_id = value
-                    .get("item_id")
-                    .or_else(|| value.get("call_id"))
+                if let Some(call_id) = value
+                    .get("call_id")
                     .or_else(|| value.get("id"))
                     .and_then(Value::as_str)
-                    .unwrap_or(state.call_id.as_str())
-                    .to_string();
-                if !state.started_emitted {
-                    out.push(CanonicalStreamFrame {
-                        id: id.clone(),
-                        model: model.clone(),
-                        event: CanonicalStreamEvent::ToolCallStart {
-                            index,
-                            call_id: if state.call_id.is_empty() {
-                                build_generated_tool_call_id(index)
-                            } else {
-                                state.call_id.clone()
-                            },
-                            name: if state.name.is_empty() {
-                                "unknown".to_string()
-                            } else {
-                                state.name.clone()
-                            },
-                        },
-                    });
-                    state.started_emitted = true;
+                {
+                    state.call_id = call_id.to_string();
+                } else if state.call_id.is_empty() {
+                    state.call_id = value
+                        .get("item_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                 }
                 state.arguments.push_str(delta);
-                out.push(CanonicalStreamFrame {
-                    id,
-                    model,
-                    event: CanonicalStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        arguments: delta.to_string(),
-                    },
-                });
+                self.emit_ready_tool_call(report_context, &mut out, index);
             }
             "response.function_call_arguments.done" => {
                 let arguments = value
@@ -1029,9 +1038,6 @@ impl OpenAIResponsesProviderState {
                             .and_then(Value::as_str)
                     })
                     .unwrap_or_default();
-                if arguments.is_empty() {
-                    return Ok(out);
-                }
                 self.ensure_started(report_context, &mut out);
                 let key = value
                     .get("item_id")
@@ -1052,11 +1058,9 @@ impl OpenAIResponsesProviderState {
                     .and_then(Value::as_u64)
                     .map(|value| value as usize);
                 let index = self.tool_index_for_key(key, output_index);
-                let (id, model) = self.identity(report_context);
                 let state = self.tool_calls.entry(index).or_default();
                 state.call_id = value
-                    .get("item_id")
-                    .or_else(|| value.get("call_id"))
+                    .get("call_id")
                     .or_else(|| value.get("id"))
                     .and_then(Value::as_str)
                     .or_else(|| {
@@ -1066,46 +1070,23 @@ impl OpenAIResponsesProviderState {
                             .and_then(|item| item.get("call_id").or_else(|| item.get("id")))
                             .and_then(Value::as_str)
                     })
+                    .or_else(|| value.get("item_id").and_then(Value::as_str))
                     .unwrap_or(state.call_id.as_str())
                     .to_string();
-                if !state.started_emitted {
-                    out.push(CanonicalStreamFrame {
-                        id: id.clone(),
-                        model: model.clone(),
-                        event: CanonicalStreamEvent::ToolCallStart {
-                            index,
-                            call_id: if state.call_id.is_empty() {
-                                build_generated_tool_call_id(index)
-                            } else {
-                                state.call_id.clone()
-                            },
-                            name: if state.name.is_empty() {
-                                "unknown".to_string()
-                            } else {
-                                state.name.clone()
-                            },
-                        },
-                    });
-                    state.started_emitted = true;
-                }
-                let missing = if arguments.starts_with(&state.arguments) {
-                    arguments[state.arguments.len()..].to_string()
-                } else if state.arguments == arguments {
-                    String::new()
-                } else {
-                    arguments.to_string()
-                };
-                if !missing.is_empty() {
-                    state.arguments.push_str(&missing);
-                    out.push(CanonicalStreamFrame {
-                        id,
-                        model,
-                        event: CanonicalStreamEvent::ToolCallArgumentsDelta {
-                            index,
-                            arguments: missing,
-                        },
-                    });
-                }
+                state.name = value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        value
+                            .get("item")
+                            .and_then(Value::as_object)
+                            .and_then(|item| item.get("name"))
+                            .and_then(Value::as_str)
+                    })
+                    .unwrap_or(state.name.as_str())
+                    .to_string();
+                Self::merge_tool_call_arguments(state, arguments);
+                self.emit_ready_tool_call(report_context, &mut out, index);
             }
             "response.function_call_output.delta" | "response.function_call_output.done" => {
                 let tool_use_id = value
@@ -2661,6 +2642,7 @@ fn openai_tool_result_content_from_value(value: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formats::claude::messages::stream::ClaudeClientEmitter;
 
     fn data_line(value: Value) -> Vec<u8> {
         format!("data: {}\n", value).into_bytes()
@@ -3174,6 +3156,91 @@ mod tests {
                 }),
             } if reason == "tool_calls"
         )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_delays_arguments_until_tool_name_is_known() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let arguments = r#"{"file_path":"D:/projects/UIAutoTest/docs/prd/msr.md","offset":0,"limit":2000,"pages":""}"#;
+        let mut frames = Vec::new();
+
+        let delta_frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.function_call_arguments.delta",
+                    "response_id": "resp_read_123",
+                    "output_index": 0,
+                    "item_id": "fc_read_123",
+                    "delta": arguments,
+                })),
+            )
+            .expect("arguments delta should parse");
+
+        assert!(matches!(
+            delta_frames.first().map(|frame| &frame.event),
+            Some(CanonicalStreamEvent::Start)
+        ));
+        assert!(!delta_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart { .. }
+                | CanonicalStreamEvent::ToolCallArgumentsDelta { .. }
+        )));
+        frames.extend(delta_frames);
+
+        frames.extend(
+            state
+                .push_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "response.function_call_arguments.done",
+                        "response_id": "resp_read_123",
+                        "output_index": 0,
+                        "item_id": "fc_read_123",
+                        "item": {
+                            "type": "function_call",
+                            "id": "fc_read_123",
+                            "call_id": "call_read_123",
+                            "name": "Read",
+                            "arguments": arguments,
+                        }
+                    })),
+                )
+                .expect("arguments done should parse"),
+        );
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart {
+                ref call_id,
+                ref name,
+                ..
+            } if call_id == "call_read_123" && name == "Read"
+        )));
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallArgumentsDelta {
+                ref arguments,
+                ..
+            } if arguments.contains(r#""pages":"""#)
+        )));
+
+        let mut emitter = ClaudeClientEmitter::default();
+        let mut bytes = Vec::new();
+        for frame in frames {
+            bytes.extend(emitter.emit(frame).expect("claude frame should encode"));
+        }
+        bytes.extend(
+            emitter
+                .finish()
+                .expect("claude stream finish should encode"),
+        );
+        let sse = String::from_utf8(bytes).expect("claude sse should be utf8");
+
+        assert!(sse.contains("\"name\":\"Read\""));
+        assert!(sse.contains("\\\"limit\\\":2000"));
+        assert!(!sse.contains("\\\"pages\\\":\\\"\\\""));
     }
 
     #[test]

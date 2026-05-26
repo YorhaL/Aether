@@ -9,6 +9,44 @@ fn utf8(bytes: Vec<u8>) -> String {
 }
 
 #[test]
+fn same_format_claude_local_stream_rewriter_sanitizes_read_input_json_delta() {
+    let report_context = json!({
+        "provider_api_format": "claude:messages",
+        "client_api_format": "claude:messages",
+        "needs_conversion": false,
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+    let mut output = rewriter
+        .push_chunk(
+            b"event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_read_1\",\"name\":\"Read\",\"input\":{}}}\n\n",
+        )
+        .expect("start should be accepted");
+    output.extend(
+        rewriter
+            .push_chunk(
+                b"event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"/tmp/a.txt\\\",\\\"pages\\\":\\\"\\\"}\"}}\n\n",
+            )
+            .expect("delta should be accepted"),
+    );
+    output.extend(
+        rewriter
+            .push_chunk(
+                b"event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            )
+            .expect("stop should flush sanitized delta"),
+    );
+
+    let output_text = utf8(output);
+    assert!(output_text.contains("\"name\":\"Read\""));
+    assert!(output_text.contains("\\\"file_path\\\":\\\"/tmp/a.txt\\\""));
+    assert!(!output_text.contains("\\\"pages\\\":\\\"\\\""));
+}
+
+#[test]
 fn standard_sync_bridge_converts_openai_chat_sync_json_to_openai_chat_sse() {
     let outcome = maybe_bridge_standard_sync_json_to_stream(
         &json!({

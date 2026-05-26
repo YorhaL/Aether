@@ -2549,6 +2549,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_wreq_stream_execution_ignores_total_timeout_when_first_byte_unset() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route(
+            "/chat",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+                axum::response::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(Bytes::from_static(b"data: {}\n\n")))
+                    .expect("response should build")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+        let mut plan = direct_timeout_plan(
+            format!("http://{addr}/chat"),
+            true,
+            ExecutionTimeouts {
+                total_ms: Some(5),
+                ..ExecutionTimeouts::default()
+            },
+        );
+        plan.transport_profile = Some(ResolvedTransportProfile {
+            profile_id: "chrome136".into(),
+            backend: TRANSPORT_BACKEND_BROWSER_WREQ.into(),
+            http_mode: "auto".into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: Some(json!({
+                "browser_profile": "chrome136"
+            })),
+        });
+
+        let execution = DirectSyncExecutionRuntime::new()
+            .execute_stream(&plan)
+            .await
+            .expect("browser-wreq stream should ignore total_ms and use the first-byte default");
+
+        server.abort();
+
+        assert_eq!(execution.status_code, http::StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
     async fn direct_sync_execution_runtime_routes_browser_wreq_transport_in_process() {
         async fn browser_upstream(headers: AxumHeaderMap, body: Bytes) -> axum::response::Response {
             assert_eq!(

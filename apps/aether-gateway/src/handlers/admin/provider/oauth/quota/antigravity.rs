@@ -1,9 +1,9 @@
 use super::shared::{
     build_provider_quota_execution_plan, build_quota_snapshot_payload, coerce_json_f64,
-    coerce_json_string, default_provider_quota_execution_timeouts, execute_provider_quota_plan,
-    extract_execution_error_message, oauth_refresh_auto_removed_result,
-    persist_provider_quota_refresh_state, quota_key_auto_removed,
-    quota_refresh_success_invalid_state, ProviderQuotaExecutionOutcome,
+    coerce_json_string, execute_provider_quota_plan, extract_execution_error_message,
+    oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
+    quota_key_auto_removed, quota_refresh_success_invalid_state,
+    resolve_provider_quota_execution_timeouts, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
@@ -33,11 +33,10 @@ async fn execute_antigravity_quota_plan(
                 .await
         }
     };
-    let timeouts = state
-        .resolve_transport_execution_timeouts(transport)
-        .or(Some(default_provider_quota_execution_timeouts(
-            proxy.as_ref(),
-        )));
+    let timeouts = Some(resolve_provider_quota_execution_timeouts(
+        state.resolve_transport_execution_timeouts(transport),
+        proxy.as_ref(),
+    ));
     let spec = build_antigravity_pool_quota_request(
         &transport.key.id,
         &transport.endpoint.base_url,

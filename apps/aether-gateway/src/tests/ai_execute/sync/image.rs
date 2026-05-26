@@ -19,6 +19,30 @@ use aether_data_contracts::repository::provider_catalog::{
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
+const IMAGE_SYNC_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_image_sync_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(IMAGE_SYNC_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("image sync test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[tokio::test]
 async fn gateway_converts_openai_image_sync_to_gemini_image_provider() {
     #[derive(Debug, Clone)]
@@ -365,8 +389,15 @@ async fn gateway_converts_openai_image_sync_to_gemini_image_provider() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_converts_gemini_image_sync_to_openai_image_provider() {
+#[test]
+fn gateway_converts_gemini_image_sync_to_openai_image_provider() {
+    run_image_sync_test(
+        "gateway_converts_gemini_image_sync_to_openai_image_provider",
+        gateway_converts_gemini_image_sync_to_openai_image_provider_impl,
+    );
+}
+
+async fn gateway_converts_gemini_image_sync_to_openai_image_provider_impl() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,

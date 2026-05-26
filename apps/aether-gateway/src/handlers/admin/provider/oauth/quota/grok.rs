@@ -1,8 +1,7 @@
 use super::shared::{
-    build_quota_snapshot_payload, default_provider_quota_execution_timeouts,
-    execute_provider_quota_plan, extract_execution_error_message,
+    build_quota_snapshot_payload, execute_provider_quota_plan, extract_execution_error_message,
     persist_provider_quota_refresh_state, quota_refresh_success_invalid_state,
-    ProviderQuotaExecutionOutcome,
+    resolve_provider_quota_execution_timeouts, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
@@ -245,11 +244,10 @@ async fn execute_grok_quota_plan(
                 .await
         }
     };
-    let timeouts = state
-        .resolve_transport_execution_timeouts(transport)
-        .or(Some(default_provider_quota_execution_timeouts(
-            proxy.as_ref(),
-        )));
+    let timeouts = Some(resolve_provider_quota_execution_timeouts(
+        state.resolve_transport_execution_timeouts(transport),
+        proxy.as_ref(),
+    ));
     let transport_profile = state.resolve_transport_profile(transport);
     let base_url = grok_base_url(endpoint);
     let headers = build_grok_quota_headers(

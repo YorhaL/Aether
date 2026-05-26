@@ -1,6 +1,5 @@
 use aether_ai_serving::{
     run_ai_attempt_loop, AiAttemptLoopOutcome, AiAttemptLoopPort, AiExecutionAttempt,
-    UPSTREAM_IS_STREAM_KEY,
 };
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::{
@@ -27,7 +26,6 @@ use crate::request_candidate_runtime::{
 use crate::{AppState, GatewayError};
 
 const DEFAULT_STREAM_FIRST_BYTE_WATCHDOG_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_NON_STREAM_CANDIDATE_WATCHDOG_TIMEOUT_MS: u64 = 300_000;
 
 fn attach_redaction_execution_candidate(response: &mut Response<Body>, candidate_id: Option<&str>) {
     if let Some(candidate_id) = candidate_id
@@ -529,24 +527,14 @@ fn should_skip_unused_persistence_from_metadata(
 
 fn resolve_stream_candidate_watchdog_timeout(
     plan: &aether_contracts::ExecutionPlan,
-    report_context: Option<&serde_json::Value>,
+    _report_context: Option<&serde_json::Value>,
 ) -> Duration {
-    let upstream_is_stream = report_context
-        .and_then(|context| context.get(UPSTREAM_IS_STREAM_KEY))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    let timeout_ms = if upstream_is_stream {
-        plan.timeouts
-            .as_ref()
-            .and_then(|timeouts| timeouts.first_byte_ms)
-            .unwrap_or(DEFAULT_STREAM_FIRST_BYTE_WATCHDOG_TIMEOUT_MS)
-    } else {
-        plan.timeouts
-            .as_ref()
-            .and_then(|timeouts| timeouts.total_ms)
-            .unwrap_or(DEFAULT_NON_STREAM_CANDIDATE_WATCHDOG_TIMEOUT_MS)
-    }
-    .max(1);
+    let timeout_ms = plan
+        .timeouts
+        .as_ref()
+        .and_then(|timeouts| timeouts.first_byte_ms)
+        .unwrap_or(DEFAULT_STREAM_FIRST_BYTE_WATCHDOG_TIMEOUT_MS)
+        .max(1);
     Duration::from_millis(timeout_ms)
 }
 
@@ -806,26 +794,26 @@ mod tests {
     }
 
     #[test]
-    fn stream_candidate_watchdog_prefers_total_timeout_when_upstream_non_stream() {
+    fn stream_candidate_watchdog_prefers_first_byte_timeout_when_upstream_non_stream() {
         let report_context = json!({"upstream_is_stream": false});
         let timeout = resolve_stream_candidate_watchdog_timeout(
             &test_plan(Some(ExecutionTimeouts {
-                first_byte_ms: Some(300_000),
+                first_byte_ms: Some(12_345),
                 total_ms: Some(599_000),
                 ..ExecutionTimeouts::default()
             })),
             Some(&report_context),
         );
 
-        assert_eq!(timeout, Duration::from_millis(599_000));
+        assert_eq!(timeout, Duration::from_millis(12_345));
     }
 
     #[test]
-    fn stream_candidate_watchdog_uses_non_stream_default_when_upstream_non_stream_lacks_total() {
+    fn stream_candidate_watchdog_ignores_total_timeout_when_upstream_non_stream() {
         let report_context = json!({"upstream_is_stream": false});
         let timeout = resolve_stream_candidate_watchdog_timeout(
             &test_plan(Some(ExecutionTimeouts {
-                first_byte_ms: Some(12_345),
+                total_ms: Some(599_000),
                 ..ExecutionTimeouts::default()
             })),
             Some(&report_context),
@@ -833,7 +821,7 @@ mod tests {
 
         assert_eq!(
             timeout,
-            Duration::from_millis(DEFAULT_NON_STREAM_CANDIDATE_WATCHDOG_TIMEOUT_MS)
+            Duration::from_millis(DEFAULT_STREAM_FIRST_BYTE_WATCHDOG_TIMEOUT_MS)
         );
     }
 

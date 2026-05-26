@@ -1,7 +1,13 @@
-use serde_json::Value;
+use std::collections::BTreeMap;
+
+use serde_json::{json, Map, Value};
 
 use crate::formats::openai::image::stream::{OpenAiImageChatStreamState, OpenAiImageStreamState};
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
+use crate::formats::shared::response::{
+    remove_empty_pages_from_tool_arguments, remove_empty_pages_from_tool_input_value,
+};
+use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
 use crate::formats::shared::AiSurfaceFinalizeError;
 use crate::provider_compat::kiro_stream::KiroToClaudeCliStreamState;
@@ -16,6 +22,7 @@ pub enum FinalizeStreamRewriteMode {
     ModelDirectiveDisplay,
     OpenAiImage,
     OpenAiImageToOpenAiChat,
+    ClaudeReadToolSanitize,
     Standard,
     KiroToClaudeCli,
     KiroToClaudeCliThenStandard,
@@ -84,6 +91,9 @@ pub fn resolve_finalize_stream_rewrite_mode(
         // Parsing→rebuilding only adds overhead and may lose information
         // (encrypted_content, original item IDs, etc.).
         if is_same_format_family(provider_api_format.as_str(), client_api_format.as_str()) {
+            if provider_api_format == "claude:messages" && client_api_format == "claude:messages" {
+                return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
+            }
             return model_directive_display_model_from_report_context(report_context)
                 .map(|_| FinalizeStreamRewriteMode::ModelDirectiveDisplay);
         }
@@ -108,7 +118,14 @@ pub fn resolve_finalize_stream_rewrite_mode(
             provider_api_format.as_str(),
         )
     {
+        if provider_api_format == "claude:messages" {
+            return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
+        }
         return Some(FinalizeStreamRewriteMode::ModelDirectiveDisplay);
+    }
+
+    if provider_api_format == "claude:messages" && client_api_format == "claude:messages" {
+        return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
     }
 
     (provider_api_format == client_api_format
@@ -144,6 +161,7 @@ enum AiSurfaceStreamRewriteState {
     ModelDirectiveDisplay,
     OpenAiImage(Box<OpenAiImageStreamState>),
     OpenAiImageToOpenAiChat(Box<OpenAiImageChatStreamState>),
+    ClaudeReadToolSanitize(Box<ClaudeReadToolStreamSanitizer>),
     Standard(Box<StreamingStandardFormatMatrix>),
     KiroToClaudeCli(Box<KiroToClaudeCliStreamState>),
     KiroToClaudeCliThenStandard {
@@ -173,6 +191,11 @@ pub fn maybe_build_ai_surface_stream_rewriter<'a>(
         FinalizeStreamRewriteMode::OpenAiImageToOpenAiChat => {
             AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(
                 Box::<OpenAiImageChatStreamState>::default(),
+            )
+        }
+        FinalizeStreamRewriteMode::ClaudeReadToolSanitize => {
+            AiSurfaceStreamRewriteState::ClaudeReadToolSanitize(
+                Box::<ClaudeReadToolStreamSanitizer>::default(),
             )
         }
         FinalizeStreamRewriteMode::Standard => {
@@ -205,6 +228,9 @@ impl AiSurfaceStreamRewriter<'_> {
             AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(state) => {
                 state.push_chunk(self.report_context, chunk)
             }
+            AiSurfaceStreamRewriteState::ClaudeReadToolSanitize(state) => {
+                state.push_chunk(self.report_context, chunk)
+            }
             AiSurfaceStreamRewriteState::KiroToClaudeCli(state) => {
                 state.push_chunk(self.report_context, chunk)
             }
@@ -230,6 +256,9 @@ impl AiSurfaceStreamRewriter<'_> {
         match &mut self.state {
             AiSurfaceStreamRewriteState::OpenAiImage(state) => state.finish(self.report_context),
             AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(state) => {
+                state.finish(self.report_context)
+            }
+            AiSurfaceStreamRewriteState::ClaudeReadToolSanitize(state) => {
                 state.finish(self.report_context)
             }
             AiSurfaceStreamRewriteState::KiroToClaudeCli(state) => {
@@ -278,10 +307,270 @@ impl AiSurfaceStreamRewriter<'_> {
             }
             AiSurfaceStreamRewriteState::OpenAiImage(_)
             | AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(_)
+            | AiSurfaceStreamRewriteState::ClaudeReadToolSanitize(_)
             | AiSurfaceStreamRewriteState::KiroToClaudeCli(_)
             | AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { .. } => Ok(Vec::new()),
         }
     }
+}
+
+#[derive(Default)]
+struct ClaudeReadToolBlockState {
+    name: String,
+    buffered_input_json: String,
+}
+
+#[derive(Default)]
+struct ClaudeReadToolStreamSanitizer {
+    buffered: Vec<u8>,
+    blocks: BTreeMap<usize, ClaudeReadToolBlockState>,
+}
+
+impl ClaudeReadToolStreamSanitizer {
+    fn push_chunk(
+        &mut self,
+        report_context: &Value,
+        chunk: &[u8],
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        self.buffered.extend_from_slice(chunk);
+        let mut output = Vec::new();
+        while let Some(record) = drain_next_sse_record(&mut self.buffered) {
+            output.extend(self.transform_record(report_context, record)?);
+        }
+        Ok(output)
+    }
+
+    fn finish(&mut self, report_context: &Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        if self.buffered.is_empty() {
+            return Ok(Vec::new());
+        }
+        let record = std::mem::take(&mut self.buffered);
+        self.transform_record(report_context, record)
+    }
+
+    fn transform_record(
+        &mut self,
+        report_context: &Value,
+        record: Vec<u8>,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let Some((event, mut payload)) = parse_sse_record_json(&record) else {
+            return rewrite_model_directive_stream_record(report_context, record);
+        };
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or(event.as_deref().unwrap_or_default())
+            .to_string();
+        let mut output = match event_type.as_str() {
+            "content_block_start" => {
+                self.transform_content_block_start(event.as_deref(), payload, record)?
+            }
+            "content_block_delta" => self.transform_content_block_delta(payload, record)?,
+            "content_block_stop" => self.transform_content_block_stop(payload, record)?,
+            _ => {
+                if !rewrite_stream_payload_model_from_context(report_context, &mut payload) {
+                    return Ok(record);
+                }
+                encode_json_sse(event.as_deref(), &payload)?
+            }
+        };
+        if model_directive_display_model_from_report_context(report_context).is_some()
+            && !matches!(event_type.as_str(), "message_start" | "message_delta")
+        {
+            output = rewrite_model_directive_stream_record(report_context, output)?;
+        }
+        Ok(output)
+    }
+
+    fn transform_content_block_start(
+        &mut self,
+        event: Option<&str>,
+        mut payload: Value,
+        original_record: Vec<u8>,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let index = payload
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0);
+        let Some(block) = payload
+            .get_mut("content_block")
+            .and_then(Value::as_object_mut)
+        else {
+            return Ok(original_record);
+        };
+        let block_type = block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if block_type != "tool_use" {
+            return Ok(original_record);
+        }
+        let name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.blocks.insert(
+            index,
+            ClaudeReadToolBlockState {
+                name: name.clone(),
+                buffered_input_json: String::new(),
+            },
+        );
+        if sanitize_claude_tool_input_object(block, &name) {
+            encode_json_sse(event, &payload)
+        } else {
+            Ok(original_record)
+        }
+    }
+
+    fn transform_content_block_delta(
+        &mut self,
+        payload: Value,
+        original_record: Vec<u8>,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let index = payload
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0);
+        let delta_type = payload
+            .get("delta")
+            .and_then(Value::as_object)
+            .and_then(|delta| delta.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let partial_json = payload
+            .get("delta")
+            .and_then(Value::as_object)
+            .and_then(|delta| delta.get("partial_json"))
+            .and_then(Value::as_str);
+        if delta_type != "input_json_delta" {
+            return Ok(original_record);
+        }
+        let Some(state) = self.blocks.get_mut(&index) else {
+            return Ok(original_record);
+        };
+        if state.name != "Read" {
+            return Ok(original_record);
+        }
+        if let Some(partial_json) = partial_json {
+            state.buffered_input_json.push_str(partial_json);
+        }
+        Ok(Vec::new())
+    }
+
+    fn transform_content_block_stop(
+        &mut self,
+        payload: Value,
+        original_record: Vec<u8>,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let index = payload
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0);
+        let Some(state) = self.blocks.remove(&index) else {
+            return Ok(original_record);
+        };
+        let mut output = Vec::new();
+        if state.name == "Read" && !state.buffered_input_json.is_empty() {
+            let partial_json =
+                remove_empty_pages_from_tool_arguments("Read", &state.buffered_input_json);
+            if !partial_json.is_empty() {
+                output.extend(encode_json_sse(
+                    Some("content_block_delta"),
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": partial_json,
+                        }
+                    }),
+                )?);
+            }
+        }
+        if output.is_empty() {
+            output = original_record;
+        } else {
+            output.extend(original_record);
+        }
+        Ok(output)
+    }
+}
+
+fn sanitize_claude_tool_input_object(block: &mut Map<String, Value>, name: &str) -> bool {
+    let Some(input) = block.get("input") else {
+        return false;
+    };
+    let sanitized = remove_empty_pages_from_tool_input_value(name, input);
+    if sanitized == *input {
+        return false;
+    }
+    block.insert("input".to_string(), sanitized);
+    true
+}
+
+fn drain_next_sse_record(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let mut line_start = 0usize;
+    let mut index = 0usize;
+    while index < buffer.len() {
+        if buffer[index] != b'\n' {
+            index += 1;
+            continue;
+        }
+        let line_end = index + 1;
+        let line = &buffer[line_start..line_end];
+        let line_without_newline = line
+            .strip_suffix(b"\n")
+            .unwrap_or(line)
+            .strip_suffix(b"\r")
+            .unwrap_or_else(|| line.strip_suffix(b"\n").unwrap_or(line));
+        if line_without_newline.is_empty() {
+            return Some(buffer.drain(..line_end).collect());
+        }
+        line_start = line_end;
+        index = line_end;
+    }
+    None
+}
+
+fn parse_sse_record_json(record: &[u8]) -> Option<(Option<String>, Value)> {
+    let text = std::str::from_utf8(record).ok()?;
+    let mut event = None;
+    let mut data = String::new();
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some(value) = line.strip_prefix("event:") {
+            event = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.trim_start());
+        }
+    }
+    if data.trim().is_empty() || data.trim() == "[DONE]" {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(data.trim()).ok()?;
+    Some((event, value))
+}
+
+fn rewrite_model_directive_stream_record(
+    report_context: &Value,
+    record: Vec<u8>,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    let mut output = Vec::new();
+    for line in record.split_inclusive(|byte| *byte == b'\n') {
+        output.extend(rewrite_model_directive_stream_line(
+            report_context,
+            line.to_vec(),
+        )?);
+    }
+    Ok(output)
 }
 
 fn rewrite_model_directive_stream_line(
@@ -339,6 +628,14 @@ fn rewrite_stream_payload_model(value: &mut Value, display_model: &str) -> bool 
         }
     }
     changed
+}
+
+fn rewrite_stream_payload_model_from_context(report_context: &Value, value: &mut Value) -> bool {
+    let Some(display_model) = model_directive_display_model_from_report_context(report_context)
+    else {
+        return false;
+    };
+    rewrite_stream_payload_model(value, &display_model)
 }
 
 fn transform_standard_bytes(
@@ -718,14 +1015,106 @@ data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinki
     }
 
     #[test]
-    fn same_format_claude_without_display_model_passes_through_verbatim() {
-        // Claude→Claude without display model: no rewriter needed at all.
+    fn same_format_claude_uses_read_tool_sanitizer_without_display_model() {
+        // Claude→Claude needs a narrow sanitizer for Claude Code Read input.
         let report_context = json!({
             "provider_api_format": "claude:messages",
             "client_api_format": "claude:messages",
             "needs_conversion": true,
         });
-        assert!(maybe_build_ai_surface_stream_rewriter(Some(&report_context)).is_none());
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize)
+        );
+    }
+
+    #[test]
+    fn same_format_claude_stream_sanitizes_read_start_input() {
+        let report_context = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "needs_conversion": false,
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("same-format claude sanitizer should exist");
+        let output = rewriter
+            .push_chunk(
+                b"event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_read_1\",\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/a.txt\",\"limit\":20,\"pages\":\"\"}}}\n\n",
+            )
+            .expect("rewrite should succeed");
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("\"name\":\"Read\""));
+        assert!(output.contains("\"file_path\":\"/tmp/a.txt\""));
+        assert!(!output.contains("\"pages\":\"\""));
+    }
+
+    #[test]
+    fn same_format_claude_stream_sanitizes_read_input_json_delta() {
+        let report_context = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "needs_conversion": false,
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("same-format claude sanitizer should exist");
+        let mut output = rewriter
+            .push_chunk(
+                b"event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_read_1\",\"name\":\"Read\",\"input\":{}}}\n\n",
+            )
+            .expect("start should rewrite");
+        output.extend(
+            rewriter
+                .push_chunk(
+                    b"event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"/tmp/a.txt\\\",\"}}\n\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"limit\\\":20,\\\"pages\\\":\\\"\\\"}\"}}\n\n",
+                )
+                .expect("deltas should buffer"),
+        );
+        let buffered_output = String::from_utf8(output.clone()).expect("output should be utf8");
+        assert!(!buffered_output.contains("input_json_delta"));
+
+        output.extend(
+            rewriter
+                .push_chunk(
+                    b"event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                )
+                .expect("stop should flush sanitized delta"),
+        );
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("event: content_block_delta"));
+        assert!(output.contains("\\\"limit\\\":20"));
+        assert!(!output.contains("\\\"pages\\\":\\\"\\\""));
+        assert!(output.contains("event: content_block_stop"));
+    }
+
+    #[test]
+    fn same_format_claude_stream_preserves_other_tool_empty_pages() {
+        let report_context = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "needs_conversion": false,
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("same-format claude sanitizer should exist");
+        let output = rewriter
+            .push_chunk(
+                b"event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_search_1\",\"name\":\"Search\",\"input\":{}}}\n\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"\\\",\\\"pages\\\":\\\"\\\"}\"}}\n\n",
+            )
+            .expect("rewrite should succeed");
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("\"name\":\"Search\""));
+        assert!(output.contains("\\\"pages\\\":\\\"\\\""));
     }
 
     #[test]

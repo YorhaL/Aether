@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::formats::openai::shared::map_thinking_budget_to_openai_reasoning_effort;
+use crate::formats::shared::response::remove_empty_pages_from_tool_input_value;
 
 pub use crate::protocol::stream::{CanonicalStreamEvent, CanonicalStreamFrame};
 
@@ -3825,6 +3826,7 @@ pub(crate) fn canonical_block_to_claude(
             input,
             extensions,
         } => {
+            let input = remove_empty_pages_from_tool_input_value(name, input);
             let mut out = Map::new();
             out.insert("type".to_string(), Value::String("tool_use".to_string()));
             out.insert(
@@ -3832,7 +3834,7 @@ pub(crate) fn canonical_block_to_claude(
                 Value::String(claude_compatible_tool_use_id(id)),
             );
             out.insert("name".to_string(), Value::String(name.clone()));
-            out.insert("input".to_string(), input.clone());
+            out.insert("input".to_string(), input);
             out.extend(namespace_extension_object(extensions, "claude", &out));
             Some(Some(Value::Object(out)))
         }
@@ -5594,6 +5596,74 @@ mod tests {
             1
         );
         assert_eq!(rebuilt["service_tier"], "flex");
+    }
+
+    #[test]
+    fn openai_responses_to_claude_response_drops_empty_pages_only_for_read_tool() {
+        let response = json!({
+            "id": "resp_read_pages",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "call_read",
+                    "call_id": "call_read",
+                    "name": "Read",
+                    "arguments": "{\"file_path\":\"/tmp/a.txt\",\"offset\":0,\"limit\":20,\"pages\":\"\"}"
+                },
+                {
+                    "type": "function_call",
+                    "id": "call_search",
+                    "call_id": "call_search",
+                    "name": "Search",
+                    "arguments": "{\"query\":\"\",\"pages\":\"\"}"
+                }
+            ],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2
+            }
+        });
+
+        let canonical =
+            from_openai_responses_to_canonical_response(&response).expect("canonical response");
+        let claude = canonical_to_claude_response(&canonical);
+
+        assert_eq!(
+            claude["content"][0]["input"],
+            json!({
+                "file_path": "/tmp/a.txt",
+                "offset": 0,
+                "limit": 20,
+            })
+        );
+        assert_eq!(
+            claude["content"][1]["input"],
+            json!({
+                "query": "",
+                "pages": "",
+            })
+        );
+
+        let rebuilt_responses = canonical_to_openai_responses_response(&canonical, &json!({}));
+        let read_arguments = serde_json::from_str::<Value>(
+            rebuilt_responses["output"][0]["arguments"]
+                .as_str()
+                .expect("arguments should be a string"),
+        )
+        .expect("arguments should be json");
+        assert_eq!(
+            read_arguments,
+            json!({
+                "file_path": "/tmp/a.txt",
+                "offset": 0,
+                "limit": 20,
+                "pages": "",
+            })
+        );
     }
 
     #[test]
