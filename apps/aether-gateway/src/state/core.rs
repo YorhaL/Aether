@@ -573,12 +573,14 @@ impl AppState {
 
     pub(crate) fn invalidate_provider_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_provider_catalog_cache();
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
     }
 
     pub(crate) fn invalidate_provider_health_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_provider_catalog_cache();
         self.clear_provider_transport_snapshot_cache();
     }
 

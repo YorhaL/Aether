@@ -645,6 +645,11 @@ async fn record_health_success_effect(
         .circuit_breaker_by_format
         .as_ref()
         .and_then(|current| project_local_key_circuit_closed(Some(current), api_format));
+    if current_key.health_by_format.as_ref() == Some(&health_by_format)
+        && circuit_breaker_by_format.as_ref() == current_key.circuit_breaker_by_format.as_ref()
+    {
+        return;
+    }
     let circuit_breaker_update = circuit_breaker_by_format
         .as_ref()
         .or(current_key.circuit_breaker_by_format.as_ref());

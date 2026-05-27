@@ -164,7 +164,7 @@ export const authApi = {
   },
 
   async refreshToken(): Promise<LoginResponse> {
-    const response = await apiClient.post<LoginResponse>('/api/auth/refresh', {})
+    const response = await apiClient.post<LoginResponse>('/api/auth/refresh')
     apiClient.setToken(response.data.access_token)
     return response.data
   },

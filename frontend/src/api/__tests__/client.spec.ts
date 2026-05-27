@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AxiosAdapter, AxiosInstance, InternalAxiosRequestConfig } from 'axios'
 
 import apiClient, { AUTH_STATE_CHANGE_EVENT } from '@/api/client'
+
+type TestableApiClient = typeof apiClient & {
+  client: AxiosInstance
+}
 
 describe('apiClient auth state change event', () => {
   beforeEach(() => {
@@ -27,5 +32,34 @@ describe('apiClient auth state change event', () => {
     expect(event.detail).toEqual({ token: null })
 
     window.removeEventListener(AUTH_STATE_CHANGE_EVENT, handler as EventListener)
+  })
+
+  it('sends auth refresh without a request body', async () => {
+    const rawClient = apiClient as TestableApiClient
+    const previousAdapter = rawClient.client.defaults.adapter
+    const requests: InternalAxiosRequestConfig[] = []
+
+    rawClient.client.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
+      requests.push(config)
+      return {
+        data: { access_token: 'new-access-token' },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    }) as AxiosAdapter
+
+    try {
+      const response = await apiClient.refreshToken()
+
+      expect(response.data.access_token).toBe('new-access-token')
+      expect(requests).toHaveLength(1)
+      expect(requests[0].url).toBe('/api/auth/refresh')
+      expect(requests[0].method).toBe('post')
+      expect(requests[0].data).toBeUndefined()
+    } finally {
+      rawClient.client.defaults.adapter = previousAdapter
+    }
   })
 })

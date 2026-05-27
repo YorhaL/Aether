@@ -113,7 +113,7 @@ pub(crate) const ADMIN_MODULE_DEFINITIONS: &[AdminModuleDefinition] = &[
     AdminModuleDefinition {
         name: "model_directives",
         display_name: "模型后缀参数",
-        description: "允许通过模型名后缀覆盖推理参数",
+        description: "允许通过模型名后缀覆盖推理参数或服务层级",
         category: "integration",
         env_key: "MODEL_DIRECTIVES_AVAILABLE",
         default_available: true,

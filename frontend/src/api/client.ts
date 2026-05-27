@@ -323,7 +323,7 @@ class ApiClient {
   }
 
   async refreshToken(): Promise<AxiosResponse> {
-    return this.client.post('/api/auth/refresh', {})
+    return this.client.post('/api/auth/refresh')
   }
 
   // 以下方法直接委托给 axios client，Demo 模式由 adapter 统一处理

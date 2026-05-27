@@ -114,15 +114,17 @@ SELECT
       OR NULLIF(BTRIM("usage".request_metadata->>'user_agent'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'request_path'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), '') IS NOT NULL
-      OR COALESCE(
-        NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), ''),
-        NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
-        NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), '')
-      ) IS NOT NULL
-      OR COALESCE(
-        NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), ''),
-        NULLIF(BTRIM("usage".provider_request_body->>'service_tier'), '')
-      ) IS NOT NULL
+      OR CASE
+        WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN COALESCE(
+          NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
+          NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), '')
+        )
+        ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '')
+      END IS NOT NULL
+      OR CASE
+        WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN NULLIF(BTRIM("usage".provider_request_body->>'service_tier'), '')
+        ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), '')
+      END IS NOT NULL
       OR ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
       OR ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
       THEN jsonb_strip_nulls(jsonb_build_object(
@@ -135,16 +137,18 @@ SELECT
         'request_path_and_query',
         NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), ''),
         'provider_reasoning_effort',
-        COALESCE(
-          NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), ''),
-          NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
-          NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), '')
-        ),
+        CASE
+          WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN COALESCE(
+            NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
+            NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), '')
+          )
+          ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '')
+        END,
         'provider_service_tier',
-        COALESCE(
-          NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), ''),
-          NULLIF(BTRIM("usage".provider_request_body->>'service_tier'), '')
-        ),
+        CASE
+          WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN NULLIF(BTRIM("usage".provider_request_body->>'service_tier'), '')
+          ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), '')
+        END,
         'client_requested_stream',
         CASE
           WHEN ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')

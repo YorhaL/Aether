@@ -203,83 +203,33 @@
               <!-- 费用与性能概览 -->
               <Card>
                 <div class="p-3 sm:p-4">
-                  <!-- 总费用和响应时间（独立显示） -->
-                  <div
-                    class="grid gap-1.5 mb-4 sm:gap-2"
-                    :class="detailOutputRate != null ? 'grid-cols-3' : 'grid-cols-2'"
-                  >
-                    <div class="min-w-0 rounded-md border border-border/50 bg-muted/20 px-2 py-2 sm:px-3">
-                      <span class="mb-0.5 block truncate text-[10px] text-muted-foreground sm:text-xs">总费用</span>
-                      <span class="block truncate text-sm font-bold text-green-600 dark:text-green-400 sm:text-lg">
+                  <div class="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                    <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70">{{ priceSourceLabel }}</span>
+                    <span class="text-muted-foreground">|</span>
+                    <span class="whitespace-nowrap">
+                      <span class="text-muted-foreground">总费用</span>
+                      <span class="ml-1 font-bold text-green-600 dark:text-green-400">
                         ${{ ((typeof detail.cost === 'object' ? detail.cost?.total : detail.cost) || detail.total_cost || 0).toFixed(6) }}
                       </span>
-                    </div>
-                    <div class="min-w-0 rounded-md border border-border/50 bg-muted/20 px-2 py-2 sm:px-3">
-                      <span class="mb-0.5 block truncate text-[10px] text-muted-foreground sm:text-xs">响应时间</span>
-                      <span class="text-sm font-bold sm:text-lg">{{ detail.response_time_ms ? formatResponseTime(detail.response_time_ms).value : 'N/A' }}</span>
-                      <span class="ml-0.5 text-[10px] text-muted-foreground sm:ml-1 sm:text-sm">{{ detail.response_time_ms ? formatResponseTime(detail.response_time_ms).unit : '' }}</span>
-                    </div>
-                    <template v-if="detailOutputRate != null">
-                      <div class="min-w-0 rounded-md border border-border/50 bg-muted/20 px-2 py-2 sm:px-3">
-                        <span class="mb-0.5 block truncate text-[10px] text-muted-foreground sm:text-xs">输出速度</span>
-                        <span class="text-sm font-bold text-primary sm:text-lg">{{ formatOutputRateValue(detailOutputRate) }}</span>
-                        <span class="ml-0.5 text-[10px] text-muted-foreground sm:ml-1 sm:text-sm">tps</span>
-                      </div>
-                    </template>
-                  </div>
-
-                  <div
-                    v-if="hasDetailPerformanceBreakdown"
-                    class="grid grid-cols-3 gap-1.5 mb-4 text-xs sm:gap-2"
-                  >
-                    <div class="min-w-0 rounded-md border border-border/50 bg-muted/20 px-2 py-2 sm:px-3">
-                      <div class="mb-1 truncate text-[10px] text-muted-foreground sm:text-xs">
-                        首字时间
-                      </div>
-                      <div class="truncate font-mono text-xs text-foreground sm:text-sm">
-                        {{ formatDurationMs(detail.first_byte_time_ms) }}
-                      </div>
-                    </div>
-                    <div class="min-w-0 rounded-md border border-border/50 bg-muted/20 px-2 py-2 sm:px-3">
-                      <div class="mb-1 truncate text-[10px] text-muted-foreground sm:text-xs">
-                        生成耗时
-                      </div>
-                      <div class="truncate font-mono text-xs text-foreground sm:text-sm">
-                        {{ formatDurationMs(detailGenerationTimeMs) }}
-                      </div>
-                    </div>
-                    <div class="min-w-0 rounded-md border border-border/50 bg-muted/20 px-2 py-2 sm:px-3">
-                      <div class="mb-1 truncate text-[10px] text-muted-foreground sm:text-xs">
-                        输出 Tokens
-                      </div>
-                      <div class="truncate font-mono text-xs text-foreground sm:text-sm">
-                        {{ formatNumber(detailOutputTokens) }}
-                      </div>
-                    </div>
+                    </span>
+                    <span class="text-muted-foreground">|</span>
+                    <span class="whitespace-nowrap">
+                      <span class="text-muted-foreground">耗时</span>
+                      <span class="ml-1 font-bold">
+                        {{ formatDurationMs(detail.first_byte_time_ms) }} / {{ formatDurationMs(detail.response_time_ms) }}
+                      </span>
+                    </span>
+                    <span class="text-muted-foreground">|</span>
+                    <span class="whitespace-nowrap">
+                      <span class="text-muted-foreground">输出速度</span>
+                      <span class="ml-1 font-bold text-primary">{{ formatOutputRateValue(detailOutputRate) }}tps</span>
+                    </span>
                   </div>
 
                   <!-- 分隔线 -->
                   <Separator class="mb-4" />
 
-                  <!-- ========== 1. 费用聚合计算 ========== -->
-                  <div class="text-xs text-muted-foreground mb-3 flex items-center gap-2 flex-wrap">
-                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground/70">{{ priceSourceLabel }}</span>
-                    <span class="text-foreground">|</span>
-                    <span class="font-mono text-foreground">
-                      总费用 = Token费用 <span class="font-medium">${{ tokenCostTotal.toFixed(6) }}</span>
-                      <template v-if="perRequestCost > 0">
-                        + 按次费用 <span class="font-medium">${{ perRequestCost.toFixed(6) }}</span>
-                      </template>
-                      <template v-if="imageOutputCostTotal > 0">
-                        + 图片输出费用 <span class="font-medium">${{ imageOutputCostTotal.toFixed(6) }}</span>
-                      </template>
-                      <template v-if="videoCostTotal > 0">
-                        + {{ detail.video_billing?.task_type === 'image' ? '图像' : detail.video_billing?.task_type === 'audio' ? '音频' : '视频' }}费用 <span class="font-medium">${{ videoCostTotal.toFixed(6) }}</span>
-                      </template>
-                    </span>
-                  </div>
-
-                  <!-- ========== 2. Token分阶段成本 ========== -->
+                  <!-- ========== 1. Token分阶段成本 ========== -->
                   <div
                     v-if="hasTokenCost"
                     class="space-y-2 mb-3"
@@ -287,6 +237,7 @@
                     <!-- 阶梯标题 -->
                     <div class="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
                       <span class="font-medium text-foreground">Token 计费</span>
+                      <span class="font-mono font-medium text-foreground">${{ tokenCostTotal.toFixed(6) }}</span>
                       <span class="text-muted-foreground/60">(输入 {{ formatNumber(displayInputTokens) }} + 缓存创建 {{ cacheCreationSummaryText }} + 缓存读取 {{ formatNumber(detail.cache_read_input_tokens || 0) }})</span>
                       <Badge
                         v-if="displayTiers.length > 1"
@@ -404,8 +355,9 @@
                     v-if="perRequestCost > 0 && !detail.video_billing"
                     class="space-y-2 mb-3"
                   >
-                    <div class="flex items-center justify-between text-xs">
+                    <div class="flex items-center gap-2 text-xs">
                       <span class="font-medium text-foreground">按次计费</span>
+                      <span class="font-mono font-medium text-foreground">${{ perRequestCost.toFixed(6) }}</span>
                     </div>
                     <div class="rounded-lg p-3 bg-primary/5 border border-primary/30 space-y-2">
                       <div
@@ -797,7 +749,6 @@ import {
   formatOutputRate,
   formatOutputRateValue,
   getDisplayOutputRate,
-  getGenerationTimeMs,
 } from '../performance'
 import {
   formatUsageStreamLabel,
@@ -1108,16 +1059,6 @@ const detailOutputTokens = computed(() => {
   return detail.value.tokens?.output ?? detail.value.output_tokens ?? 0
 })
 
-const detailGenerationTimeMs = computed(() => {
-  if (!detail.value) return null
-  return getGenerationTimeMs({
-    response_time_ms: detail.value.response_time_ms,
-    first_byte_time_ms: detail.value.first_byte_time_ms,
-    is_stream: detail.value.is_stream,
-    upstream_is_stream: detail.value.upstream_is_stream,
-  })
-})
-
 const detailOutputRate = computed(() => {
   if (!detail.value) return null
   return getDisplayOutputRate({
@@ -1127,11 +1068,6 @@ const detailOutputRate = computed(() => {
     is_stream: detail.value.is_stream,
     upstream_is_stream: detail.value.upstream_is_stream,
   })
-})
-
-const hasDetailPerformanceBreakdown = computed(() => {
-  if (!detail.value) return false
-  return detail.value.first_byte_time_ms != null || detailGenerationTimeMs.value != null || detailOutputTokens.value > 0
 })
 
 // 监听标签页切换
@@ -2376,14 +2312,6 @@ function formatImagePriceBucket(bucket: string): string {
 
 function formatPixels(value: number): string {
   return `${formatCompactNumber(value)} px`
-}
-
-// 格式化响应时间，自动选择合适的单位
-function formatResponseTime(ms: number): { value: string; unit: string } {
-  if (ms >= 1_000) {
-    return { value: (ms / 1_000).toFixed(2), unit: 's' }
-  }
-  return { value: ms.toString(), unit: 'ms' }
 }
 
 // 格式化价格，修复浮点数精度问题

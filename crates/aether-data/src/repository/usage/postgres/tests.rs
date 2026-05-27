@@ -707,6 +707,8 @@ fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
         super::LIST_RECENT_USAGE_AUDITS_PREFIX,
     ] {
         assert!(sql.contains("jsonb_strip_nulls(jsonb_build_object("));
+        assert!(sql.contains("jsonb_typeof(\"usage\".provider_request_body::jsonb)"));
+        assert!(!sql.contains("jsonb_typeof(\"usage\".provider_request_body)"));
         assert!(sql.contains("'client_ip'"));
         assert!(sql.contains("request_metadata->>'client_ip'"));
         assert!(sql.contains("'user_agent'"));

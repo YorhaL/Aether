@@ -1,5 +1,6 @@
 use aether_data::{DataBackends, DataLayerError, DatabaseDriver};
 use aether_data_contracts::repository::candidate_selection::MinimalCandidateSelectionReadRepository;
+use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use aether_runtime_state::RuntimeQueueStore;
 use std::sync::Arc;
 
@@ -99,7 +100,11 @@ impl GatewayDataState {
         let request_candidate_reader = backends.read().request_candidates();
         let request_candidate_writer = backends.write().request_candidates();
         let gemini_file_mapping_writer = backends.write().gemini_file_mappings();
-        let provider_catalog_reader = backends.read().provider_catalog();
+        let provider_catalog_reader = backends.read().provider_catalog().map(|repository| {
+            Arc::new(
+                super::provider_catalog_cache::CachedProviderCatalogReadRepository::new(repository),
+            ) as Arc<dyn ProviderCatalogReadRepository>
+        });
         let provider_catalog_writer = backends.write().provider_catalog();
         let pool_score_reader = backends.read().pool_scores();
         let pool_score_writer = backends.write().pool_scores();
@@ -272,6 +277,12 @@ impl GatewayDataState {
 
     pub(crate) fn clear_minimal_candidate_selection_cache(&self) {
         if let Some(repository) = &self.minimal_candidate_selection_reader {
+            repository.clear_local_cache();
+        }
+    }
+
+    pub(crate) fn clear_provider_catalog_cache(&self) {
+        if let Some(repository) = &self.provider_catalog_reader {
             repository.clear_local_cache();
         }
     }

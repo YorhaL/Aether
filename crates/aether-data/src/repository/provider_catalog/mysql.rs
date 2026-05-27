@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{mysql::MySqlRow, Row};
+use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use super::{
     InMemoryProviderCatalogReadRepository, ProviderCatalogKeyListQuery,
@@ -15,6 +15,33 @@ use crate::DataLayerError;
 pub struct MysqlProviderCatalogReadRepository {
     pool: MysqlPool,
 }
+
+const KEY_SELECT_SQL: &str = r#"
+SELECT
+  id, provider_id, name, auth_type, capabilities, is_active, api_formats,
+  auth_type_by_format, allow_auth_channel_mismatch_formats,
+  COALESCE(api_key, encrypted_key) AS api_key,
+  auth_config, note, internal_priority, rate_multipliers,
+  global_priority_by_format, allowed_models,
+  expires_at AS expires_at_unix_secs,
+  cache_ttl_minutes, max_probe_interval_minutes, proxy, fingerprint,
+  rpm_limit, concurrent_limit, learned_rpm_limit, concurrent_429_count,
+  rpm_429_count, last_429_at AS last_429_at_unix_secs, last_429_type,
+  adjustment_history, utilization_samples,
+  last_probe_increase_at AS last_probe_increase_at_unix_secs,
+  last_rpm_peak, request_count, total_tokens, total_cost_usd,
+  success_count, error_count, total_response_time_ms,
+  last_used_at AS last_used_at_unix_secs, auto_fetch_models,
+  last_models_fetch_at AS last_models_fetch_at_unix_secs,
+  last_models_fetch_error, locked_models, model_include_patterns,
+  model_exclude_patterns, upstream_metadata,
+  oauth_invalid_at AS oauth_invalid_at_unix_secs,
+  oauth_invalid_reason, status_snapshot,
+  created_at AS created_at_unix_ms,
+  updated_at AS updated_at_unix_secs,
+  health_by_format, circuit_breaker_by_format
+FROM provider_api_keys
+"#;
 
 impl MysqlProviderCatalogReadRepository {
     pub fn new(pool: MysqlPool) -> Self {
@@ -71,37 +98,26 @@ WHERE api_format IS NOT NULL
     }
 
     async fn load_keys(&self) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  id, provider_id, name, auth_type, capabilities, is_active, api_formats,
-  auth_type_by_format, allow_auth_channel_mismatch_formats,
-  COALESCE(api_key, encrypted_key) AS api_key,
-  auth_config, note, internal_priority, rate_multipliers,
-  global_priority_by_format, allowed_models,
-  expires_at AS expires_at_unix_secs,
-  cache_ttl_minutes, max_probe_interval_minutes, proxy, fingerprint,
-  rpm_limit, concurrent_limit, learned_rpm_limit, concurrent_429_count,
-  rpm_429_count, last_429_at AS last_429_at_unix_secs, last_429_type,
-  adjustment_history, utilization_samples,
-  last_probe_increase_at AS last_probe_increase_at_unix_secs,
-  last_rpm_peak, request_count, total_tokens, total_cost_usd,
-  success_count, error_count, total_response_time_ms,
-  last_used_at AS last_used_at_unix_secs, auto_fetch_models,
-  last_models_fetch_at AS last_models_fetch_at_unix_secs,
-  last_models_fetch_error, locked_models, model_include_patterns,
-  model_exclude_patterns, upstream_metadata,
-  oauth_invalid_at AS oauth_invalid_at_unix_secs,
-  oauth_invalid_reason, status_snapshot,
-  created_at AS created_at_unix_ms,
-  updated_at AS updated_at_unix_secs,
-  health_by_format, circuit_breaker_by_format
-FROM provider_api_keys
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
+        let rows = sqlx::query(KEY_SELECT_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        rows.iter().map(map_key_row).collect()
+    }
+
+    async fn list_keys_by_provider_ids_direct(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_keys_by_provider_ids_query(provider_ids)
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
         rows.iter().map(map_key_row).collect()
     }
 
@@ -912,20 +928,14 @@ impl ProviderCatalogReadRepository for MysqlProviderCatalogReadRepository {
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_keys_by_provider_ids(provider_ids)
-            .await
+        self.list_keys_by_provider_ids_direct(provider_ids).await
     }
 
     async fn list_key_summaries_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_key_summaries_by_provider_ids(provider_ids)
-            .await
+        self.list_keys_by_provider_ids_direct(provider_ids).await
     }
 
     async fn list_key_maintenance_summaries_by_provider_ids(
@@ -1160,6 +1170,19 @@ fn optional_json_to_string(
     field_name: &str,
 ) -> Result<Option<String>, DataLayerError> {
     optional_json_ref_to_string(value.as_ref(), field_name)
+}
+
+fn build_list_keys_by_provider_ids_query(provider_ids: &[String]) -> QueryBuilder<'_, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(KEY_SELECT_SQL);
+    builder.push("WHERE provider_id IN (");
+    {
+        let mut separated = builder.separated(", ");
+        for provider_id in provider_ids {
+            separated.push_bind(provider_id.clone());
+        }
+    }
+    builder.push(") ORDER BY provider_id ASC, name ASC, id ASC");
+    builder
 }
 
 fn key_insert_sql() -> &'static str {
@@ -1568,6 +1591,7 @@ mod tests {
         StoredProviderCatalogProvider,
     };
     use serde_json::json;
+    use sqlx::Execute;
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -1578,6 +1602,17 @@ mod tests {
         );
 
         let _repository = MysqlProviderCatalogReadRepository::new(pool);
+    }
+
+    #[test]
+    fn list_keys_by_provider_ids_query_targets_index_aligned_ordering() {
+        let provider_ids = vec!["provider-a".to_string(), "provider-b".to_string()];
+        let mut builder = super::build_list_keys_by_provider_ids_query(&provider_ids);
+        let query = builder.build();
+        let sql = query.sql();
+
+        assert!(sql.contains("WHERE provider_id IN ("));
+        assert!(sql.contains("ORDER BY provider_id ASC, name ASC, id ASC"));
     }
 
     #[tokio::test]

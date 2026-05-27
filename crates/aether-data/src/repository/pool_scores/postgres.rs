@@ -341,14 +341,13 @@ impl PoolScoreReadRepository for PostgresPoolMemberScoreRepository {
         if query.ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut builder = QueryBuilder::<Postgres>::new(SCORE_COLUMNS);
-        let mut where_clause = WhereClause::new();
-        push_in(&mut builder, &mut where_clause, "id", &query.ids);
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
+        let rows = sqlx::query(&format!(
+            "{SCORE_COLUMNS} WHERE id = ANY($1) ORDER BY id ASC"
+        ))
+        .bind(&query.ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_postgres_err()?;
         rows.iter().map(map_score_row).collect()
     }
 }

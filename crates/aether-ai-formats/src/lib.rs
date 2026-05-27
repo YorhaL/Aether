@@ -25,7 +25,7 @@ pub use formats::shared::model_directives::{
     apply_model_directive_overrides_from_request, claude_model_uses_adaptive_effort,
     extract_gemini_model_from_path, gemini_model_uses_thinking_level, model_directive_base_model,
     normalize_model_directive_model, parse_model_directive, ModelDirective, ModelOverride,
-    ReasoningEffort,
+    ReasoningEffort, ServiceTier,
 };
 pub use formats::shared::request::{
     endpoint_config_forces_upstream_stream_policy, enforce_request_body_stream_field,

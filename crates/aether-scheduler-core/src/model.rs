@@ -548,6 +548,24 @@ mod tests {
             .as_deref(),
             Some("gpt-5.4")
         );
+
+        let row = sample_row("gpt-5.4", "gpt-5.4-upstream");
+        assert!(row_supports_requested_model_with_model_directives(
+            &row,
+            "gpt-5.4-fast-xhigh",
+            "openai:chat",
+            true
+        ));
+        assert_eq!(
+            resolve_requested_global_model_name_with_model_directives(
+                &[row],
+                "gpt-5.4-xhigh-fast",
+                "openai:chat",
+                true
+            )
+            .as_deref(),
+            Some("gpt-5.4")
+        );
     }
 
     #[test]

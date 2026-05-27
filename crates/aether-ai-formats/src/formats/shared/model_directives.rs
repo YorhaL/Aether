@@ -9,6 +9,7 @@ pub struct ModelDirective {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelOverride {
     ReasoningEffort(ReasoningEffort),
+    ServiceTier(ServiceTier),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,19 +80,90 @@ impl ReasoningEffort {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTier {
+    Priority,
+}
+
+impl ServiceTier {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fast" => Some(Self::Priority),
+            _ => None,
+        }
+    }
+
+    pub fn as_openai_value(self) -> &'static str {
+        match self {
+            Self::Priority => "priority",
+        }
+    }
+}
+
 pub fn parse_model_directive(model: &str) -> Option<ModelDirective> {
-    let model = model.trim();
-    let (base_model, suffix) = model.rsplit_once('-')?;
-    let base_model = base_model.trim();
+    let (base_model, overrides) = parse_model_directive_parts(model)?;
+    Some(ModelDirective {
+        base_model,
+        overrides,
+    })
+}
+
+fn parse_model_directive_parts(model: &str) -> Option<(String, Vec<ModelOverride>)> {
+    let mut base_model = model.trim();
+    let mut overrides = ModelOverrideAccumulator::default();
+    while let Some((candidate_base, suffix)) = base_model.rsplit_once('-') {
+        let Some(override_item) = parse_model_override(suffix) else {
+            break;
+        };
+        overrides.insert(override_item)?;
+        base_model = candidate_base.trim();
+    }
     if base_model.is_empty() {
         return None;
     }
+    let overrides = overrides.into_overrides()?;
+    Some((base_model.to_string(), overrides))
+}
 
-    let reasoning_effort = ReasoningEffort::parse(suffix)?;
-    Some(ModelDirective {
-        base_model: base_model.to_string(),
-        overrides: vec![ModelOverride::ReasoningEffort(reasoning_effort)],
-    })
+fn parse_model_override(suffix: &str) -> Option<ModelOverride> {
+    ReasoningEffort::parse(suffix)
+        .map(ModelOverride::ReasoningEffort)
+        .or_else(|| ServiceTier::parse(suffix).map(ModelOverride::ServiceTier))
+}
+
+#[derive(Default)]
+struct ModelOverrideAccumulator {
+    reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<ServiceTier>,
+}
+
+impl ModelOverrideAccumulator {
+    fn insert(&mut self, override_item: ModelOverride) -> Option<()> {
+        match override_item {
+            ModelOverride::ReasoningEffort(value) => {
+                if self.reasoning_effort.replace(value).is_some() {
+                    return None;
+                }
+            }
+            ModelOverride::ServiceTier(value) => {
+                if self.service_tier.replace(value).is_some() {
+                    return None;
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn into_overrides(self) -> Option<Vec<ModelOverride>> {
+        let mut overrides = Vec::new();
+        if let Some(reasoning_effort) = self.reasoning_effort {
+            overrides.push(ModelOverride::ReasoningEffort(reasoning_effort));
+        }
+        if let Some(service_tier) = self.service_tier {
+            overrides.push(ModelOverride::ServiceTier(service_tier));
+        }
+        (!overrides.is_empty()).then_some(overrides)
+    }
 }
 
 pub fn model_directive_base_model(model: &str) -> Option<String> {
@@ -149,18 +221,23 @@ pub fn apply_model_directive_overrides_from_model(
     source_model: &str,
 ) -> Option<ModelDirective> {
     let directive = parse_model_directive(source_model)?;
+    let mut patched_body = provider_request_body.clone();
     for override_item in &directive.overrides {
         match override_item {
             ModelOverride::ReasoningEffort(effort) => {
                 apply_reasoning_effort_override(
-                    provider_request_body,
+                    &mut patched_body,
                     provider_api_format,
                     provider_model,
                     *effort,
                 )?;
             }
+            ModelOverride::ServiceTier(tier) => {
+                apply_service_tier_override(&mut patched_body, provider_api_format, *tier)?;
+            }
         }
     }
+    *provider_request_body = patched_body;
     Some(directive)
 }
 
@@ -211,6 +288,21 @@ fn apply_reasoning_effort_override(
         "gemini:generate_content" => {
             set_gemini_reasoning_effort(provider_request_body, effort, provider_model)
         }
+        _ => None,
+    }
+}
+
+fn apply_service_tier_override(
+    provider_request_body: &mut Value,
+    provider_api_format: &str,
+    tier: ServiceTier,
+) -> Option<()> {
+    match crate::normalize_api_format_alias(provider_api_format).as_str() {
+        "openai:chat" | "openai:responses" | "openai:responses:compact" => set_object_string(
+            provider_request_body,
+            "service_tier",
+            tier.as_openai_value(),
+        ),
         _ => None,
     }
 }
@@ -368,7 +460,7 @@ mod tests {
 
     use super::{
         apply_model_directive_overrides_from_model, parse_model_directive, ModelDirective,
-        ModelOverride, ReasoningEffort,
+        ModelOverride, ReasoningEffort, ServiceTier,
     };
 
     #[test]
@@ -390,11 +482,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_supported_service_tier_suffixes() {
+        assert_eq!(
+            parse_model_directive("gpt-5.4-fast"),
+            Some(ModelDirective {
+                base_model: "gpt-5.4".to_string(),
+                overrides: vec![ModelOverride::ServiceTier(ServiceTier::Priority)],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_combined_suffixes_in_canonical_order() {
+        let expected = Some(ModelDirective {
+            base_model: "gpt-5.4".to_string(),
+            overrides: vec![
+                ModelOverride::ReasoningEffort(ReasoningEffort::XHigh),
+                ModelOverride::ServiceTier(ServiceTier::Priority),
+            ],
+        });
+        assert_eq!(parse_model_directive("gpt-5.4-fast-xhigh"), expected);
+        assert_eq!(parse_model_directive("gpt-5.4-xhigh-fast"), expected);
+    }
+
+    #[test]
     fn ignores_unknown_or_incomplete_suffixes() {
         assert_eq!(parse_model_directive("gpt-5.4-ultra"), None);
         assert_eq!(parse_model_directive("gpt-5.4"), None);
         assert_eq!(parse_model_directive("-high"), None);
         assert_eq!(parse_model_directive("gpt-5.4-high-json"), None);
+        assert_eq!(parse_model_directive("gpt-5.4-low-high"), None);
     }
 
     #[test]
@@ -445,5 +562,66 @@ mod tests {
             gemini["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             2048
         );
+    }
+
+    #[test]
+    fn applies_fast_suffix_to_openai_service_tier() {
+        let mut openai_chat = json!({"model": "gpt-5-upstream"});
+        apply_model_directive_overrides_from_model(
+            &mut openai_chat,
+            "openai:chat",
+            "gpt-5-upstream",
+            "gpt-5.4-fast",
+        )
+        .expect("directive should apply");
+        assert_eq!(openai_chat["service_tier"], "priority");
+
+        let mut responses = json!({"model": "gpt-5-upstream"});
+        apply_model_directive_overrides_from_model(
+            &mut responses,
+            "openai:responses",
+            "gpt-5-upstream",
+            "gpt-5.4-fast",
+        )
+        .expect("directive should apply");
+        assert_eq!(responses["service_tier"], "priority");
+    }
+
+    #[test]
+    fn applies_combined_suffixes_to_openai_body() {
+        let mut openai_chat = json!({"model": "gpt-5-upstream", "reasoning_effort": "low"});
+        apply_model_directive_overrides_from_model(
+            &mut openai_chat,
+            "openai:chat",
+            "gpt-5-upstream",
+            "gpt-5.4-fast-xhigh",
+        )
+        .expect("directive should apply");
+        assert_eq!(openai_chat["reasoning_effort"], "xhigh");
+        assert_eq!(openai_chat["service_tier"], "priority");
+
+        let mut reversed = json!({"model": "gpt-5-upstream", "reasoning_effort": "low"});
+        apply_model_directive_overrides_from_model(
+            &mut reversed,
+            "openai:chat",
+            "gpt-5-upstream",
+            "gpt-5.4-xhigh-fast",
+        )
+        .expect("directive should apply");
+        assert_eq!(reversed, openai_chat);
+    }
+
+    #[test]
+    fn unsupported_combined_suffix_leaves_body_unchanged() {
+        let mut claude = json!({"model": "claude-sonnet-4-5"});
+        let original = claude.clone();
+        assert!(apply_model_directive_overrides_from_model(
+            &mut claude,
+            "claude:messages",
+            "claude-sonnet-4-5",
+            "gpt-5.4-fast-xhigh",
+        )
+        .is_none());
+        assert_eq!(claude, original);
     }
 }

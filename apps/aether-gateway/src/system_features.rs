@@ -88,15 +88,16 @@ pub(crate) async fn reasoning_model_directive_enabled_for_api_format_and_model(
         return false;
     }
 
-    let Some(suffix) = requested_model.and_then(reasoning_suffix_from_model) else {
+    let Some(suffixes) = requested_model.and_then(model_directive_suffixes_from_model) else {
         return false;
     };
 
-    settings
+    let mappings = settings
         .as_ref()
-        .and_then(|settings| settings.api_format_mappings(&api_format))
-        .map(|mappings| mappings.contains_key(&suffix))
-        .unwrap_or_else(|| DEFAULT_REASONING_SUFFIXES.contains(&suffix.as_str()))
+        .and_then(|settings| settings.api_format_mappings(&api_format));
+    suffixes
+        .iter()
+        .all(|suffix| suffix_supported_for_api_format(&api_format, suffix, mappings.as_ref()))
 }
 
 pub(crate) async fn reasoning_model_directive_mapping_for_api_format_and_model(
@@ -113,17 +114,17 @@ pub(crate) async fn reasoning_model_directive_mapping_for_api_format_and_model(
     {
         return None;
     }
-    let suffix = requested_model.and_then(reasoning_suffix_from_model)?;
+    let suffixes = requested_model.and_then(model_directive_suffixes_from_model)?;
     let api_format = crate::ai_serving::normalize_api_format_alias(api_format);
     let settings = read_reasoning_model_directive_settings(state).await;
-    settings
+    let mappings = settings
         .as_ref()
-        .and_then(|settings| settings.api_format_mappings(&api_format))
-        .and_then(|mappings| mappings.get(&suffix).cloned())
-        .or_else(|| default_reasoning_mapping(&api_format, &suffix))
+        .and_then(|settings| settings.api_format_mappings(&api_format));
+    model_directive_mapping_for_suffixes(&api_format, &suffixes, mappings.as_ref())
 }
 
-const DEFAULT_REASONING_SUFFIXES: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const DEFAULT_MODEL_DIRECTIVE_SUFFIXES: &[&str] =
+    &["low", "medium", "high", "xhigh", "max", "fast"];
 
 #[derive(Debug, Clone, Default)]
 struct ReasoningModelDirectiveSettings {
@@ -183,20 +184,64 @@ impl ReasoningModelDirectiveSettings {
     }
 }
 
-fn reasoning_suffix_from_model(model: &str) -> Option<String> {
-    let model = model.trim();
-    let (base_model, suffix) = model.rsplit_once('-')?;
-    if base_model.trim().is_empty() {
+fn model_directive_suffixes_from_model(model: &str) -> Option<Vec<String>> {
+    let mut base_model = model.trim();
+    let mut suffixes = Vec::new();
+    let mut has_reasoning_effort = false;
+    let mut has_service_tier = false;
+    while let Some((candidate_base, suffix)) = base_model.rsplit_once('-') {
+        let Some(suffix) = normalize_reasoning_suffix(suffix) else {
+            break;
+        };
+        match model_directive_suffix_kind(&suffix)? {
+            ModelDirectiveSuffixKind::ReasoningEffort => {
+                if has_reasoning_effort {
+                    return None;
+                }
+                has_reasoning_effort = true;
+            }
+            ModelDirectiveSuffixKind::ServiceTier => {
+                if has_service_tier {
+                    return None;
+                }
+                has_service_tier = true;
+            }
+        }
+        suffixes.push(suffix);
+        base_model = candidate_base.trim();
+    }
+    if base_model.is_empty() || suffixes.is_empty() {
         return None;
     }
-    normalize_reasoning_suffix(suffix)
+    suffixes.sort_by_key(|suffix| {
+        DEFAULT_MODEL_DIRECTIVE_SUFFIXES
+            .iter()
+            .position(|value| value == suffix)
+            .unwrap_or(usize::MAX)
+    });
+    Some(suffixes)
 }
 
 fn normalize_reasoning_suffix(suffix: &str) -> Option<String> {
     let normalized = suffix.trim().to_ascii_lowercase();
-    DEFAULT_REASONING_SUFFIXES
+    DEFAULT_MODEL_DIRECTIVE_SUFFIXES
         .contains(&normalized.as_str())
         .then_some(normalized)
+}
+
+enum ModelDirectiveSuffixKind {
+    ReasoningEffort,
+    ServiceTier,
+}
+
+fn model_directive_suffix_kind(suffix: &str) -> Option<ModelDirectiveSuffixKind> {
+    match suffix {
+        "low" | "medium" | "high" | "xhigh" | "max" => {
+            Some(ModelDirectiveSuffixKind::ReasoningEffort)
+        }
+        "fast" => Some(ModelDirectiveSuffixKind::ServiceTier),
+        _ => None,
+    }
 }
 
 fn normalize_reasoning_mappings(
@@ -212,9 +257,15 @@ fn normalize_reasoning_mappings(
 
 fn default_reasoning_mapping(api_format: &str, suffix: &str) -> Option<serde_json::Value> {
     match api_format {
+        "openai:chat" if suffix == "fast" => {
+            Some(serde_json::json!({ "service_tier": "priority" }))
+        }
         "openai:chat" => {
             let effort = openai_reasoning_effort_value(suffix)?;
             Some(serde_json::json!({ "reasoning_effort": effort }))
+        }
+        "openai:responses" | "openai:responses:compact" if suffix == "fast" => {
+            Some(serde_json::json!({ "service_tier": "priority" }))
         }
         "openai:responses" | "openai:responses:compact" => {
             let effort = openai_reasoning_effort_value(suffix)?;
@@ -248,6 +299,54 @@ fn default_reasoning_mapping(api_format: &str, suffix: &str) -> Option<serde_jso
             }
         })),
         _ => None,
+    }
+}
+
+fn suffix_supported_for_api_format(
+    api_format: &str,
+    suffix: &str,
+    mappings: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    mappings
+        .map(|mappings| mappings.contains_key(suffix))
+        .unwrap_or_else(|| default_reasoning_mapping(api_format, suffix).is_some())
+}
+
+fn model_directive_mapping_for_suffixes(
+    api_format: &str,
+    suffixes: &[String],
+    mappings: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<serde_json::Value> {
+    let mut combined = serde_json::json!({});
+    for suffix in suffixes {
+        let mapping = mappings
+            .and_then(|mappings| mappings.get(suffix).cloned())
+            .or_else(|| {
+                mappings
+                    .is_none()
+                    .then(|| default_reasoning_mapping(api_format, suffix))
+                    .flatten()
+            })?;
+        deep_merge_json(&mut combined, &mapping);
+    }
+    Some(combined)
+}
+
+fn deep_merge_json(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target_object), serde_json::Value::Object(patch_object)) => {
+            for (key, patch_value) in patch_object {
+                match target_object.get_mut(key) {
+                    Some(target_value) => deep_merge_json(target_value, patch_value),
+                    None => {
+                        target_object.insert(key.clone(), patch_value.clone());
+                    }
+                }
+            }
+        }
+        (target, patch) => {
+            *target = patch.clone();
+        }
     }
 }
 
@@ -297,7 +396,11 @@ fn parse_reasoning_model_directive_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_reasoning_model_directive_settings;
+    use super::{
+        default_reasoning_mapping, model_directive_mapping_for_suffixes,
+        model_directive_suffixes_from_model, parse_reasoning_model_directive_settings,
+        suffix_supported_for_api_format,
+    };
     use serde_json::json;
 
     #[test]
@@ -331,5 +434,65 @@ mod tests {
             Some(json!({ "thinking": { "type": "enabled", "budget_tokens": 32768 } }))
         );
         assert_eq!(settings.api_format_enabled("gemini:generate_content"), None);
+    }
+
+    #[test]
+    fn default_fast_suffix_maps_to_openai_priority_service_tier() {
+        assert_eq!(
+            default_reasoning_mapping("openai:chat", "fast"),
+            Some(json!({ "service_tier": "priority" }))
+        );
+        assert_eq!(
+            default_reasoning_mapping("openai:responses", "fast"),
+            Some(json!({ "service_tier": "priority" }))
+        );
+        assert_eq!(
+            default_reasoning_mapping("openai:responses:compact", "fast"),
+            Some(json!({ "service_tier": "priority" }))
+        );
+        assert_eq!(default_reasoning_mapping("claude:messages", "fast"), None);
+        assert_eq!(
+            default_reasoning_mapping("gemini:generate_content", "fast"),
+            None
+        );
+    }
+
+    #[test]
+    fn combined_suffixes_are_order_insensitive() {
+        let expected = Some(vec!["xhigh".to_string(), "fast".to_string()]);
+        assert_eq!(
+            model_directive_suffixes_from_model("gpt-5.4-fast-xhigh"),
+            expected
+        );
+        assert_eq!(
+            model_directive_suffixes_from_model("gpt-5.4-xhigh-fast"),
+            expected
+        );
+        assert_eq!(
+            model_directive_mapping_for_suffixes(
+                "openai:chat",
+                expected.as_ref().expect("suffixes should parse"),
+                None,
+            ),
+            Some(json!({
+                "reasoning_effort": "xhigh",
+                "service_tier": "priority"
+            }))
+        );
+    }
+
+    #[test]
+    fn combined_suffix_requires_each_suffix_to_support_api_format() {
+        let suffixes = model_directive_suffixes_from_model("gpt-5.4-xhigh-fast").expect("suffixes");
+        assert!(suffixes
+            .iter()
+            .all(|suffix| { suffix_supported_for_api_format("openai:responses", suffix, None) }));
+        assert!(!suffixes
+            .iter()
+            .all(|suffix| { suffix_supported_for_api_format("claude:messages", suffix, None) }));
+        assert_eq!(
+            model_directive_mapping_for_suffixes("claude:messages", &suffixes, None),
+            None
+        );
     }
 }

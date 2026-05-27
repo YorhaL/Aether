@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_data_contracts::repository::pool_scores::{
-    GetPoolMemberScoresByIdsQuery, ListPoolMemberProbeCandidatesQuery, PoolMemberHardState,
+    ListPoolMemberProbeCandidatesQuery, ListPoolMemberScoresQuery, PoolMemberHardState,
     PoolMemberIdentity, PoolMemberProbeAttempt, PoolMemberProbeResult, PoolMemberProbeStatus,
     StoredPoolMemberScore, POOL_KIND_PROVIDER_KEY_POOL,
 };
@@ -22,7 +22,6 @@ use crate::admin_api::{
 };
 use crate::{AppState, GatewayError};
 
-use crate::ai_serving::provider_key_pool_score_id;
 use crate::ai_serving::provider_key_pool_score_scope;
 use crate::handlers::shared::provider_pool::{
     admin_provider_pool_quota_probe_active_members_key, AdminProviderPoolConfig,
@@ -38,6 +37,7 @@ const POOL_QUOTA_PROBE_REDIS_PREFIX: &str = "ap:quota_probe:last";
 const POOL_QUOTA_PROBE_DEFAULT_SCAN_INTERVAL_SECONDS: u64 = 60;
 const POOL_QUOTA_PROBE_MIN_SCAN_INTERVAL_SECONDS: u64 = 15;
 const POOL_QUOTA_PROBE_DEFAULT_MAX_KEYS_PER_PROVIDER: usize = 50;
+const POOL_QUOTA_PROBE_PROVIDER_SCORE_READ_LIMIT: usize = 100_000;
 const POOL_QUOTA_PROBE_DEFAULT_GLOBAL_CONCURRENCY: usize = 16;
 const POOL_QUOTA_PROBE_PROVIDER_LOCK_TTL_MS: u64 = 30_000;
 const POOL_QUOTA_PROBE_BURST_TRIGGER_LOCK_TTL_MS: u64 = 30_000;
@@ -386,21 +386,25 @@ async fn load_provider_key_account_scores(
         return BTreeMap::new();
     }
     let scope = provider_key_pool_score_scope();
-    let score_ids = key_ids
-        .iter()
-        .map(|key_id| {
-            let identity =
-                PoolMemberIdentity::provider_api_key(provider_id.to_string(), key_id.clone());
-            provider_key_pool_score_id(&identity, &scope)
-        })
-        .collect::<Vec<_>>();
+    let key_ids = key_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
     match state
         .data
-        .get_pool_member_scores_by_ids(&GetPoolMemberScoresByIdsQuery { ids: score_ids })
+        .list_pool_member_scores(&ListPoolMemberScoresQuery {
+            pool_kind: POOL_KIND_PROVIDER_KEY_POOL.to_string(),
+            pool_id: provider_id.to_string(),
+            capability: Some(scope.capability),
+            scope_kind: Some(scope.scope_kind),
+            scope_id: scope.scope_id,
+            hard_states: Vec::new(),
+            probe_statuses: None,
+            offset: 0,
+            limit: POOL_QUOTA_PROBE_PROVIDER_SCORE_READ_LIMIT,
+        })
         .await
     {
         Ok(scores) => scores
             .into_iter()
+            .filter(|score| key_ids.contains(score.member_id.as_str()))
             .map(|score| (score.member_id.clone(), score))
             .collect(),
         Err(err) => {

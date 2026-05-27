@@ -418,19 +418,33 @@ impl StoredRequestUsageAudit {
     }
 
     pub fn provider_reasoning_effort(&self) -> Option<String> {
+        if self
+            .provider_request_body
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some()
+        {
+            return extract_provider_reasoning_effort_from_body(
+                self.provider_request_body.as_ref(),
+            );
+        }
+
         self.request_metadata_string(PROVIDER_REASONING_EFFORT_METADATA_KEY)
             .and_then(normalize_provider_reasoning_effort)
-            .or_else(|| {
-                extract_provider_reasoning_effort_from_body(self.provider_request_body.as_ref())
-            })
     }
 
     pub fn provider_service_tier(&self) -> Option<String> {
+        if self
+            .provider_request_body
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some()
+        {
+            return extract_provider_service_tier_from_body(self.provider_request_body.as_ref());
+        }
+
         self.request_metadata_string(PROVIDER_SERVICE_TIER_METADATA_KEY)
             .and_then(normalize_provider_service_tier)
-            .or_else(|| {
-                extract_provider_service_tier_from_body(self.provider_request_body.as_ref())
-            })
     }
 
     pub fn body_ref(&self, field: UsageBodyField) -> Option<&str> {
@@ -2398,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_reasoning_effort_reads_metadata_and_provider_request_body() {
+    fn provider_reasoning_effort_prefers_provider_request_body_over_metadata() {
         let mut usage = sample_usage();
         usage.provider_request_body = Some(json!({
             "reasoning": { "effort": "XHigh" },
@@ -2413,6 +2427,10 @@ mod tests {
             "provider_service_tier": "standard"
         }));
 
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("xhigh"));
+        assert_eq!(usage.provider_service_tier().as_deref(), Some("priority"));
+
+        usage.provider_request_body = None;
         assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("max"));
         assert_eq!(usage.provider_service_tier().as_deref(), Some("standard"));
 
@@ -2424,6 +2442,17 @@ mod tests {
 
         assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("high"));
         assert_eq!(usage.provider_service_tier().as_deref(), Some("priority"));
+
+        usage.request_metadata = Some(json!({
+            "provider_reasoning_effort": "max",
+            "provider_service_tier": "standard"
+        }));
+        usage.provider_request_body = Some(json!({
+            "model": "gpt-5"
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort(), None);
+        assert_eq!(usage.provider_service_tier(), None);
     }
 
     #[test]

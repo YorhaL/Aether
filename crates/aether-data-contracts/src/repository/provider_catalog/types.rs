@@ -580,6 +580,8 @@ impl StoredProviderCatalogKeyStats {
 
 #[async_trait]
 pub trait ProviderCatalogReadRepository: Send + Sync {
+    fn clear_local_cache(&self) {}
+
     async fn list_providers(
         &self,
         active_only: bool,
