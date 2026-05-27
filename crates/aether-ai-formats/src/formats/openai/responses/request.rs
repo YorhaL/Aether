@@ -130,13 +130,13 @@ pub fn to_raw(
     let mut output = Map::new();
     output.insert("model".to_string(), Value::String(mapped_model.to_string()));
 
-    if let Some(instructions) = canonical_instructions_to_responses(canonical) {
+    let instructions = canonical_instructions_to_responses(canonical);
+    if let Some(instructions) = instructions.clone() {
         output.insert("instructions".to_string(), instructions);
     }
-    output.insert(
-        "input".to_string(),
-        Value::Array(canonical_messages_to_responses_input(canonical)?),
-    );
+    let mut input = canonical_messages_to_responses_input(canonical)?;
+    ensure_json_object_response_input_mentions_json(canonical, instructions.as_ref(), &mut input);
+    output.insert("input".to_string(), Value::Array(input));
 
     if upstream_is_stream && !compact {
         output.insert("stream".to_string(), Value::Bool(true));
@@ -263,6 +263,42 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
         flush_responses_message(&mut input, role, &mut content);
     }
     Some(input)
+}
+
+fn ensure_json_object_response_input_mentions_json(
+    canonical: &CanonicalRequest,
+    instructions: Option<&Value>,
+    input: &mut Vec<Value>,
+) {
+    if !canonical
+        .response_format
+        .as_ref()
+        .is_some_and(|format| format.format_type.eq_ignore_ascii_case("json_object"))
+        || input.iter().any(value_contains_json_word)
+        || !instructions.is_some_and(value_contains_json_word)
+    {
+        return;
+    }
+    input.insert(
+        0,
+        json!({
+            "type": "message",
+            "role": "system",
+            "content": [{
+                "type": "input_text",
+                "text": "Respond with JSON.",
+            }],
+        }),
+    );
+}
+
+fn value_contains_json_word(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.to_ascii_lowercase().contains("json"),
+        Value::Array(items) => items.iter().any(value_contains_json_word),
+        Value::Object(object) => object.values().any(value_contains_json_word),
+        _ => false,
+    }
 }
 
 fn flush_responses_message(input: &mut Vec<Value>, role: &str, content: &mut Vec<Value>) {
@@ -512,5 +548,47 @@ fn responses_tool_result_output(output: Option<&Value>, content_text: Option<&st
 fn insert_number(output: &mut Map<String, Value>, key: &str, value: Option<f64>) {
     if let Some(value) = value.and_then(serde_json::Number::from_f64) {
         output.insert(key.to_string(), Value::Number(value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_raw;
+    use crate::protocol::canonical::{
+        CanonicalContentBlock, CanonicalMessage, CanonicalRequest, CanonicalResponseFormat,
+        CanonicalRole,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn json_object_response_injects_json_hint_into_input_when_only_instructions_have_it() {
+        let request = CanonicalRequest {
+            model: "gpt-5.5".to_string(),
+            system: Some("Please answer in JSON.".to_string()),
+            messages: vec![CanonicalMessage {
+                role: CanonicalRole::User,
+                content: vec![CanonicalContentBlock::Text {
+                    text: "hello".to_string(),
+                    extensions: Default::default(),
+                }],
+                extensions: Default::default(),
+            }],
+            response_format: Some(CanonicalResponseFormat {
+                format_type: "json_object".to_string(),
+                json_schema: None,
+                extensions: Default::default(),
+            }),
+            ..CanonicalRequest::default()
+        };
+
+        let body = to_raw(&request, "gpt-5.5", false, false).expect("responses body");
+
+        assert_eq!(body["text"]["format"]["type"], json!("json_object"));
+        assert_eq!(body["input"][0]["role"], json!("system"));
+        assert!(body["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("hint text")
+            .to_ascii_lowercase()
+            .contains("json"));
     }
 }
