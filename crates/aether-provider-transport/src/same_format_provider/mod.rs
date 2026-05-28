@@ -9,6 +9,7 @@ use crate::auth::{
 };
 use crate::claude_code::build_claude_code_passthrough_headers;
 use crate::claude_code::local_claude_code_transport_unsupported_reason_with_network;
+use crate::gemini_cli::is_gemini_cli_provider_transport;
 use crate::grok::{is_grok_provider_transport, resolve_grok_session_auth};
 use crate::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body, is_kiro_provider_transport,
@@ -48,6 +49,7 @@ pub struct SameFormatProviderRequestBehaviorParams<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SameFormatProviderRequestBehavior {
     pub is_antigravity: bool,
+    pub is_gemini_cli: bool,
     pub is_claude_code: bool,
     pub is_vertex: bool,
     pub is_kiro: bool,
@@ -103,6 +105,7 @@ pub fn classify_same_format_provider_request_behavior(
     params: SameFormatProviderRequestBehaviorParams<'_>,
 ) -> SameFormatProviderRequestBehavior {
     let is_antigravity = is_antigravity_provider_transport(transport);
+    let is_gemini_cli = is_gemini_cli_provider_transport(transport);
     let is_claude_code = transport
         .provider
         .provider_type
@@ -137,6 +140,7 @@ pub fn classify_same_format_provider_request_behavior(
 
     SameFormatProviderRequestBehavior {
         is_antigravity,
+        is_gemini_cli,
         is_claude_code,
         is_vertex,
         is_kiro,
@@ -518,6 +522,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "secret".to_string(),
                 decrypted_auth_config: None,
             },
@@ -993,6 +998,7 @@ mod tests {
             header_rules: None,
             behavior: SameFormatProviderRequestBehavior {
                 is_antigravity: false,
+                is_gemini_cli: false,
                 is_claude_code: false,
                 is_vertex: false,
                 is_kiro: false,

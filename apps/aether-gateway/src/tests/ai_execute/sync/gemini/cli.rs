@@ -780,6 +780,9 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
         trace_id: String,
         url: String,
         has_model_field: bool,
+        project: String,
+        user_prompt_id: String,
+        envelope_model: String,
         authorization: String,
         exact_temperature: f64,
         endpoint_tag: String,
@@ -900,7 +903,7 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://generativelanguage.googleapis.com".to_string(),
+            "https://cloudcode-pa.googleapis.com".to_string(),
             Some(serde_json::json!([
                 {"action":"set","key":"x-endpoint-tag","value":"gemini-cli-oauth-local"}
             ])),
@@ -921,7 +924,7 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
     fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
         let encrypted_auth_config = encrypt_python_fernet_plaintext(
             DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"gemini_cli","refresh_token":"rt-gemini-cli-local-123"}"#,
+            r#"{"provider_type":"gemini_cli","refresh_token":"rt-gemini-cli-local-123","project_id":"gemini-cli-project-1"}"#,
         )
         .expect("auth config should encrypt");
         StoredProviderCatalogKey::new(
@@ -1062,6 +1065,27 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
                         .and_then(|value| value.get("json_body"))
                         .and_then(|value| value.get("model"))
                         .is_some(),
+                    project: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("project"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    user_prompt_id: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("user_prompt_id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    envelope_model: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("model"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     authorization: payload
                         .get("headers")
                         .and_then(|value| value.get("authorization"))
@@ -1071,6 +1095,7 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
                     exact_temperature: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("request"))
                         .and_then(|value| value.get("generationConfig"))
                         .and_then(|value| value.get("temperature"))
                         .and_then(|value| value.as_f64())
@@ -1084,6 +1109,7 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
                     metadata_mode: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("request"))
                         .and_then(|value| value.get("metadata"))
                         .and_then(|value| value.get("mode"))
                         .and_then(|value| value.as_str())
@@ -1092,6 +1118,7 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
                     metadata_source: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("request"))
                         .and_then(|value| value.get("metadata"))
                         .and_then(|value| value.get("source"))
                         .and_then(|value| value.as_str())
@@ -1100,6 +1127,7 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
                     tool_config_present: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("request"))
                         .and_then(|value| value.get("toolConfig"))
                         .is_some(),
                     proxy_node_id: payload
@@ -1123,18 +1151,23 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
                     },
                     "body": {
                         "json_body": {
-                            "candidates": [{
-                                "content": {
-                                    "role": "model",
-                                    "parts": [{"text": "Hello from Gemini CLI"}]
-                                },
-                                "finishReason": "STOP"
-                            }],
-                            "usageMetadata": {
-                                "promptTokenCount": 1,
-                                "candidatesTokenCount": 2,
-                                "totalTokenCount": 3
+                            "response": {
+                                "candidates": [{
+                                    "content": {
+                                        "role": "model",
+                                        "parts": [{"text": "Hello from Gemini CLI"}]
+                                    },
+                                    "finishReason": "STOP"
+                                }],
+                                "usageMetadata": {
+                                    "promptTokenCount": 1,
+                                    "candidatesTokenCount": 2,
+                                    "totalTokenCount": 3
+                                }
                             }
+                            ,"remainingCredits": 41,
+                            "consumedCredits": 1,
+                            "traceId": "trace-upstream-sync-1"
                         }
                     },
                     "telemetry": {
@@ -1203,7 +1236,9 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let response_status = response.status();
+    let response_body = response.text().await.expect("response body should read");
+    assert_eq!(response_status, StatusCode::OK, "body={response_body}");
 
     let seen_refresh_request = seen_refresh
         .lock()
@@ -1238,9 +1273,21 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
     );
     assert_eq!(
         seen_execution_runtime_request.url,
-        "https://generativelanguage.googleapis.com/custom/v1beta/models/gemini-cli-upstream:generateContent"
+        "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
     );
-    assert!(!seen_execution_runtime_request.has_model_field);
+    assert!(seen_execution_runtime_request.has_model_field);
+    assert_eq!(
+        seen_execution_runtime_request.project,
+        "gemini-cli-project-1"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.user_prompt_id,
+        "trace-gemini-cli-oauth-local-sync-123"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.envelope_model,
+        "gemini-cli-upstream"
+    );
     assert_eq!(
         seen_execution_runtime_request.authorization,
         "Bearer refreshed-gemini-cli-access-token"

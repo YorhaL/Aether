@@ -35,7 +35,10 @@
                   停用
                 </Badge>
               </div>
-              <div class="flex items-center gap-1.5">
+              <div
+                v-if="!isEndpointConfigReadOnly"
+                class="flex items-center gap-1.5"
+              >
                 <!-- 格式转换按钮 -->
                 <span
                   class="mr-1"
@@ -167,7 +170,7 @@
                 </div>
                 <!-- 保存/撤销按钮（URL/路径有修改时显示） -->
                 <div
-                  v-if="hasUrlChanges(endpoint)"
+                  v-if="!isEndpointConfigReadOnly && hasUrlChanges(endpoint)"
                   class="flex items-center gap-1 shrink-0"
                 >
                   <Button
@@ -193,7 +196,10 @@
               </div>
 
               <!-- 请求/响应规则（请求头、请求体和响应头规则） -->
-              <Collapsible v-model:open="endpointRulesExpanded[endpoint.id]">
+              <Collapsible
+                v-if="!isEndpointConfigReadOnly"
+                v-model:open="endpointRulesExpanded[endpoint.id]"
+              >
                 <div class="flex items-center gap-2">
                   <!-- 有规则时显示可折叠的触发器 -->
                   <CollapsibleTrigger
@@ -1791,6 +1797,10 @@ const isFixedProvider = computed(() => {
   return !!t && t !== 'custom'
 })
 
+const isEndpointConfigReadOnly = computed(() => {
+  return (props.provider?.provider_type || '').trim().toLowerCase() === 'gemini_cli'
+})
+
 // 新端点表单
 const newEndpoint = ref({
   api_format: '',
@@ -3184,6 +3194,8 @@ watch(() => props.endpoints, (endpoints) => {
 
 // 保存端点
 async function saveEndpoint(endpoint: ProviderEndpoint) {
+  if (isEndpointConfigReadOnly.value) return
+
   if (isEndpointRulesJsonMode(endpoint.id) && endpointRulesJsonDirty.value[endpoint.id]) {
     if (!applyEndpointRulesJsonDraft(endpoint.id, { notify: false })) return
   }

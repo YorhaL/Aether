@@ -658,12 +658,18 @@
                         >{{ getQuotaProgressMeterDisplayText(item) }}</span>
                       </div>
                     </div>
+                    <div
+                      v-if="keyUiStateMap[key.key_id]?.accountQuotaText"
+                      class="text-[10px] leading-none text-muted-foreground tabular-nums"
+                    >
+                      {{ keyUiStateMap[key.key_id]?.accountQuotaText }}
+                    </div>
                   </div>
                   <span
-                    v-else-if="keyUiStateMap[key.key_id]?.quotaFallbackText"
+                    v-else-if="keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText"
                     :class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
                   >
-                    {{ keyUiStateMap[key.key_id]?.quotaFallbackText }}
+                    {{ keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText }}
                   </span>
                   <span
                     v-else
@@ -1177,12 +1183,18 @@
                       >{{ getQuotaProgressMeterDisplayText(item) }}</span>
                     </div>
                   </div>
+                  <div
+                    v-if="keyUiStateMap[key.key_id]?.accountQuotaText"
+                    class="text-[10px] leading-none text-muted-foreground tabular-nums"
+                  >
+                    {{ keyUiStateMap[key.key_id]?.accountQuotaText }}
+                  </div>
                 </div>
                 <div
-                  v-else-if="keyUiStateMap[key.key_id]?.quotaFallbackText"
+                  v-else-if="keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText"
                   :class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
                 >
-                  {{ keyUiStateMap[key.key_id]?.quotaFallbackText }}
+                  {{ keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText }}
                 </div>
                 <div
                   v-else
@@ -1622,6 +1634,7 @@ import {
   getOAuthStatusTitle as resolveOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
 import {
+  getGeminiCliAccountCreditsText,
   getLegacyAccountQuotaText,
   getQuotaDisplayText,
 } from '@/utils/providerKeyQuota'
@@ -2330,6 +2343,7 @@ interface QuotaProgressItem {
   resetAtSeconds?: number | null
   resetSeconds?: number | null
   updatedAtSeconds?: number | null
+  allowDynamicReset?: boolean
 }
 
 interface PoolCodexCycleStatsRow {
@@ -2359,6 +2373,7 @@ type PoolKeyUiState = {
   canRefreshToken: boolean
   planLabel: string
   planClass: string
+  accountQuotaText: string | null
   quotaFallbackText: string | null
   quotaTextClass: string
   importedAtRelative: string
@@ -2382,6 +2397,7 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
   for (const key of keyPage.value.keys) {
     const visibleOAuthState = getVisibleOAuthState(key)
     const oauthOrgBadge = getOAuthOrgBadge(key)
+    const accountQuotaText = getAccountQuotaText(key)
     const quotaFallbackText = getQuotaFallbackText(key)
     const planType = resolvePoolKeyPlanType(key)
     const canRefreshToken = canRefreshOAuthCredential(key)
@@ -2400,8 +2416,11 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
       canRefreshToken,
       planLabel: planType ? formatOAuthPlanType(planType) : '',
       planClass: planType ? getOAuthPlanTypeClass(planType) : '',
+      accountQuotaText,
       quotaFallbackText,
-      quotaTextClass: quotaFallbackText ? getQuotaTextClass(quotaFallbackText) : '',
+      quotaTextClass: accountQuotaText || quotaFallbackText
+        ? getQuotaTextClass(accountQuotaText || quotaFallbackText || '')
+        : '',
       importedAtRelative: formatPoolKeyImportedAt(key),
       lastUsedRelative: key.last_used_at ? formatRelativeTime(key.last_used_at) : '-',
       statsDisplay: buildPoolStatsDisplay(key, selectedProviderType.value, poolStatsMode.value),
@@ -2476,6 +2495,7 @@ function getPoolKeyAccountStatsMetrics(key: PoolKeyDetail): PoolStatsMetric[] {
 const quotaRefreshSupported = computed(() => {
   return selectedProviderType.value === 'codex'
     || selectedProviderType.value === 'kiro'
+    || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'windsurf'
     || selectedProviderType.value === 'antigravity'
     || selectedProviderType.value === 'grok'
@@ -3700,7 +3720,8 @@ function getQuotaProgressLabel(label: string): string {
 }
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
-  if (!['日', '5H', '周', 'Spark5H', 'Spark周', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图'].includes(item.label)) return null
+  const staticResetLabels = ['日', '5H', '周', 'Spark5H', 'Spark周', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图']
+  if (!item.allowDynamicReset && !staticResetLabels.includes(item.label)) return null
   if (item.resetAtSeconds == null && item.resetSeconds == null) return null
   return getCodexResetCountdown(
     item.resetAtSeconds,
@@ -3744,6 +3765,10 @@ function getQuotaProgressMeterDisplayText(item: QuotaProgressItem): string {
 
 function getQuotaFallbackText(key: PoolKeyDetail): string | null {
   return getQuotaDisplayText(key, selectedProviderType.value)
+}
+
+function getAccountQuotaText(key: PoolKeyDetail): string | null {
+  return getGeminiCliAccountCreditsText(key, selectedProviderType.value)
 }
 
 
@@ -3920,6 +3945,12 @@ function getGrokQuotaWindowLabel(window: QuotaWindowSnapshot): string {
   return GROK_QUOTA_MODE_LABELS[normalized] || GROK_QUOTA_MODE_LABELS[code.toLowerCase()] || label || code || '模式'
 }
 
+function getGeminiCliQuotaWindowLabel(window: QuotaWindowSnapshot): string {
+  const code = String(window.code || '').trim().replace(/^model:/i, '')
+  const label = String(window.label || window.model || code).trim()
+  return label || code || '模型'
+}
+
 function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressItem[] {
   const quota = getQuotaSnapshot(key)
   if (!quota) return []
@@ -4084,19 +4115,24 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
     const windows = getQuotaSnapshotWindowsByScope(quota, 'model')
     if (windows.length === 0) return []
 
-    const remainingPercents = windows
-      .map(getQuotaWindowRemainingPercent)
-      .filter((value): value is number => value != null)
-    if (remainingPercents.length === 0) return []
-
-    return [{
-      label: '最低',
-      remainingPercent: Math.min(...remainingPercents),
-      detail: `${windows.length} 模型`,
-      resetAtSeconds: null,
-      resetSeconds: null,
-      updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
-    }]
+    const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
+    const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
+    return windows
+      .map((window): QuotaProgressItem | null => {
+        const remainingPercent = getQuotaWindowRemainingPercent(window)
+          ?? (window?.is_exhausted === true ? 0 : null)
+        if (remainingPercent == null) return null
+        return {
+          label: getGeminiCliQuotaWindowLabel(window),
+          remainingPercent,
+          detail: getQuotaWindowValueText(window),
+          resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
+          resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
+          updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+          allowDynamicReset: true,
+        }
+      })
+      .filter((item): item is QuotaProgressItem => item != null)
   }
 
   if (providerType === 'chatgpt_web') {

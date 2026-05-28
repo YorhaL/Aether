@@ -92,6 +92,11 @@ export function getDefaultEndpointPath(params: {
 }): string {
   const providerType = (params.providerType || '').toLowerCase()
   const normalizedApiFormat = normalizeEndpointApiFormat(params.apiFormat)
+  if (providerType === 'gemini_cli') {
+    if (normalizedApiFormat === 'gemini:generate_content') {
+      return '/v1internal:{action}'
+    }
+  }
   if (providerType === 'vertex_ai') {
     if (normalizedApiFormat === 'gemini:generate_content') {
       return '/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:{action}'

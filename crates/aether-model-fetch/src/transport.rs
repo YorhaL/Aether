@@ -768,6 +768,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "secret".to_string(),
                 decrypted_auth_config: Some(
                     r#"{"project_id":"project-1","client_version":"1.2.3","session_id":"sess-1"}"#

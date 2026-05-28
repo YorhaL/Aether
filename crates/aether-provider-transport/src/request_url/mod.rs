@@ -10,6 +10,9 @@ use crate::antigravity::{
     AntigravityRequestUrlAction,
 };
 use crate::claude_code::build_claude_code_messages_url;
+use crate::gemini_cli::{
+    build_gemini_cli_v1internal_url, is_gemini_cli_provider_transport, GeminiCliRequestUrlAction,
+};
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
@@ -283,7 +286,9 @@ fn build_transport_hook_url(
         ));
     }
 
-    match aether_ai_formats::normalize_api_format_alias(params.provider_api_format).as_str() {
+    let normalized_provider_api_format =
+        aether_ai_formats::normalize_api_format_alias(params.provider_api_format);
+    match normalized_provider_api_format.as_str() {
         "gemini:generate_content" => {
             if let Some(auth) = resolve_local_vertex_api_key_query_auth(transport) {
                 return build_vertex_api_key_gemini_content_url(
@@ -333,6 +338,25 @@ fn build_transport_hook_url(
                 AntigravityRequestUrlAction::StreamGenerateContent
             } else {
                 AntigravityRequestUrlAction::GenerateContent
+            },
+            query.as_ref(),
+        );
+    }
+
+    if is_gemini_cli_provider_transport(transport)
+        && normalized_provider_api_format == "gemini:generate_content"
+    {
+        let query = params.request_query.map(|raw| {
+            form_urlencoded::parse(raw.as_bytes())
+                .into_owned()
+                .collect::<BTreeMap<String, String>>()
+        });
+        return build_gemini_cli_v1internal_url(
+            &transport.endpoint.base_url,
+            if params.upstream_is_stream {
+                GeminiCliRequestUrlAction::StreamGenerateContent
+            } else {
+                GeminiCliRequestUrlAction::GenerateContent
             },
             query.as_ref(),
         );
@@ -580,6 +604,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "vertex-secret".to_string(),
                 decrypted_auth_config: None,
             },

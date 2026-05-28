@@ -42,8 +42,12 @@ pub fn force_upstream_streaming_for_provider(
     provider_type: &str,
     provider_api_format: &str,
 ) -> bool {
-    provider_type.trim().eq_ignore_ascii_case("codex")
-        && aether_ai_formats::is_openai_responses_format(provider_api_format)
+    let provider_type = provider_type.trim();
+    (provider_type.eq_ignore_ascii_case("codex")
+        && aether_ai_formats::is_openai_responses_format(provider_api_format))
+        || (provider_type.eq_ignore_ascii_case("gemini_cli")
+            && aether_ai_formats::normalize_api_format_alias(provider_api_format)
+                == "gemini:generate_content")
 }
 
 pub(crate) fn parse_upstream_stream_policy(
@@ -201,6 +205,22 @@ mod tests {
         assert!(!force_upstream_streaming_for_provider(
             "codex",
             "openai:responses:compact"
+        ));
+    }
+
+    #[test]
+    fn forces_streaming_for_gemini_cli_generate_content() {
+        assert!(force_upstream_streaming_for_provider(
+            "gemini_cli",
+            "gemini:generate_content"
+        ));
+        assert!(force_upstream_streaming_for_provider(
+            " GEMINI_CLI ",
+            "gemini:generate_content"
+        ));
+        assert!(!force_upstream_streaming_for_provider(
+            "google",
+            "gemini:generate_content"
         ));
     }
 

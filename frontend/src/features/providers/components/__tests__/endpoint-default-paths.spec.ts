@@ -40,6 +40,14 @@ describe('endpoint default paths', () => {
     })).toBe('/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:predict')
   })
 
+  it('uses Gemini CLI v1internal paths for fixed Gemini CLI endpoints', () => {
+    expect(getDefaultEndpointPath({
+      apiFormat: 'gemini:generate_content',
+      providerType: 'gemini_cli',
+      apiFormats,
+    })).toBe('/v1internal:{action}')
+  })
+
   it('keeps Codex Responses root path without duplicating /v1', () => {
     expect(getDefaultEndpointPath({
       apiFormat: 'openai:responses',

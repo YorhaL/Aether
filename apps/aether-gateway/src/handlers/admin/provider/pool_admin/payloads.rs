@@ -782,6 +782,18 @@ fn admin_pool_build_grok_account_quota_from_snapshot(
 fn admin_pool_build_gemini_cli_account_quota_from_snapshot(
     quota_snapshot: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
+    if let Some(credits) = quota_snapshot
+        .get("credits")
+        .and_then(serde_json::Value::as_object)
+    {
+        if let Some(remaining) = admin_pool_json_to_f64(credits.get("remaining")) {
+            return Some(format!(
+                "AI Credits 剩余 {}",
+                admin_pool_format_quota_value(remaining)
+            ));
+        }
+    }
+
     let now = chrono::Utc::now().timestamp();
     let mut active = admin_pool_quota_windows(quota_snapshot)
         .into_iter()
