@@ -43,13 +43,13 @@ pub use diagnostics::{
 };
 pub use gemini_cli::{
     build_gemini_cli_v1internal_request, build_gemini_cli_v1internal_url,
-    classify_gemini_cli_v1internal_request_body, is_gemini_cli_provider_transport,
-    resolve_gemini_cli_project_id, resolve_local_gemini_cli_request_auth, GeminiCliRequestAuth,
-    GeminiCliRequestAuthSupport, GeminiCliRequestAuthUnsupportedReason,
-    GeminiCliRequestEnvelopeSupport, GeminiCliRequestEnvelopeUnsupportedReason,
-    GeminiCliRequestUrlAction, GEMINI_CLI_PROVIDER_TYPE, GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH,
-    GEMINI_CLI_USER_AGENT, GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME,
-    GEMINI_CLI_V1INTERNAL_PATH_TEMPLATE,
+    classify_gemini_cli_v1internal_request_body, gemini_cli_v1internal_requires_upstream_streaming,
+    is_gemini_cli_provider_transport, resolve_gemini_cli_project_id,
+    resolve_local_gemini_cli_request_auth, GeminiCliRequestAuth, GeminiCliRequestAuthSupport,
+    GeminiCliRequestAuthUnsupportedReason, GeminiCliRequestEnvelopeSupport,
+    GeminiCliRequestEnvelopeUnsupportedReason, GeminiCliRequestUrlAction, GEMINI_CLI_PROVIDER_TYPE,
+    GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH, GEMINI_CLI_USER_AGENT,
+    GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME, GEMINI_CLI_V1INTERNAL_PATH_TEMPLATE,
 };
 pub use gemini_files::{
     build_gemini_files_headers, build_gemini_files_request_body, build_gemini_files_upstream_url,

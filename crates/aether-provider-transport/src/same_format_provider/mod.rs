@@ -113,11 +113,17 @@ pub fn classify_same_format_provider_request_behavior(
         .eq_ignore_ascii_case("claude_code");
     let is_vertex = is_vertex_transport_context(transport);
     let is_kiro = is_kiro_provider_transport(transport);
+    let gemini_cli_requires_upstream_streaming = is_gemini_cli
+        && crate::gemini_cli::gemini_cli_v1internal_requires_upstream_streaming(
+            params.provider_api_format,
+            params.require_streaming,
+        );
     let upstream_is_stream = aether_ai_formats::resolve_upstream_is_stream_from_endpoint_config(
         transport.endpoint.config.as_ref(),
         params.require_streaming,
         is_kiro
             || is_antigravity
+            || gemini_cli_requires_upstream_streaming
             || aether_ai_formats::api::force_upstream_streaming_for_provider(
                 transport.provider.provider_type.as_str(),
                 params.provider_api_format,
@@ -645,6 +651,34 @@ mod tests {
         );
 
         assert!(behavior.upstream_is_stream);
+    }
+
+    #[test]
+    fn same_format_behavior_preserves_gemini_cli_streaming_requests() {
+        let mut gemini_cli = sample_transport("gemini_cli");
+        gemini_cli.endpoint.config = Some(json!({
+            "upstream_stream_policy": "force_non_stream"
+        }));
+
+        let stream_behavior = classify_same_format_provider_request_behavior(
+            &gemini_cli,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: true,
+                provider_api_format: "gemini:generate_content",
+                report_kind: "gemini_cli_stream_success",
+            },
+        );
+        assert!(stream_behavior.upstream_is_stream);
+
+        let sync_behavior = classify_same_format_provider_request_behavior(
+            &gemini_cli,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "gemini:generate_content",
+                report_kind: "gemini_cli_sync_success",
+            },
+        );
+        assert!(!sync_behavior.upstream_is_stream);
     }
 
     #[test]
