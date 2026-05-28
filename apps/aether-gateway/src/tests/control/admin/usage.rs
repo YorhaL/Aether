@@ -2516,7 +2516,7 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     assert_eq!(payload["method"], "POST");
     assert_eq!(
         payload["url"],
-        "https://api.openai.example/v1/chat/completions"
+        "https://api.openai.example/chat/completions"
     );
     assert_eq!(payload["headers"]["Content-Type"], "application/json");
     assert_eq!(payload["headers"]["Authorization"], "Bearer provider-real");
@@ -2536,7 +2536,7 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     );
     let curl = payload["curl"].as_str().expect("curl should be string");
     assert!(curl.contains("curl"));
-    assert!(curl.contains("https://api.openai.example/v1/chat/completions"));
+    assert!(curl.contains("https://api.openai.example/chat/completions"));
     assert!(curl.contains("Content-Type: application/json"));
     assert!(curl.contains("Authorization: Bearer provider-real"));
     assert!(curl.contains("\"model\":\"gpt-5-target\""));

@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use sqlx::{migrate::AppliedMigration, query, query_scalar, Connection, PgConnection, PgPool};
+use sqlx::{
+    migrate::AppliedMigration, query, query_scalar, Connection, PgConnection, PgPool, SqlitePool,
+};
 
 use super::{
     all_up_migrations, pending_migrations_from_applied, prepare_database_for_startup,
@@ -315,6 +317,7 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260522000000,
             20260524000000,
             20260527000000,
+            20260528000000,
         ]
     );
 }
@@ -671,6 +674,7 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260520010000,
             20260524000000,
             20260527000000,
+            20260528000000,
         ]
     );
     assert_eq!(
@@ -696,7 +700,284 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260520010000,
             20260524000000,
             20260527000000,
+            20260528000000,
         ]
+    );
+}
+
+#[tokio::test]
+async fn endpoint_api_root_migration_moves_v1_from_stored_default_paths() {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    query(
+        r#"
+CREATE TABLE providers (
+  id TEXT PRIMARY KEY,
+  provider_type TEXT NOT NULL
+);
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("providers table should be created");
+    query(
+        r#"
+CREATE TABLE provider_endpoints (
+  id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  api_format TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  custom_path TEXT
+);
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("provider_endpoints table should be created");
+    query(
+        r#"
+INSERT INTO providers (id, provider_type) VALUES
+  ('provider-custom', 'custom'),
+  ('provider-fixed-vertex', 'vertex_ai'),
+  ('provider-fixed-grok', 'grok');
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("providers fixture should insert");
+    query(
+        r#"
+INSERT INTO provider_endpoints (id, provider_id, api_format, base_url, custom_path) VALUES
+  ('openai-root', 'provider-custom', 'openai:chat', 'https://api.openai.example', NULL),
+  ('responses-root', 'provider-custom', 'openai:responses', 'https://responses.example.com', NULL),
+  ('responses-compact-root', 'provider-custom', 'openai:responses:compact', 'https://compact.example.com', NULL),
+  ('openai-path-root', 'provider-custom', 'openai:chat', 'https://proxy.example.com/api', NULL),
+  ('openai-old-default-path', 'provider-custom', 'openai:chat', 'https://proxy.example.com/api?tenant=demo', '/v1/chat/completions'),
+  ('openai-mismatched-custom-path', 'provider-custom', 'openai:chat', 'https://proxy.example.com/api', '/v1/responses'),
+  ('openai-v1-slash-old-default', 'provider-custom', 'openai:chat', 'https://already-versioned.example.com/v1/', '/v1/chat/completions'),
+  ('openai-v4-old-default-path', 'provider-custom', 'openai:chat', 'https://open.bigmodel.cn/api/coding/paas/v4', '/v1/chat/completions'),
+  ('embedding-root', 'provider-custom', 'openai:embedding', 'https://embedding.example.com', NULL),
+  ('embedding-v4-old-default-path', 'provider-custom', 'openai:embedding', 'https://embedding.example.com/api/v4', '/v1/embeddings'),
+  ('jina-embedding-root', 'provider-custom', 'jina:embedding', 'https://api.jina.example', NULL),
+  ('rerank-old-default-path', 'provider-custom', 'openai:rerank', 'https://rerank.example.com/api', '/v1/rerank'),
+  ('jina-rerank-old-default-path', 'provider-custom', 'jina:rerank', 'https://api.jina.example?tenant=demo', '/v1/rerank'),
+  ('image-root', 'provider-custom', 'openai:image', 'https://image.example.com', NULL),
+  ('image-edit-custom-path', 'provider-custom', 'openai:image', 'https://image.example.com/api', '/v1/images/edits'),
+  ('image-v4-edit-custom-path', 'provider-custom', 'openai:image', 'https://image.example.com/api/v4', '/v1/images/edits'),
+  ('video-root', 'provider-custom', 'openai:video', 'https://video.example.com', NULL),
+  ('video-v1beta-old-default-path', 'provider-custom', 'openai:video', 'https://video.example.com/api/v1beta', '/v1/videos'),
+  ('video-versioned-root', 'provider-custom', 'openai:video', 'https://ark.example.com/api/v3', NULL),
+  ('google-versioned-segment-root', 'provider-custom', 'openai:embedding', 'https://generativelanguage.googleapis.com/v1beta/openai', NULL),
+  ('gemini-root', 'provider-custom', 'gemini:generate_content', 'https://generativelanguage.googleapis.com', NULL),
+  ('gemini-old-default-path', 'provider-custom', 'gemini:generate_content', 'https://generativelanguage.googleapis.com?tenant=demo', '/v1beta/models/{model}:{action}'),
+  ('gemini-custom-path', 'provider-custom', 'gemini:generate_content', 'https://proxy.example.com/google', '/v1beta/models/gemini-upstream:generateContent'),
+  ('gemini-versioned-old-default', 'provider-custom', 'gemini:generate_content', 'https://generativelanguage.googleapis.com/v1beta', '/v1beta/models/{model}:{action}'),
+  ('gemini-embedding-root', 'provider-custom', 'gemini:embedding', 'https://generativelanguage.googleapis.com', NULL),
+  ('gemini-embedding-old-default', 'provider-custom', 'gemini:embedding', 'https://generativelanguage.googleapis.com', '/v1beta/models/{model}:embedContent'),
+  ('gemini-video-root', 'provider-custom', 'gemini:video', 'https://generativelanguage.googleapis.com', NULL),
+  ('gemini-video-versioned-old-default', 'provider-custom', 'gemini:video', 'https://generativelanguage.googleapis.com/v1beta', '/v1beta/models/{model}:predictLongRunning'),
+  ('fixed-vertex-gemini-root', 'provider-fixed-vertex', 'gemini:embedding', 'https://aiplatform.googleapis.com', NULL),
+  ('claude-path-root', 'provider-custom', 'claude:messages', 'https://proxy.example.com/anthropic', NULL),
+  ('claude-old-default-path', 'provider-custom', 'claude:messages', 'https://proxy.example.com/anthropic', '/v1/messages'),
+  ('fixed-grok-root', 'provider-fixed-grok', 'openai:chat', 'https://grok.com', NULL);
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("endpoint fixture should insert");
+
+    let migration = super::sqlite::MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260528000000)
+        .expect("endpoint API root migration should be embedded");
+    sqlx::raw_sql(migration.sql.as_ref())
+        .execute(&pool)
+        .await
+        .expect("endpoint API root migration should apply");
+
+    let rows: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, base_url, custom_path FROM provider_endpoints ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("endpoint rows should load");
+    let rows = rows
+        .into_iter()
+        .map(|(id, base_url, custom_path)| (id, (base_url, custom_path)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert_eq!(
+        rows.get("openai-root"),
+        Some(&("https://api.openai.example/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("responses-root"),
+        Some(&("https://responses.example.com/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("responses-compact-root"),
+        Some(&("https://compact.example.com/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("openai-path-root"),
+        Some(&("https://proxy.example.com/api/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("openai-old-default-path"),
+        Some(&(
+            "https://proxy.example.com/api/v1?tenant=demo".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("openai-mismatched-custom-path"),
+        Some(&(
+            "https://proxy.example.com/api/v1".to_string(),
+            Some("/responses".to_string())
+        ))
+    );
+    assert_eq!(
+        rows.get("openai-v1-slash-old-default"),
+        Some(&(
+            "https://already-versioned.example.com/v1/".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("openai-v4-old-default-path"),
+        Some(&(
+            "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("embedding-root"),
+        Some(&("https://embedding.example.com/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("embedding-v4-old-default-path"),
+        Some(&("https://embedding.example.com/api/v4".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("jina-embedding-root"),
+        Some(&("https://api.jina.example/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("rerank-old-default-path"),
+        Some(&("https://rerank.example.com/api/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("jina-rerank-old-default-path"),
+        Some(&("https://api.jina.example/v1?tenant=demo".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("image-root"),
+        Some(&("https://image.example.com/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("image-edit-custom-path"),
+        Some(&(
+            "https://image.example.com/api/v1".to_string(),
+            Some("/images/edits".to_string())
+        ))
+    );
+    assert_eq!(
+        rows.get("image-v4-edit-custom-path"),
+        Some(&(
+            "https://image.example.com/api/v4".to_string(),
+            Some("/images/edits".to_string())
+        ))
+    );
+    assert_eq!(
+        rows.get("video-root"),
+        Some(&("https://video.example.com/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("video-v1beta-old-default-path"),
+        Some(&("https://video.example.com/api/v1beta".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("video-versioned-root"),
+        Some(&("https://ark.example.com/api/v3".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("google-versioned-segment-root"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-root"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-old-default-path"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta?tenant=demo".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-custom-path"),
+        Some(&(
+            "https://proxy.example.com/google/v1beta".to_string(),
+            Some("/models/gemini-upstream:generateContent".to_string())
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-versioned-old-default"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-embedding-root"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-embedding-old-default"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-video-root"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("gemini-video-versioned-old-default"),
+        Some(&(
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            None
+        ))
+    );
+    assert_eq!(
+        rows.get("fixed-vertex-gemini-root"),
+        Some(&("https://aiplatform.googleapis.com".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("claude-path-root"),
+        Some(&("https://proxy.example.com/anthropic/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("claude-old-default-path"),
+        Some(&("https://proxy.example.com/anthropic/v1".to_string(), None))
+    );
+    assert_eq!(
+        rows.get("fixed-grok-root"),
+        Some(&("https://grok.com".to_string(), None))
     );
 }
 
@@ -1222,6 +1503,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260522000000,
             20260524000000,
             20260527000000,
+            20260528000000,
         ]
     );
 }

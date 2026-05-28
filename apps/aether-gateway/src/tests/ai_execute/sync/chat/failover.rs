@@ -378,7 +378,7 @@ async fn gateway_skips_unsupported_local_openai_chat_sync_candidate_before_tryin
     );
     assert_eq!(
         seen_execution_runtime_request.url,
-        "https://api.openai.backup.example/v1/chat/completions"
+        "https://api.openai.backup.example/chat/completions"
     );
     assert_eq!(
         seen_execution_runtime_request.model,
@@ -1115,7 +1115,7 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
     );
     assert_eq!(
         seen_execution_runtime_requests[0].url,
-        "https://api.openai.primary.example/v1/chat/completions"
+        "https://api.openai.primary.example/chat/completions"
     );
     assert_eq!(
         seen_execution_runtime_requests[0].authorization,
@@ -1123,7 +1123,7 @@ async fn gateway_retries_next_local_openai_chat_sync_candidate_after_auth_failur
     );
     assert_eq!(
         seen_execution_runtime_requests[1].url,
-        "https://api.openai.backup.example/v1/chat/completions"
+        "https://api.openai.backup.example/chat/completions"
     );
     assert_eq!(
         seen_execution_runtime_requests[1].model,

@@ -1932,7 +1932,7 @@ async fn gateway_handles_public_test_connection_without_hitting_fallback_probe()
     let provider_hits = Arc::new(Mutex::new(0usize));
     let provider_hits_clone = Arc::clone(&provider_hits);
     let provider = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let provider_hits_inner = Arc::clone(&provider_hits_clone);
             async move {

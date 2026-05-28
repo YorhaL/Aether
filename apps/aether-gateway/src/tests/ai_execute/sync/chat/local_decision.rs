@@ -233,7 +233,7 @@ async fn proxy_pii_redaction_local_openai_chat_runtime_masks_headers_and_restore
     let seen_provider_request = Arc::new(Mutex::new(None::<SeenProviderRequest>));
     let seen_provider_request_clone = Arc::clone(&seen_provider_request);
     let provider_app = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let seen_provider_request_inner = Arc::clone(&seen_provider_request_clone);
             async move {
@@ -491,7 +491,7 @@ async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execu
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             Some(2),
@@ -669,7 +669,7 @@ async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execu
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (provider_url, provider_handle) = start_server(provider).await;
     let mut primary_endpoint = sample_provider_catalog_endpoint();
-    primary_endpoint.base_url = provider_url.clone();
+    primary_endpoint.base_url = format!("{provider_url}/v1");
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider_catalog_provider(), backup_provider],
         {
@@ -871,7 +871,7 @@ async fn gateway_executes_openai_chat_sync_with_regex_model_mapping_in_execution
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             Some(2),
