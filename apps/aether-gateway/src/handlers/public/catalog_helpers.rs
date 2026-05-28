@@ -775,25 +775,26 @@ async fn build_provider_health_payload(
         .await
         .ok()
         .unwrap_or_default();
-    let mut models = Vec::new();
-    for row in model_breakdown
+    let selected_model_rows = model_breakdown
         .iter()
         .filter(|row| !row.group_key.trim().is_empty())
         .take(per_provider_model_limit)
-    {
-        let events = state
-            .list_usage_audits(&UsageAuditListQuery {
-                created_from_unix_secs: Some(since_unix_secs),
-                created_until_unix_secs: Some(now_unix_secs),
-                provider_name: Some(provider.name.clone()),
-                model: Some(row.group_key.clone()),
-                limit: Some(per_model_event_limit),
-                newest_first: true,
-                ..UsageAuditListQuery::default()
-            })
-            .await
-            .ok()
-            .unwrap_or_default();
+        .collect::<Vec<_>>();
+    let mut events_by_model = selected_model_rows
+        .iter()
+        .map(|row| (row.group_key.clone(), Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    for event in &provider_events {
+        if let Some(events) = events_by_model.get_mut(&event.model) {
+            if events.len() < per_model_event_limit {
+                events.push(event.clone());
+            }
+        }
+    }
+
+    let mut models = Vec::new();
+    for row in selected_model_rows {
+        let events = events_by_model.remove(&row.group_key).unwrap_or_default();
         models.push(model_health_payload_from_row(
             row,
             &events,

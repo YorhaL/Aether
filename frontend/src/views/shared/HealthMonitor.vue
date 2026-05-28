@@ -24,6 +24,7 @@
         class="mt-4"
       >
         <HealthMonitorCard
+          v-if="visitedTabs.endpoint"
           title="端点健康监控"
           :is-admin="isAdminPage"
           :show-provider-info="isAdminPage"
@@ -35,6 +36,7 @@
         class="mt-4"
       >
         <ModelHealthMonitorCard
+          v-if="visitedTabs.model"
           title="模型健康监控"
           :is-admin="isAdminPage"
           :show-provider-info="isAdminPage"
@@ -46,14 +48,17 @@
         value="provider"
         class="mt-4"
       >
-        <ProviderHealthMonitorCard title="提供商健康监控" />
+        <ProviderHealthMonitorCard
+          v-if="visitedTabs.provider"
+          title="提供商健康监控"
+        />
       </TabsContent>
     </Tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
@@ -66,4 +71,12 @@ import ProviderHealthMonitorCard from '@/features/providers/components/ProviderH
 const route = useRoute()
 const isAdminPage = computed(() => route.path.startsWith('/admin'))
 const activeTab = ref('endpoint')
+const visitedTabs = ref<Record<string, boolean>>({ endpoint: true })
+
+watch(activeTab, value => {
+  visitedTabs.value = {
+    ...visitedTabs.value,
+    [value]: true
+  }
+})
 </script>
