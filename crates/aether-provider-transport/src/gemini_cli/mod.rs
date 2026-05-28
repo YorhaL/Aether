@@ -1,4 +1,5 @@
 mod auth;
+mod policy;
 mod request;
 mod url;
 
@@ -7,6 +8,7 @@ pub use auth::{
     resolve_local_gemini_cli_request_auth, GeminiCliRequestAuth, GeminiCliRequestAuthSupport,
     GeminiCliRequestAuthUnsupportedReason, GEMINI_CLI_PROVIDER_TYPE,
 };
+pub use policy::gemini_cli_v1internal_requires_upstream_streaming;
 pub use request::{
     build_gemini_cli_v1internal_request, classify_gemini_cli_v1internal_request_body,
     GeminiCliRequestEnvelopeSupport, GeminiCliRequestEnvelopeUnsupportedReason,
