@@ -85,8 +85,15 @@ where
     stored.expect("usage should be present once the expected status is observed")
 }
 
-#[tokio::test]
-async fn gateway_handles_local_openai_chat_sync_report_with_local_reporting_when_usage_runtime_enabled(
+#[test]
+fn gateway_handles_local_openai_chat_sync_report_with_local_reporting_when_usage_runtime_enabled() {
+    run_async_test_on_large_stack(
+        "gateway_handles_local_openai_chat_sync_report_with_local_reporting_when_usage_runtime_enabled",
+        gateway_handles_local_openai_chat_sync_report_with_local_reporting_when_usage_runtime_enabled_impl(),
+    );
+}
+
+async fn gateway_handles_local_openai_chat_sync_report_with_local_reporting_when_usage_runtime_enabled_impl(
 ) {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
