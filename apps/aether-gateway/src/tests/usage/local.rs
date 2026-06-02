@@ -559,8 +559,15 @@ async fn gateway_applies_system_max_request_body_size_to_local_openai_chat_sync_
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_strips_request_and_response_bodies_when_request_record_level_is_base() {
+#[test]
+fn gateway_strips_request_and_response_bodies_when_request_record_level_is_base() {
+    run_async_test_on_large_stack(
+        "gateway_strips_request_and_response_bodies_when_request_record_level_is_base",
+        gateway_strips_request_and_response_bodies_when_request_record_level_is_base_impl(),
+    );
+}
+
+async fn gateway_strips_request_and_response_bodies_when_request_record_level_is_base_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
 

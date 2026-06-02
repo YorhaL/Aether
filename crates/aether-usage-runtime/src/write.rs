@@ -735,7 +735,10 @@ pub fn build_sync_terminal_usage_payload_seed(
         .and_then(|context| context.get(UPSTREAM_IS_STREAM_KEY))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let provider_response_full = if upstream_is_stream && payload.body_base64.is_some() {
+    let provider_response_full = if upstream_is_stream
+        && payload.body_base64.is_some()
+        && !body_json_has_terminal_error(payload.body_json.as_ref())
+    {
         decode_body_for_storage(payload.body_base64.as_deref())
             .or_else(|| payload.body_json.as_ref().cloned())
     } else {
@@ -784,6 +787,12 @@ pub fn build_sync_terminal_usage_payload_seed(
             client_response_body_state,
         ),
     }
+}
+
+fn body_json_has_terminal_error(body_json: Option<&Value>) -> bool {
+    body_json
+        .and_then(|value| value.get("error"))
+        .is_some_and(|error| !error.is_null())
 }
 
 pub fn build_stream_terminal_usage_payload_seed(
@@ -5105,6 +5114,87 @@ mod tests {
                     .and_then(Value::as_str)
             }),
             Some("Hello from upstream stream")
+        );
+    }
+
+    #[test]
+    fn sync_terminal_usage_prefers_error_body_over_partial_upstream_stream_body() {
+        let partial_sse_body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_partial_123\",\"object\":\"response\",\"model\":\"gpt-5.5\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"exec_command\"}}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"cmd\\\":\"}\n\n",
+        );
+        let plan = ExecutionPlan {
+            request_id: "req-sync-upstream-stream-error-1".to_string(),
+            candidate_id: Some("cand-sync-upstream-stream-error-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: false,
+            client_api_format: "claude:messages".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-sync-upstream-stream-error-1".to_string(),
+            report_kind: "openai_responses_sync_error".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "claude:messages",
+                "provider_api_format": "openai:responses",
+                "upstream_is_stream": true,
+                "needs_conversion": true
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+            body_json: Some(json!({
+                "error": {
+                    "type": "internal",
+                    "message": "error decoding response body: stream error received"
+                }
+            })),
+            client_body_json: None,
+            body_base64: Some(base64::engine::general_purpose::STANDARD.encode(partial_sse_body)),
+            telemetry: None,
+        };
+
+        let event =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Failed);
+        assert_eq!(event.data.status_code, Some(200));
+        assert_eq!(
+            event.data.error_message.as_deref(),
+            Some("error decoding response body: stream error received")
+        );
+        assert_eq!(
+            event
+                .data
+                .response_body
+                .as_ref()
+                .and_then(|value| value.pointer("/error/type"))
+                .and_then(Value::as_str),
+            Some("internal")
         );
     }
 

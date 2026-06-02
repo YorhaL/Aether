@@ -45,7 +45,7 @@ pub struct OpenAIResponsesProviderState {
     model: Option<String>,
     started: bool,
     finished: bool,
-    text: String,
+    text_parts: BTreeMap<String, String>,
     reasoning: String,
     reasoning_parts: BTreeMap<usize, String>,
     tool_calls: BTreeMap<usize, OpenAIResponsesProviderToolState>,
@@ -420,24 +420,87 @@ impl OpenAIResponsesProviderState {
         index
     }
 
+    fn text_part_key_from_event(value: &Value) -> String {
+        let item_key = value
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .map(|value| format!("output:{value}"))
+            .or_else(|| {
+                value
+                    .get("item_id")
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .map(|value| format!("item:{value}"))
+            })
+            .unwrap_or_else(|| "output:default".to_string());
+        let content_index = value
+            .get("content_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        format!("{item_key}:content:{content_index}")
+    }
+
+    fn text_part_key_from_message_item(
+        output_index: Option<usize>,
+        item: &Map<String, Value>,
+        content_index: usize,
+    ) -> String {
+        let item_key = output_index
+            .map(|value| format!("output:{value}"))
+            .or_else(|| {
+                item.get("id")
+                    .and_then(Value::as_str)
+                    .map(|value| format!("item:{value}"))
+            })
+            .unwrap_or_else(|| "output:default".to_string());
+        format!("{item_key}:content:{content_index}")
+    }
+
+    fn emit_text_delta(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        key: String,
+        text: &str,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        self.text_parts.entry(key).or_default().push_str(text);
+        self.ensure_started(report_context, out);
+        let (id, model) = self.identity(report_context);
+        out.push(CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::TextDelta(text.to_string()),
+        });
+    }
+
     fn emit_missing_text(
         &mut self,
         report_context: &Value,
         out: &mut Vec<CanonicalStreamFrame>,
+        key: String,
         text: &str,
     ) {
-        let missing = if text.starts_with(&self.text) {
-            text[self.text.len()..].to_string()
-        } else if self.text == text || self.text.starts_with(text) {
-            String::new()
-        } else {
-            text.to_string()
+        let missing = {
+            let current = self.text_parts.entry(key).or_default();
+            let missing = if text.starts_with(current.as_str()) {
+                text[current.len()..].to_string()
+            } else if current.as_str() == text || current.starts_with(text) {
+                String::new()
+            } else {
+                text.to_string()
+            };
+            if !missing.is_empty() {
+                current.push_str(&missing);
+            }
+            missing
         };
         if missing.is_empty() {
             return;
         }
         self.ensure_started(report_context, out);
-        self.text.push_str(&missing);
         let (id, model) = self.identity(report_context);
         out.push(CanonicalStreamFrame {
             id,
@@ -695,28 +758,33 @@ impl OpenAIResponsesProviderState {
         report_context: &Value,
         out: &mut Vec<CanonicalStreamFrame>,
         item: &Map<String, Value>,
+        output_index: Option<usize>,
     ) {
         if item.get("type").and_then(Value::as_str) != Some("message") {
             return;
         }
-        let mut completed_text = String::new();
-        for raw_content in item
+        for (content_index, raw_content) in item
             .get("content")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
+            .enumerate()
         {
             let Some(content) = raw_content.as_object() else {
                 continue;
             };
             if content.get("type").and_then(Value::as_str) == Some("output_text") {
                 if let Some(text) = content.get("text").and_then(Value::as_str) {
-                    completed_text.push_str(text);
+                    if !text.is_empty() {
+                        let key = Self::text_part_key_from_message_item(
+                            output_index,
+                            item,
+                            content_index,
+                        );
+                        self.emit_missing_text(report_context, out, key, text);
+                    }
                 }
             }
-        }
-        if !completed_text.is_empty() {
-            self.emit_missing_text(report_context, out, &completed_text);
         }
     }
 
@@ -831,18 +899,13 @@ impl OpenAIResponsesProviderState {
             }
             "response.output_text.delta" | "response.outtext.delta" => match value.get("delta") {
                 Some(Value::String(piece)) if !piece.is_empty() => {
-                    self.ensure_started(report_context, &mut out);
-                    self.text.push_str(piece);
-                    let (id, model) = self.identity(report_context);
-                    out.push(CanonicalStreamFrame {
-                        id,
-                        model,
-                        event: CanonicalStreamEvent::TextDelta(piece.clone()),
-                    });
+                    let key = Self::text_part_key_from_event(&value);
+                    self.emit_text_delta(report_context, &mut out, key, piece);
                 }
                 Some(Value::Object(delta)) => {
                     if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                        self.emit_missing_text(report_context, &mut out, text);
+                        let key = Self::text_part_key_from_event(&value);
+                        self.emit_missing_text(report_context, &mut out, key, text);
                     }
                 }
                 _ => {}
@@ -852,7 +915,8 @@ impl OpenAIResponsesProviderState {
                     if part.get("type").and_then(Value::as_str) == Some("output_text") {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             if !text.is_empty() {
-                                self.emit_missing_text(report_context, &mut out, text);
+                                let key = Self::text_part_key_from_event(&value);
+                                self.emit_missing_text(report_context, &mut out, key, text);
                             }
                         }
                     }
@@ -890,7 +954,8 @@ impl OpenAIResponsesProviderState {
                     })
                     .unwrap_or_default();
                 if !text.is_empty() {
-                    self.emit_missing_text(report_context, &mut out, text);
+                    let key = Self::text_part_key_from_event(&value);
+                    self.emit_missing_text(report_context, &mut out, key, text);
                 }
             }
             "response.reasoning_summary_text.delta" => {
@@ -967,7 +1032,7 @@ impl OpenAIResponsesProviderState {
                         self.emit_tool_result_item(report_context, &mut out, item, output_index);
                     }
                     "message" => {
-                        self.emit_message_item(report_context, &mut out, item);
+                        self.emit_message_item(report_context, &mut out, item, output_index);
                     }
                     "reasoning" => {
                         self.ensure_started(report_context, &mut out);
@@ -1139,7 +1204,7 @@ impl OpenAIResponsesProviderState {
                         self.emit_tool_result_item(report_context, &mut out, item, output_index);
                     }
                     "message" => {
-                        self.emit_message_item(report_context, &mut out, item);
+                        self.emit_message_item(report_context, &mut out, item, output_index);
                     }
                     "reasoning" => {
                         self.emit_reasoning_item(report_context, &mut out, item);
@@ -1194,7 +1259,12 @@ impl OpenAIResponsesProviderState {
                     };
                     match item.get("type").and_then(Value::as_str).unwrap_or_default() {
                         "message" => {
-                            self.emit_message_item(report_context, &mut out, item);
+                            self.emit_message_item(
+                                report_context,
+                                &mut out,
+                                item,
+                                Some(output_index),
+                            );
                         }
                         "function_call" => {
                             self.emit_tool_call_item(
@@ -3233,6 +3303,102 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(text, "Hello world");
+    }
+
+    #[test]
+    fn openai_responses_provider_state_dedupes_text_snapshots_per_output_item() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let mut frames = Vec::new();
+
+        for event in [
+            json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_multi_message",
+                "output_index": 0,
+                "item_id": "msg_1",
+                "content_index": 0,
+                "delta": "First message.",
+            }),
+            json!({
+                "type": "response.output_text.done",
+                "response_id": "resp_multi_message",
+                "output_index": 0,
+                "item_id": "msg_1",
+                "content_index": 0,
+                "text": "First message.",
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "response_id": "resp_multi_message",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "First message.",
+                    }],
+                },
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_multi_message",
+                "output_index": 1,
+                "item_id": "msg_2",
+                "content_index": 0,
+                "delta": "Second message.",
+            }),
+            json!({
+                "type": "response.output_text.done",
+                "response_id": "resp_multi_message",
+                "output_index": 1,
+                "item_id": "msg_2",
+                "content_index": 0,
+                "text": "Second message.",
+            }),
+            json!({
+                "type": "response.content_part.done",
+                "response_id": "resp_multi_message",
+                "output_index": 1,
+                "item_id": "msg_2",
+                "content_index": 0,
+                "part": {
+                    "type": "output_text",
+                    "text": "Second message.",
+                },
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "response_id": "resp_multi_message",
+                "output_index": 1,
+                "item": {
+                    "type": "message",
+                    "id": "msg_2",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Second message.",
+                    }],
+                },
+            }),
+        ] {
+            frames.extend(
+                state
+                    .push_line(&report_context, data_line(event))
+                    .expect("responses text event should parse"),
+            );
+        }
+
+        let text = frames
+            .iter()
+            .filter_map(|frame| match &frame.event {
+                CanonicalStreamEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "First message.Second message.");
     }
 
     #[test]

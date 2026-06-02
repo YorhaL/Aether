@@ -3357,7 +3357,13 @@ async fn execute_stream_from_frame_stream(
                 "gateway skipped client stream flush after downstream disconnect"
             );
         }
-        if let Some(normalizer) = private_stream_normalizer.as_mut() {
+        // Buffered stream state is partial after a terminal failure; normal
+        // finish paths may synthesize successful terminal events.
+        let should_finish_stream_rewriters = terminal_failure.is_none();
+        if let Some(normalizer) = private_stream_normalizer
+            .as_mut()
+            .filter(|_| should_finish_stream_rewriters)
+        {
             match normalizer.finish() {
                 Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
                     let provider_private_error_body_json =
@@ -3391,13 +3397,12 @@ async fn execute_stream_from_frame_stream(
                                         error = ?err,
                                         "gateway failed to rewrite normalized private stream chunk during flush"
                                     );
-                                    terminal_failure.get_or_insert_with(|| {
-                                        build_stream_failure_report(
-                                            "execution_runtime_stream_rewrite_flush_error",
-                                            format!("failed to rewrite normalized private stream chunk during flush: {err:?}"),
-                                            502,
-                                        )
-                                    });
+                                    let failure = build_stream_failure_report(
+                                        "execution_runtime_stream_rewrite_flush_error",
+                                        format!("failed to rewrite normalized private stream chunk during flush: {err:?}"),
+                                        502,
+                                    );
+                                    terminal_failure.get_or_insert(failure);
                                     Vec::new()
                                 }
                             }
@@ -3472,7 +3477,7 @@ async fn execute_stream_from_frame_stream(
                 }
             }
         }
-        if !downstream_dropped {
+        if !downstream_dropped && terminal_failure.is_none() {
             if let Some(rewriter) = local_stream_rewriter.as_mut() {
                 match rewriter.finish() {
                     Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
@@ -3898,8 +3903,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use aether_contracts::{
-        ExecutionPlan, ExecutionStreamTerminalSummary, ExecutionTimeouts, RequestBody,
-        StandardizedUsage,
+        ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan,
+        ExecutionStreamTerminalSummary, ExecutionTimeouts, RequestBody, StandardizedUsage,
+        StreamFrame, StreamFramePayload, StreamFrameType,
     };
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
@@ -3994,6 +4000,12 @@ mod tests {
         out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         out.extend_from_slice(payload);
         out
+    }
+
+    fn ndjson_frame(frame: StreamFrame) -> Bytes {
+        let mut bytes = serde_json::to_vec(&frame).expect("stream frame should serialize");
+        bytes.push(b'\n');
+        Bytes::from(bytes)
     }
 
     #[test]
@@ -5015,6 +5027,154 @@ mod tests {
             .expect("stream should yield local keepalive")
             .expect("local keepalive should be ok");
         assert_eq!(first.as_ref(), b": aether-keepalive\n\n");
+    }
+
+    #[tokio::test]
+    async fn execute_stream_from_frame_stream_does_not_finalize_rewritten_tool_call_after_midstream_error(
+    ) {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let plan = ExecutionPlan {
+            request_id: "req-responses-tool-midstream-error".into(),
+            candidate_id: Some("cand-responses-tool-midstream-error".into()),
+            provider_name: Some("openai".into()),
+            provider_id: "provider-openai-responses".into(),
+            endpoint_id: "endpoint-openai-responses".into(),
+            key_id: "key-openai-responses".into(),
+            method: "POST".into(),
+            url: "https://api.openai.com/v1/responses".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+            ]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.5",
+                "input": [],
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "claude:messages".into(),
+            provider_api_format: "openai:responses".into(),
+            model_name: Some("gpt-5.5".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let upstream_chunk = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_midstream_error\",\"model\":\"gpt-5.5\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"call_id\":\"call_1\",\"delta\":\"{\\\"query\\\":\\\"abc\"}\n\n"
+        );
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(upstream_chunk.to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Error,
+                payload: StreamFramePayload::Error {
+                    error: ExecutionError {
+                        kind: ExecutionErrorKind::Internal,
+                        phase: ExecutionPhase::StreamRead,
+                        message: "error reading a body from connection: stream error received: unexpected internal error encountered".to_string(),
+                        upstream_status: Some(200),
+                        retryable: false,
+                        failover_recommended: false,
+                    },
+                },
+            }));
+        }
+        .boxed();
+
+        let response = execute_stream_from_frame_stream(
+            &state,
+            plan,
+            "trace-responses-tool-midstream-error",
+            &test_decision(),
+            "openai_responses_stream",
+            Some("openai_responses_stream_success".to_string()),
+            Some(json!({
+                "request_id": "req-responses-tool-midstream-error",
+                "candidate_id": "cand-responses-tool-midstream-error",
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:responses",
+                "client_api_format": "claude:messages",
+                "needs_conversion": true,
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body_text = String::from_utf8(body.to_vec()).expect("body should be utf8");
+        assert!(body_text.contains("event: content_block_start"));
+        assert!(body_text.contains("event: content_block_delta"));
+        assert!(body_text.contains("\"type\":\"tool_use\""));
+        assert!(!body_text.contains("event: content_block_stop"));
+        assert!(!body_text.contains("event: message_delta"));
+        assert!(!body_text.contains("event: message_stop"));
+        assert!(!body_text.contains("\"stop_reason\":\"tool_use\""));
+        assert!(body_text.contains("\"error\""));
+        assert!(body_text.contains("unexpected internal error encountered"));
+        assert!(body_text.contains("data: [DONE]"));
+
+        let candidates = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let candidates = request_candidate_repository
+                    .list_by_request_id("req-responses-tool-midstream-error")
+                    .await
+                    .expect("request candidates should read");
+                if candidates
+                    .first()
+                    .is_some_and(|candidate| candidate.status == RequestCandidateStatus::Failed)
+                {
+                    break candidates;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("candidate should be marked failed");
+        assert_eq!(candidates[0].status_code, Some(200));
+        assert_eq!(candidates[0].error_type.as_deref(), Some("internal"));
     }
 
     #[tokio::test]
