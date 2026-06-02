@@ -16,8 +16,8 @@ use crate::{
         claude_generation_config, claude_messages_to_canonical, claude_parallel_tool_calls,
         claude_system_to_canonical_instructions, claude_thinking_to_canonical,
         claude_tool_choice_to_canonical, claude_tools_to_canonical,
-        compact_canonical_claude_messages, insert_f64, namespace_extension_object,
-        CanonicalRequest,
+        compact_canonical_claude_messages, insert_f64, mark_claude_messages_request_source,
+        namespace_extension_object, CanonicalRequest,
     },
 };
 
@@ -85,6 +85,7 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalRequest> {
             "output_config",
         ],
     );
+    mark_claude_messages_request_source(&mut canonical.extensions);
     if !builtin_tools.is_empty() {
         canonical_extension_object_mut(&mut canonical.extensions, "claude")
             .insert("builtin_tools".to_string(), Value::Array(builtin_tools));
@@ -115,7 +116,7 @@ pub fn to_raw(
     );
     output.insert(
         "max_tokens".to_string(),
-        Value::from(canonical.generation.max_tokens.unwrap_or(1024)),
+        Value::from(canonical.generation.max_tokens.unwrap_or(8192)),
     );
     if let Some(system) = canonical_instructions_to_claude_system(&canonical.instructions) {
         output.insert("system".to_string(), system);

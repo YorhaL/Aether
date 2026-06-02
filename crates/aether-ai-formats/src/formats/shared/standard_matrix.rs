@@ -1079,6 +1079,33 @@ mod tests {
                     None,
                 )
                 .expect("typed canonical claude route should build");
+                if matches!(
+                    provider_api_format,
+                    "openai:responses" | "openai:responses:compact"
+                ) {
+                    assert!(converted.get("instructions").is_none());
+                    assert_eq!(converted["input"][0]["role"], "developer");
+                    assert_eq!(converted["input"][0]["content"][0]["text"], "Be exact.");
+                    assert_eq!(converted["max_output_tokens"], 128);
+                    assert_eq!(converted["text"]["verbosity"], "medium");
+                    assert_eq!(converted["reasoning"]["effort"], "medium");
+                    assert_eq!(converted["reasoning"]["summary"], "auto");
+                    if provider_api_format == "openai:responses" {
+                        assert_eq!(converted["store"], false);
+                        assert!(converted["include"]
+                            .as_array()
+                            .expect("include")
+                            .iter()
+                            .any(|value| value.as_str() == Some("reasoning.encrypted_content")));
+                    } else {
+                        assert!(converted.get("store").is_none());
+                        assert!(converted.get("include").is_none());
+                    }
+                    let input_json = converted["input"].to_string();
+                    assert!(!input_json.contains("<thinking>plan</thinking>"));
+                    assert!(!input_json.contains("sig_123"));
+                    continue;
+                }
                 let legacy =
                     legacy_claude_request_body(&request, provider_api_format, upstream_is_stream);
                 assert_eq!(

@@ -6,9 +6,10 @@ use crate::{
     formats::context::FormatContext,
     formats::openai::shared::map_thinking_budget_to_openai_reasoning_effort,
     protocol::canonical::{
-        canonical_response_format_to_openai, canonicalize_tool_arguments, is_claude_tool_result,
-        media_data_or_url, namespace_extension_object, openai_content_text, openai_extensions,
-        openai_response_format_to_canonical, openai_responses_extension,
+        canonical_response_format_to_openai, canonicalize_tool_arguments,
+        is_claude_messages_request, is_claude_system_instruction, is_claude_thinking_block,
+        is_claude_tool_result, media_data_or_url, namespace_extension_object, openai_content_text,
+        openai_extensions, openai_response_format_to_canonical, openai_responses_extension,
         openai_responses_generation_config, openai_responses_input_to_canonical_messages,
         openai_responses_tool_choice_to_canonical, openai_responses_tools_to_canonical,
         CanonicalContentBlock, CanonicalInstruction, CanonicalRequest, CanonicalRole,
@@ -137,13 +138,18 @@ pub fn to_raw(
         output.insert("instructions".to_string(), instructions);
     }
     let mut input = canonical_messages_to_responses_input(canonical)?;
+    if let Some(developer_message) =
+        claude_system_instructions_to_responses_developer_message(canonical)
+    {
+        input.insert(0, developer_message);
+    }
     ensure_json_object_response_input_mentions_json(canonical, instructions.as_ref(), &mut input);
     output.insert("input".to_string(), Value::Array(input));
 
     if upstream_is_stream && !compact {
         output.insert("stream".to_string(), Value::Bool(true));
     }
-    if let Some(max_tokens) = canonical.generation.max_tokens {
+    if let Some(max_tokens) = responses_max_output_tokens(canonical) {
         output.insert("max_output_tokens".to_string(), Value::from(max_tokens));
     }
     insert_number(&mut output, "temperature", canonical.generation.temperature);
@@ -172,11 +178,7 @@ pub fn to_raw(
             canonical_tool_choice_to_responses(tool_choice),
         );
     }
-    if let Some(reasoning) = canonical
-        .thinking
-        .as_ref()
-        .and_then(reasoning_config_to_responses)
-    {
+    if let Some(reasoning) = canonical_reasoning_config_to_responses(canonical) {
         output.insert("reasoning".to_string(), reasoning);
     }
 
@@ -190,6 +192,7 @@ pub fn to_raw(
         OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
         &output,
     ));
+    apply_claude_responses_request_defaults(canonical, mapped_model, &mut output);
     if compact {
         output.remove("stream");
     }
@@ -201,6 +204,7 @@ fn canonical_instructions_to_responses(canonical: &CanonicalRequest) -> Option<V
     let text = canonical
         .instructions
         .iter()
+        .filter(|instruction| !is_claude_system_instruction(instruction))
         .map(|instruction| instruction.text.as_str())
         .filter(|text| !text.trim().is_empty())
         .collect::<Vec<_>>()
@@ -208,12 +212,54 @@ fn canonical_instructions_to_responses(canonical: &CanonicalRequest) -> Option<V
     if !text.trim().is_empty() {
         return Some(Value::String(text));
     }
+    if canonical
+        .instructions
+        .iter()
+        .any(is_claude_system_instruction)
+    {
+        return None;
+    }
     canonical
         .system
         .as_ref()
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .map(Value::String)
+}
+
+fn claude_system_instructions_to_responses_developer_message(
+    canonical: &CanonicalRequest,
+) -> Option<Value> {
+    let content = canonical
+        .instructions
+        .iter()
+        .filter(|instruction| is_claude_system_instruction(instruction))
+        .filter_map(claude_system_instruction_to_responses_part)
+        .collect::<Vec<_>>();
+    (!content.is_empty()).then(|| {
+        json!({
+            "type": "message",
+            "role": "developer",
+            "content": content,
+        })
+    })
+}
+
+fn claude_system_instruction_to_responses_part(
+    instruction: &CanonicalInstruction,
+) -> Option<Value> {
+    if instruction.text.trim().is_empty() {
+        return None;
+    }
+    let mut part = Map::new();
+    part.insert("type".to_string(), Value::String("input_text".to_string()));
+    part.insert("text".to_string(), Value::String(instruction.text.clone()));
+    part.extend(namespace_extension_object(
+        &instruction.extensions,
+        "claude",
+        &part,
+    ));
+    Some(Value::Object(part))
 }
 
 fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option<Vec<Value>> {
@@ -270,7 +316,12 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                         }));
                     }
                 }
-                CanonicalContentBlock::Thinking { text, .. } => {
+                CanonicalContentBlock::Thinking {
+                    text, extensions, ..
+                } => {
+                    if is_claude_thinking_block(extensions) {
+                        continue;
+                    }
                     if role == "assistant" && !text.trim().is_empty() {
                         content.push(json!({
                             "type": "output_text",
@@ -307,6 +358,49 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
         flush_responses_message(&mut input, role, &mut content);
     }
     Some(input)
+}
+
+fn responses_max_output_tokens(canonical: &CanonicalRequest) -> Option<u64> {
+    canonical.generation.max_tokens.map(|max_tokens| {
+        if is_claude_messages_request(&canonical.extensions) && max_tokens < 128 {
+            128
+        } else {
+            max_tokens
+        }
+    })
+}
+
+fn apply_claude_responses_request_defaults(
+    canonical: &CanonicalRequest,
+    mapped_model: &str,
+    output: &mut Map<String, Value>,
+) {
+    if !is_claude_messages_request(&canonical.extensions) {
+        return;
+    }
+    if mapped_model
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("gpt-5")
+    {
+        output.remove("temperature");
+        output.remove("top_p");
+    }
+    output
+        .entry("store".to_string())
+        .or_insert_with(|| Value::Bool(false));
+    output
+        .entry("parallel_tool_calls".to_string())
+        .or_insert_with(|| Value::Bool(true));
+    let include = output
+        .entry("include".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(include) = include.as_array_mut() {
+        let encrypted_content = Value::String("reasoning.encrypted_content".to_string());
+        if !include.iter().any(|value| value == &encrypted_content) {
+            include.push(encrypted_content);
+        }
+    }
 }
 
 fn ensure_json_object_response_input_mentions_json(
@@ -463,6 +557,42 @@ fn canonical_tools_to_responses(canonical: &CanonicalRequest) -> Vec<Value> {
     tools
 }
 
+fn canonical_reasoning_config_to_responses(canonical: &CanonicalRequest) -> Option<Value> {
+    let is_claude_request = is_claude_messages_request(&canonical.extensions);
+    if !is_claude_request {
+        return canonical
+            .thinking
+            .as_ref()
+            .and_then(reasoning_config_to_responses);
+    }
+
+    let mut object = canonical
+        .thinking
+        .as_ref()
+        .and_then(|thinking| openai_responses_extension(&thinking.extensions).cloned())
+        .and_then(|value| match value {
+            Value::Object(object) => Some(object),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let effort = canonical
+        .thinking
+        .as_ref()
+        .and_then(|thinking| thinking.extensions.get("claude"))
+        .and_then(|value| value.get("output_config"))
+        .and_then(|value| value.get("effort"))
+        .and_then(Value::as_str)
+        .map(openai_responses_reasoning_effort)
+        .unwrap_or("medium");
+    object
+        .entry("effort".to_string())
+        .or_insert_with(|| Value::String(effort.to_string()));
+    object
+        .entry("summary".to_string())
+        .or_insert_with(|| Value::String("auto".to_string()));
+    Some(Value::Object(object))
+}
+
 fn reasoning_config_to_responses(thinking: &CanonicalThinkingConfig) -> Option<Value> {
     openai_responses_extension(&thinking.extensions)
         .cloned()
@@ -525,6 +655,10 @@ fn canonical_text_config_to_responses(canonical: &CanonicalRequest) -> Option<Va
     {
         text.insert("verbosity".to_string(), verbosity);
     }
+    if is_claude_messages_request(&canonical.extensions) {
+        text.entry("verbosity".to_string())
+            .or_insert_with(|| Value::String("medium".to_string()));
+    }
     (!text.is_empty()).then_some(Value::Object(text))
 }
 
@@ -556,15 +690,35 @@ fn canonical_tool_to_responses(tool: &CanonicalToolDefinition) -> Value {
             Value::String(description.clone()),
         );
     }
-    if let Some(parameters) = &tool.parameters {
-        out.insert("parameters".to_string(), parameters.clone());
-    }
+    out.insert(
+        "parameters".to_string(),
+        responses_tool_parameters_schema(tool.parameters.as_ref()),
+    );
     out.extend(namespace_extension_object(
         &tool.extensions,
         OPENAI_RESPONSES_EXTENSION_NAMESPACE,
         &out,
     ));
     Value::Object(out)
+}
+
+fn responses_tool_parameters_schema(parameters: Option<&Value>) -> Value {
+    match parameters {
+        Some(Value::Object(schema)) => {
+            let mut schema = schema.clone();
+            if schema
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "object")
+                && !schema.contains_key("properties")
+            {
+                schema.insert("properties".to_string(), json!({}));
+            }
+            Value::Object(schema)
+        }
+        Some(Value::Null) | None => json!({"type": "object", "properties": {}}),
+        Some(value) => value.clone(),
+    }
 }
 
 fn canonical_tool_choice_to_responses(choice: &CanonicalToolChoice) -> Value {

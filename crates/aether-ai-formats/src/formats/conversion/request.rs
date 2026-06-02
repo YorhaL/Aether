@@ -669,6 +669,142 @@ mod tests {
     }
 
     #[test]
+    fn claude_request_to_responses_uses_developer_system_and_sub2api_defaults() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "system": [{
+                "type": "text",
+                "text": "Be exact.",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "private plan", "signature": "sig_hidden"},
+                        {"type": "text", "text": "visible answer"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_calc",
+                            "name": "calc",
+                            "input": {"x": 1}
+                        }
+                    ]
+                }
+            ],
+            "tools": [
+                {"name": "implicit_empty", "description": "empty"},
+                {"name": "object_empty", "input_schema": {"type": "object"}}
+            ],
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "max_tokens": 10,
+        });
+
+        let converted = registry::convert_request(
+            "claude:messages",
+            "openai:responses",
+            &body,
+            &FormatContext::default().with_mapped_model("gpt-5.1"),
+        )
+        .expect("responses request");
+
+        assert_eq!(converted["model"], "gpt-5.1");
+        assert!(converted.get("temperature").is_none());
+        assert!(converted.get("top_p").is_none());
+        assert!(converted.get("instructions").is_none());
+        assert_eq!(converted["text"]["verbosity"], "medium");
+        assert_eq!(converted["reasoning"]["effort"], "medium");
+        assert_eq!(converted["reasoning"]["summary"], "auto");
+        assert_eq!(converted["max_output_tokens"], 128);
+        assert_eq!(converted["store"], false);
+        assert_eq!(converted["parallel_tool_calls"], true);
+        assert!(converted["include"]
+            .as_array()
+            .expect("include")
+            .iter()
+            .any(|value| value.as_str() == Some("reasoning.encrypted_content")));
+
+        let input = converted["input"].as_array().expect("responses input");
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "Be exact.");
+        assert_eq!(
+            input[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        let input_json = Value::Array(input.clone()).to_string();
+        assert!(input_json.contains("visible answer"));
+        assert!(!input_json.contains("private plan"));
+        assert!(!input_json.contains("sig_hidden"));
+
+        let tools = converted["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 2);
+        for tool in tools {
+            assert_eq!(tool["parameters"]["type"], "object");
+            assert!(tool["parameters"]["properties"].is_object());
+        }
+    }
+
+    #[test]
+    fn claude_output_config_effort_controls_responses_reasoning() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "output_config": {"effort": "max"},
+            "max_tokens": 128,
+        });
+
+        let converted = registry::convert_request(
+            "claude:messages",
+            "openai:responses",
+            &body,
+            &FormatContext::default(),
+        )
+        .expect("responses request");
+
+        assert_eq!(converted["reasoning"]["effort"], "xhigh");
+        assert_eq!(converted["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn responses_to_claude_defaults_max_tokens_and_omits_false_is_error() {
+        let body = json!({
+            "model": "gpt-5",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "toolu_ok",
+                    "output": "ok",
+                    "is_error": false
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "toolu_bad",
+                    "output": "bad",
+                    "is_error": true
+                }
+            ]
+        });
+
+        let converted = registry::convert_request(
+            "openai:responses",
+            "claude:messages",
+            &body,
+            &FormatContext::default(),
+        )
+        .expect("claude request");
+
+        assert_eq!(converted["max_tokens"], 8192);
+        let messages_json = converted["messages"].to_string();
+        assert!(!messages_json.contains("\"is_error\":false"));
+        assert!(messages_json.contains("\"is_error\":true"));
+    }
+
+    #[test]
     fn claude_request_to_responses_splits_tool_result_media_from_output() {
         let body = json!({
             "model": "claude-sonnet",

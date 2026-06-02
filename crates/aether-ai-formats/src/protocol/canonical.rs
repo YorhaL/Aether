@@ -11,6 +11,9 @@ pub use crate::protocol::stream::{CanonicalStreamEvent, CanonicalStreamFrame};
 pub(crate) const OPENAI_RESPONSES_EXTENSION_NAMESPACE: &str = "openai_responses";
 pub(crate) const OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE: &str = "openai_cli";
 const AETHER_EXTENSION_NAMESPACE: &str = "aether";
+const CLAUDE_MESSAGES_REQUEST_SOURCE_MARKER: &str = "claude_messages_request";
+const CLAUDE_SYSTEM_SOURCE_MARKER: &str = "claude_system";
+const CLAUDE_THINKING_SOURCE_MARKER: &str = "claude_thinking";
 const CLAUDE_TOOL_RESULT_SOURCE_MARKER: &str = "claude_tool_result";
 const OPENAI_CHAT_TOOL_RESULT_SOURCE_MARKER: &str = "openai_chat_tool_result";
 const OPENAI_RESPONSES_TOOL_RESULT_SOURCE_MARKER: &str = "openai_responses_tool_result";
@@ -1052,7 +1055,7 @@ pub(crate) fn claude_system_to_canonical_instructions(
                 Some(vec![CanonicalInstruction {
                     role: CanonicalRole::System,
                     text,
-                    extensions: BTreeMap::new(),
+                    extensions: claude_system_instruction_extensions(BTreeMap::new()),
                 }])
             }
         }
@@ -1071,7 +1074,10 @@ pub(crate) fn claude_system_to_canonical_instructions(
                     instructions.push(CanonicalInstruction {
                         role: CanonicalRole::System,
                         text: strip_claude_billing_header(text),
-                        extensions: claude_extensions(block, &["type", "text"]),
+                        extensions: claude_system_instruction_extensions(claude_extensions(
+                            block,
+                            &["type", "text"],
+                        )),
                     });
                 }
             }
@@ -1079,6 +1085,40 @@ pub(crate) fn claude_system_to_canonical_instructions(
         }
         _ => None,
     }
+}
+
+fn claude_system_instruction_extensions(
+    mut extensions: BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    canonical_extension_object_mut(&mut extensions, AETHER_EXTENSION_NAMESPACE).insert(
+        "source".to_string(),
+        Value::String(CLAUDE_SYSTEM_SOURCE_MARKER.to_string()),
+    );
+    extensions
+}
+
+pub(crate) fn mark_claude_messages_request_source(extensions: &mut BTreeMap<String, Value>) {
+    canonical_extension_object_mut(extensions, AETHER_EXTENSION_NAMESPACE).insert(
+        "source".to_string(),
+        Value::String(CLAUDE_MESSAGES_REQUEST_SOURCE_MARKER.to_string()),
+    );
+}
+
+pub(crate) fn is_claude_messages_request(extensions: &BTreeMap<String, Value>) -> bool {
+    extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(CLAUDE_MESSAGES_REQUEST_SOURCE_MARKER)
+}
+
+pub(crate) fn is_claude_system_instruction(instruction: &CanonicalInstruction) -> bool {
+    instruction
+        .extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(CLAUDE_SYSTEM_SOURCE_MARKER)
 }
 
 pub(crate) fn claude_messages_to_canonical(
@@ -1174,7 +1214,10 @@ pub(crate) fn claude_block_to_canonical_block(block: &Value) -> Option<Canonical
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned),
             encrypted_content: None,
-            extensions: claude_extensions(block_object, &["type", "thinking", "text", "signature"]),
+            extensions: claude_thinking_extensions(claude_extensions(
+                block_object,
+                &["type", "thinking", "text", "signature"],
+            )),
         }),
         "redacted_thinking" => Some(CanonicalContentBlock::Thinking {
             text: String::new(),
@@ -1183,7 +1226,10 @@ pub(crate) fn claude_block_to_canonical_block(block: &Value) -> Option<Canonical
                 .get("data")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
-            extensions: claude_extensions(block_object, &["type", "data"]),
+            extensions: claude_thinking_extensions(claude_extensions(
+                block_object,
+                &["type", "data"],
+            )),
         }),
         "image" => claude_media_block_to_canonical(block_object, true),
         "document" => claude_media_block_to_canonical(block_object, false),
@@ -2544,6 +2590,22 @@ fn canonical_tool_result_to_openai_chat(block: &CanonicalContentBlock) -> Value 
     };
     output.insert("content".to_string(), content);
     Value::Object(output)
+}
+
+fn claude_thinking_extensions(mut extensions: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    canonical_extension_object_mut(&mut extensions, AETHER_EXTENSION_NAMESPACE).insert(
+        "source".to_string(),
+        Value::String(CLAUDE_THINKING_SOURCE_MARKER.to_string()),
+    );
+    extensions
+}
+
+pub(crate) fn is_claude_thinking_block(extensions: &BTreeMap<String, Value>) -> bool {
+    extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(CLAUDE_THINKING_SOURCE_MARKER)
 }
 
 pub(crate) fn is_claude_tool_result(extensions: &BTreeMap<String, Value>) -> bool {
@@ -4108,7 +4170,9 @@ pub(crate) fn canonical_block_to_claude(
                     extensions,
                 ),
             );
-            out.insert("is_error".to_string(), Value::Bool(*is_error));
+            if *is_error {
+                out.insert("is_error".to_string(), Value::Bool(true));
+            }
             out.extend(namespace_extension_object(extensions, "claude", &out));
             Some(Some(Value::Object(out)))
         }
