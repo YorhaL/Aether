@@ -30,8 +30,9 @@ use crate::formats::shared::response::{
 };
 use crate::formats::shared::stream_core::common::{
     content_part_from_openai_image_generation_item, gemini_usage_metadata_from_usage,
-    map_openai_finish_reason_to_gemini, parse_json_arguments_value, CanonicalContentPart,
-    CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
+    map_openai_finish_reason_to_gemini, parse_json_arguments_value,
+    unsupported_stream_event_message, CanonicalContentPart, CanonicalStreamEvent,
+    CanonicalStreamFrame, CanonicalUsage,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1583,11 +1584,11 @@ fn ensure_no_unknown_provider_stream_events(
     };
     for raw_line in text.lines() {
         let frames = push_line(raw_line.as_bytes().to_vec())?;
-        if frames
-            .iter()
-            .any(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent(_)))
-        {
-            return Err(unsupported_stream_event_finalize_error());
+        if let Some(payload) = frames.iter().find_map(|frame| match &frame.event {
+            CanonicalStreamEvent::UnknownEvent(payload) => Some(payload),
+            _ => None,
+        }) {
+            return Err(unsupported_stream_event_finalize_error(payload));
         }
     }
     Ok(())
@@ -3046,8 +3047,8 @@ fn try_aggregate_gemini_stream_sync_response(
                         content,
                     ));
                 }
-                CanonicalStreamEvent::UnknownEvent(_) => {
-                    return Err(unsupported_stream_event_finalize_error())
+                CanonicalStreamEvent::UnknownEvent(payload) => {
+                    return Err(unsupported_stream_event_finalize_error(&payload))
                 }
                 CanonicalStreamEvent::ReasoningSummaryDone => {}
                 CanonicalStreamEvent::Finish {
@@ -3076,8 +3077,8 @@ fn try_aggregate_gemini_stream_sync_response(
             model_version = Some(Value::String(frame.model.clone()));
         }
         match frame.event {
-            CanonicalStreamEvent::UnknownEvent(_) => {
-                return Err(unsupported_stream_event_finalize_error())
+            CanonicalStreamEvent::UnknownEvent(payload) => {
+                return Err(unsupported_stream_event_finalize_error(&payload))
             }
             CanonicalStreamEvent::Finish {
                 finish_reason: frame_finish_reason,
@@ -3140,8 +3141,8 @@ fn try_aggregate_gemini_stream_sync_response(
     Ok(Some(Value::Object(response)))
 }
 
-fn unsupported_stream_event_finalize_error() -> AiSurfaceFinalizeError {
-    AiSurfaceFinalizeError::new("Unsupported provider stream event cannot be converted losslessly")
+fn unsupported_stream_event_finalize_error(payload: &Value) -> AiSurfaceFinalizeError {
+    AiSurfaceFinalizeError::new(unsupported_stream_event_message(payload))
 }
 
 fn append_gemini_text_part(parts: &mut Vec<Value>, text: String, thought: bool) {
@@ -3608,6 +3609,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Unsupported provider stream event cannot be converted losslessly"));
+        assert!(error
+            .to_string()
+            .contains("field $.futurePart is unsupported"));
     }
 
     #[test]
@@ -5140,6 +5144,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Unsupported provider stream event cannot be converted losslessly"));
+        assert!(error
+            .to_string()
+            .contains("field $.type = \"future_event\""));
     }
 
     #[test]
@@ -5175,6 +5182,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Unsupported provider stream event cannot be converted losslessly"));
+        assert!(error
+            .to_string()
+            .contains("field $.type = \"response.future.delta\""));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::formats::shared::error_body::{
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::common::{
     decode_json_data_line, openai_stream_terminal_error_body, openai_stream_terminal_error_message,
-    CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
+    unsupported_stream_event_message, CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
 };
 use crate::formats::shared::AiSurfaceFinalizeError;
 
@@ -95,9 +95,9 @@ impl StreamingStandardFormatMatrix {
                     break;
                 }
             }
-            if matches!(&frame.event, CanonicalStreamEvent::UnknownEvent(_)) {
+            if let CanonicalStreamEvent::UnknownEvent(payload) = &frame.event {
                 self.terminated = true;
-                out.extend(client.emit_unknown_event()?);
+                out.extend(client.emit_unknown_event(payload)?);
                 break;
             }
             out.extend(client.emit(frame)?);
@@ -403,10 +403,10 @@ impl ClientStreamEmitter {
         }
     }
 
-    fn emit_unknown_event(&mut self) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    fn emit_unknown_event(&mut self, payload: &Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         let Some(error_body) = build_core_error_body_for_client_format(
             self.api_format(),
-            "Unsupported provider stream event cannot be converted losslessly",
+            &unsupported_stream_event_message(payload),
             Some("unsupported_stream_event"),
             LocalCoreSyncErrorKind::ServerError,
         ) else {
@@ -422,7 +422,8 @@ impl ClientStreamEmitter {
         let Some(error_body) = build_core_error_body_for_client_format(
             self.api_format(),
             &format!(
-                "Unsupported provider stream finish reason {finish_reason:?} cannot be converted losslessly"
+                "Unsupported provider stream finish reason cannot be converted losslessly: field $.finish_reason = {}",
+                serde_json::json!(finish_reason)
             ),
             Some("unsupported_finish_reason"),
             LocalCoreSyncErrorKind::ServerError,
@@ -962,6 +963,10 @@ mod tests {
                 sse.contains("Unsupported provider stream event cannot be converted losslessly"),
                 "{client_api_format}: {sse}"
             );
+            assert!(
+                sse.contains("field $.type = \\\"response.future.delta\\\""),
+                "{sse}"
+            );
             assert!(sse.contains(marker), "{client_api_format}: {sse}");
             assert!(matrix
                 .finish(&report_context)
@@ -1212,6 +1217,10 @@ mod tests {
                 sse.contains("Unsupported provider stream finish reason"),
                 "{client_api_format}: {sse}"
             );
+            assert!(
+                sse.contains("field $.finish_reason = \\\"future_reason\\\""),
+                "{client_api_format}: {sse}"
+            );
             assert!(sse.contains("future_reason"), "{client_api_format}: {sse}");
             assert!(sse.contains(marker), "{client_api_format}: {sse}");
             assert!(matrix
@@ -1276,6 +1285,10 @@ mod tests {
             assert!(sse.contains(prefix), "{client_api_format}: {sse}");
             assert!(
                 sse.contains("Unsupported provider stream finish reason"),
+                "{client_api_format}: {sse}"
+            );
+            assert!(
+                sse.contains("field $.finish_reason = \\\"OTHER\\\""),
                 "{client_api_format}: {sse}"
             );
             assert!(sse.contains("OTHER"), "{client_api_format}: {sse}");

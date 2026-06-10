@@ -83,15 +83,6 @@ pub(super) async fn maybe_build_local_openai_image_decision_payload_for_candidat
             "chatgpt_web_image".to_string(),
             serde_json::Value::Bool(true),
         );
-        extra_fields.insert(
-            "local_failover_policy".to_string(),
-            serde_json::json!({
-                "stop_status_codes": [400, 401, 403, 429, 500, 502, 503, 504],
-                "error_stop_patterns": [
-                    { "pattern": ".*" }
-                ]
-            }),
-        );
     }
     let upstream_is_stream = resolved
         .provider_request_body

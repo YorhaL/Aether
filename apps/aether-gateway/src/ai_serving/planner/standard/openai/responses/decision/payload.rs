@@ -102,15 +102,6 @@ pub(crate) async fn maybe_build_local_openai_responses_decision_payload_for_cand
             .eq_ignore_ascii_case("chatgpt_web")
     {
         extra_fields.insert("chatgpt_web_image".to_string(), json!(true));
-        extra_fields.insert(
-            "local_failover_policy".to_string(),
-            json!({
-                "stop_status_codes": [400, 401, 403, 429, 500, 502, 503, 504],
-                "error_stop_patterns": [
-                    { "pattern": ".*" }
-                ]
-            }),
-        );
     }
     insert_provider_stream_event_api_format(
         &mut extra_fields,

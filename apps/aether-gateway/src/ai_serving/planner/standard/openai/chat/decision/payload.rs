@@ -105,15 +105,6 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
             .eq_ignore_ascii_case("chatgpt_web")
     {
         extra_fields.insert("chatgpt_web_image".to_string(), serde_json::json!(true));
-        extra_fields.insert(
-            "local_failover_policy".to_string(),
-            serde_json::json!({
-                "stop_status_codes": [400, 401, 403, 429, 500, 502, 503, 504],
-                "error_stop_patterns": [
-                    { "pattern": ".*" }
-                ]
-            }),
-        );
     }
     let super::request::LocalOpenAiChatCandidatePayloadParts {
         client_api_format,
